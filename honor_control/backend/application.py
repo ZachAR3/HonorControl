@@ -123,6 +123,7 @@ class ApplicationService:
         self._manual_ttl_seconds = 0
         self._last_auto_script_status = "Not run"
         self._last_applied_power_profile = ""
+        self._pending_power_task: asyncio.Task[None] | None = None
         self._supervisor.register(
             "manual_fan_ttl", self._manual_fan_expiry, self._restore_fan_auto
         )
@@ -154,13 +155,13 @@ class ApplicationService:
     async def initialize(self) -> None:
         """Load config, detect platform, probe capabilities, publish initial snapshot.
 
-        After publishing the initial snapshot, reconcile the desired power
-        profile with hardware.  Without this, a service restart leaves the
-        hardware in whatever state the kernel/PPD defaulted to (typically
-        balanced), even though the persisted desired profile is performance.
+        After publishing the initial snapshot, stop competing power daemons
+        (PPD, intel_lpmd) that continuously overwrite RAPL limits, then
+        reconcile the desired power profile with hardware.
         """
         self._config.load()
         await self._refresh_all()
+        await self._queue.run("stop_daemons", self._hw.stop_competing_power_daemons)
         await self._reconcile_power_profile()
 
     async def start_background(self) -> None:
@@ -179,6 +180,8 @@ class ApplicationService:
 
     async def shutdown(self) -> None:
         """Stop all controllers, shut down the command queue."""
+        if self._pending_power_task is not None and not self._pending_power_task.done():
+            self._pending_power_task.cancel()
         await self._supervisor.stop_all()
         self._queue.shutdown(wait=False)
 
@@ -361,11 +364,13 @@ class ApplicationService:
                     )
                 )
             await self._refresh_power()
-            # Schedule a non-blocking EPP re-write after a short delay.
-            # PPD asynchronously overwrites EPP after powerprofilesctl set;
-            # re-writing EPP (with read-back) after 0.5s makes our value
-            # stick by causing PPD's competing write to get EBUSY.
-            asyncio.ensure_future(self._delayed_epp_rewrite(profile))
+            # Schedule a non-blocking re-write of RAPL MSR and EPP after
+            # a short delay.  PPD asynchronously overwrites both after
+            # powerprofilesctl set; re-writing after 0.5s makes our values
+            # stick.  The task reference is held to prevent GC.
+            self._pending_power_task = asyncio.ensure_future(
+                self._delayed_power_rewrite(profile)
+            )
             return OperationResult.success(
                 message=f"Profile '{name}' applied",
                 changed=True,
@@ -383,10 +388,10 @@ class ApplicationService:
             details=result,
         )
 
-    async def _delayed_epp_rewrite(self, profile: PowerProfileState) -> None:
-        """Re-write EPP and RAPL after PPD's async overwrite (non-blocking).
+    async def _delayed_power_rewrite(self, profile: PowerProfileState) -> None:
+        """Re-write RAPL MSR and EPP after PPD's async overwrite (non-blocking).
 
-        PPD asynchronously overwrites both EPP and RAPL power limits
+        PPD asynchronously overwrites both RAPL power limits and EPP
         after ``powerprofilesctl set`` returns.  Waiting 0.5s and then
         re-writing them makes our values stick:
 
