@@ -74,6 +74,9 @@ class HardwarePort(Protocol):
     def apply_power_profile(
         self, profile: str, definition: dict[str, Any] | None = None
     ) -> dict[str, Any]: ...
+    def rewrite_epp(self, epp: str, governor: str) -> bool: ...
+    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool: ...
+    def stop_competing_power_daemons(self) -> None: ...
 
     # -- Fan --
     def read_fan(self) -> FanSnapshot: ...
@@ -240,6 +243,17 @@ class FakeHardware:
             "rapl_ok": True,
             "misc_ok": True,
         }
+
+    def rewrite_epp(self, epp: str, governor: str) -> bool:
+        self._log("rewrite_epp", epp, governor)
+        return True
+
+    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool:
+        self._log("write_rapl_msr", pl1_uw, pl2_uw)
+        return True
+
+    def stop_competing_power_daemons(self) -> None:
+        self._log("stop_competing_power_daemons")
 
     # -- Fan --
 
@@ -811,6 +825,14 @@ class HonorToolsAdapter:
                     turbo_enabled=bool(definition["turbo_enabled"]),
                     max_perf_pct=int(definition["max_perf_pct"]),
                 )
+
+            # Stop competing power daemons that continuously overwrite
+            # RAPL limits.  power-profiles-daemon (PPD) and intel_lpmd
+            # (Intel Linux Energy Optimizer) both periodically write their
+            # own PL1/PL2 values to the RAPL MSR and sysfs, clobbering
+            # our values within ~1 second of applying a profile.
+            self._stop_competing_power_daemons()
+
             raw = apply_profile(profile, cfg)
 
             def _all_true(value: Any) -> bool:
@@ -829,6 +851,223 @@ class HonorToolsAdapter:
             }
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
+
+    @staticmethod
+    def _stop_competing_power_daemons() -> None:
+        """Stop and disable PPD and intel_lpmd so they don't overwrite RAPL.
+
+        Both daemons continuously write their own PL1/PL2 values to the
+        RAPL MSR, clobbering our values within ~1 second.  Stopping and
+        disabling them ensures our RAPL limits stick and survive reboots.
+
+        Also enables HWP dynamic boost, which allows the CPU to boost
+        aggressively within the RAPL envelope.  Without this, the CPU
+        stays conservative on power draw even when PL1 is set high.
+
+        This is best-effort: if the daemons aren't installed or aren't
+        running, the systemctl calls are silently ignored.
+        """
+        import pathlib
+        import subprocess
+
+        for daemon in ("power-profiles-daemon", "intel_lpmd"):
+            try:
+                subprocess.run(
+                    ["systemctl", "stop", daemon],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+                subprocess.run(
+                    ["systemctl", "disable", daemon],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+        # Enable HWP dynamic boost so the CPU uses the full RAPL envelope.
+        hwp_path = pathlib.Path(
+            "/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost"
+        )
+        if hwp_path.exists():
+            try:
+                hwp_path.write_text("1", encoding="utf-8")
+            except OSError:
+                pass
+
+    def rewrite_epp(self, epp: str, governor: str) -> bool:
+        """Re-write EPP and RAPL after PPD's asynchronous overwrite.
+
+        Returns True if all writes succeeded.
+
+        PPD asynchronously overwrites both EPP and RAPL power limits
+        after ``powerprofilesctl set`` returns.  The honor-tools library
+        writes via sysfs before PPD's background update lands, so our
+        values get clobbered.  This method re-writes them after PPD's
+        update, using two techniques:
+
+        1. **MSR RAPL write:** sysfs writes go through the kernel's
+           intel-rapl driver, but PPD overwrites the underlying MSR.
+           Writing the MSR directly (0x610) bypasses both the sysfs
+           cache and PPD's sysfs-based overwrite, so our PL1/PL2 values
+           stick.
+
+        2. **EPP read-back:** an EPP sysfs write does not reliably commit
+           to hardware unless immediately followed by a read of the same
+           file.  The read-back flushes the write into intel_pstate,
+           causing PPD's competing write to get EBUSY and fail.
+
+        3. **Governor guard:** intel_pstate rejects EPP writes when the
+           governor is ``performance``, and setting the governor back to
+           ``performance`` after the EPP write resets EPP to
+           ``default``.  So when the requested governor is
+           ``performance`` we leave it at ``powersave`` — EPP is the
+           primary performance control on modern Intel CPUs.
+        """
+        import glob
+        import pathlib
+        import time
+
+        cpu_dirs = sorted(
+            p
+            for p in glob.glob("/sys/devices/system/cpu/cpu[0-9]*")
+            if pathlib.Path(p).name[3:].isdigit()
+        )
+        # Re-write RAPL limits directly to the MSR, bypassing PPD's
+        # sysfs-based overwrite.
+        # (Called separately by the application service via write_rapl_msr)
+        # Flip to powersave so EPP is writable.
+        for cpu in cpu_dirs:
+            self._write_sysfs(f"{cpu}/cpufreq/scaling_governor", "powersave")
+        # Write EPP with read-back + retries.  The read-back commits the
+        # write into intel_pstate so PPD's async overwrite gets EBUSY.
+        all_ok = True
+        for cpu in cpu_dirs:
+            path = f"{cpu}/cpufreq/energy_performance_preference"
+            ok = False
+            for _attempt in range(5):
+                if self._write_sysfs(path, epp):
+                    # Read back immediately — this is what makes the write
+                    # stick by flushing it into the driver.
+                    try:
+                        pathlib.Path(path).read_text(encoding="utf-8")
+                    except OSError:
+                        pass
+                    ok = True
+                    break
+                time.sleep(0.1)
+            if not ok:
+                log.warning("EPP re-write failed for %s", path)
+                all_ok = False
+        # Restore the governor only when it won't reset EPP.
+        if governor != "performance":
+            for cpu in cpu_dirs:
+                self._write_sysfs(f"{cpu}/cpufreq/scaling_governor", governor)
+        else:
+            log.info(
+                "keeping governor=powersave to preserve EPP=%s "
+                "(performance governor would reset EPP to default)",
+                epp,
+            )
+        return all_ok
+
+    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool:
+        """Write PL1/PL2 directly to the RAPL MSR (0x610).
+
+        PPD overwrites RAPL limits via sysfs after ``powerprofilesctl set``,
+        and the sysfs driver caches the write without actually reaching the
+        MSR.  Writing the MSR directly bypasses both layers so our values
+        stick.
+        """
+        return self._write_rapl_msr(pl1_uw, pl2_uw)
+
+    @staticmethod
+    def _write_rapl_msr(pl1_uw: int, pl2_uw: int) -> bool:
+        """Write PL1/PL2 to MSR 0x610 on all CPUs.
+
+        Reads the power unit from MSR 0x606 to convert microwatts to MSR
+        units, preserves existing time windows and enabled/clamp bits, and
+        writes to every online CPU's MSR.
+        """
+        import os
+        import struct
+
+        MSR_RAPL_POWER_UNIT = 0x606
+        MSR_PKG_POWER_LIMIT = 0x610
+
+        try:
+            # Read power units from CPU 0.
+            fd = os.open("/dev/cpu/0/msr", os.O_RDONLY)
+            os.lseek(fd, MSR_RAPL_POWER_UNIT, os.SEEK_SET)
+            units_val = struct.unpack("<Q", os.read(fd, 8))[0]
+            os.close(fd)
+            power_unit = units_val & 0xF
+            watts_per_unit = 1.0 / (2**power_unit)
+            pl1_units = int(round(pl1_uw / 1_000_000 / watts_per_unit))
+            pl2_units = int(round(pl2_uw / 1_000_000 / watts_per_unit))
+
+            # Read current PKG_POWER_LIMIT to preserve time windows.
+            fd = os.open("/dev/cpu/0/msr", os.O_RDONLY)
+            os.lseek(fd, MSR_PKG_POWER_LIMIT, os.SEEK_SET)
+            old = struct.unpack("<Q", os.read(fd, 8))[0]
+            os.close(fd)
+            tw1 = (old >> 17) & 0x7F
+            tw2 = (old >> 49) & 0x7F
+
+            # Build new value: PL1 + enabled + clamp + time window, PL2 same.
+            lo = (
+                pl1_units
+                | (1 << 15)  # PL1 enabled
+                | (1 << 16)  # PL1 clamp
+                | (tw1 << 17)
+            )
+            hi = (
+                pl2_units
+                | (1 << 47)  # PL2 enabled
+                | (tw2 << 49)
+            )
+            val = (lo | (hi << 32)) & 0xFFFFFFFFFFFFFFFF
+
+            # Write to all online CPUs.
+            import glob
+            import pathlib
+
+            cpu_dirs = sorted(
+                p
+                for p in glob.glob("/sys/devices/system/cpu/cpu[0-9]*")
+                if pathlib.Path(p).name[3:].isdigit()
+            )
+            for cpu in cpu_dirs:
+                msr_path = f"{cpu}/msr"
+                if not pathlib.Path(msr_path).exists():
+                    continue
+                fd = os.open(msr_path, os.O_WRONLY)
+                os.lseek(fd, MSR_PKG_POWER_LIMIT, os.SEEK_SET)
+                os.write(fd, struct.pack("<Q", val))
+                os.close(fd)
+            log.info(
+                "RAPL MSR written: PL1=%dW (%d units), PL2=%dW (%d units)",
+                pl1_uw // 1_000_000,
+                pl1_units,
+                pl2_uw // 1_000_000,
+                pl2_units,
+            )
+            return True
+        except OSError as exc:
+            log.warning("RAPL MSR write failed: %s", exc)
+            return False
+
+    def _write_sysfs(self, path: str, value: str) -> bool:
+        """Write a string to a sysfs path (root-owned, best-effort)."""
+        try:
+            pathlib.Path(path).write_text(value, encoding="utf-8")
+            return True
+        except OSError:
+            return False
 
     # -- Fan --
 

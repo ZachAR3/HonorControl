@@ -29,12 +29,14 @@ class PowerPage(PageBase):
     def _build(self) -> None:
         self._profiles: dict[str, PowerProfileEntry] = {}
         self._profile_dirty = False
+        self._active_combo_dirty = False
         self._auto_dirty = False
         self._loading = False
 
         active = Card("Active power profile")
         active_row = QHBoxLayout()
         self.active_combo = QComboBox()
+        self.active_combo.currentIndexChanged.connect(self._on_active_combo_changed)
         self.active_apply = QPushButton("Apply profile")
         self.active_apply.clicked.connect(
             lambda: self.intent.emit("set_profile", (self.active_combo.currentData(),))
@@ -243,9 +245,16 @@ class PowerPage(PageBase):
             self._select_data(self.edit_combo, edit_name or names[0])
             if not self._profile_dirty:
                 self._load_profile_editor()
-        self._select_data(
-            self.active_combo, snap.power.applied_profile or snap.power.desired_profile
-        )
+        # Update the active-profile combo from the snapshot, but only when
+        # the user hasn't manually changed it.  This prevents the 5-second
+        # refresh loop from snapping the combo back to the currently
+        # applied profile before the user can click "Apply profile".
+        active_selection = self.active_combo.currentData()
+        applied = snap.power.applied_profile or snap.power.desired_profile
+        if active_selection == applied:
+            self._active_combo_dirty = False
+        if not self._active_combo_dirty:
+            self._select_data(self.active_combo, applied)
         if self._auto_matches(snap):
             self._auto_dirty = False
         if not self._auto_dirty:
@@ -360,6 +369,11 @@ class PowerPage(PageBase):
         if not self._loading:
             self._profile_dirty = True
 
+    def _on_active_combo_changed(self, *_args) -> None:
+        """Track user selection so snapshots don't snap the combo back."""
+        if not self._loading:
+            self._active_combo_dirty = True
+
     def _save_profile(self) -> None:
         self.intent.emit(
             "save_power_profile",
@@ -379,7 +393,9 @@ class PowerPage(PageBase):
 
     def _reset_profile(self) -> None:
         name = str(self.edit_combo.currentData())
-        factory = next((profile for profile in POWER_PROFILES if profile.name == name), None)
+        factory = next(
+            (profile for profile in POWER_PROFILES if profile.name == name), None
+        )
         if factory is None:
             return
         self._loading = True

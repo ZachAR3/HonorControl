@@ -152,9 +152,16 @@ class ApplicationService:
     # -- Lifecycle --
 
     async def initialize(self) -> None:
-        """Load config, detect platform, probe capabilities, publish initial snapshot."""
+        """Load config, detect platform, probe capabilities, publish initial snapshot.
+
+        After publishing the initial snapshot, reconcile the desired power
+        profile with hardware.  Without this, a service restart leaves the
+        hardware in whatever state the kernel/PPD defaulted to (typically
+        balanced), even though the persisted desired profile is performance.
+        """
         self._config.load()
         await self._refresh_all()
+        await self._reconcile_power_profile()
 
     async def start_background(self) -> None:
         """Start service-owned monitors after initial state is published."""
@@ -354,6 +361,11 @@ class ApplicationService:
                     )
                 )
             await self._refresh_power()
+            # Schedule a non-blocking EPP re-write after a short delay.
+            # PPD asynchronously overwrites EPP after powerprofilesctl set;
+            # re-writing EPP (with read-back) after 0.5s makes our value
+            # stick by causing PPD's competing write to get EBUSY.
+            asyncio.ensure_future(self._delayed_epp_rewrite(profile))
             return OperationResult.success(
                 message=f"Profile '{name}' applied",
                 changed=True,
@@ -370,6 +382,38 @@ class ApplicationService:
             sequence=self._snapshots.sequence,
             details=result,
         )
+
+    async def _delayed_epp_rewrite(self, profile: PowerProfileState) -> None:
+        """Re-write EPP and RAPL after PPD's async overwrite (non-blocking).
+
+        PPD asynchronously overwrites both EPP and RAPL power limits
+        after ``powerprofilesctl set`` returns.  Waiting 0.5s and then
+        re-writing them makes our values stick:
+
+        * RAPL PL1/PL2 are written directly to the MSR (0x610), bypassing
+          both the sysfs cache and PPD's sysfs-based overwrite.
+        * EPP is re-written via sysfs with a read-back, which causes
+          PPD's competing write to get EBUSY.
+
+        This runs as a fire-and-forget task so it never blocks the apply
+        return or the command queue.
+        """
+        await asyncio.sleep(0.5)
+        try:
+            await self._queue.run(
+                "rapl_msr",
+                self._hw.write_rapl_msr,
+                profile.pl1_uw,
+                profile.pl2_uw,
+            )
+            await self._queue.run(
+                "epp_rewrite",
+                self._hw.rewrite_epp,
+                profile.epp,
+                profile.governor,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("delayed power re-write failed: %s", exc)
 
     @_serialized_mutation
     async def set_auto_switch(self, enabled: bool) -> OperationResult:
@@ -960,6 +1004,40 @@ class ApplicationService:
             return []
 
     # -- Refresh helpers --
+
+    async def _reconcile_power_profile(self) -> None:
+        """Re-apply the persisted desired power profile on startup.
+
+        Without this, a service restart (update, crash, reboot) leaves the
+        hardware at the kernel/PPD default (balanced) even though the user's
+        desired profile is e.g. performance.  The desired state is already
+        persisted in config, so ``persist_desired=False`` is passed to avoid
+        a redundant state write.  Failures are logged but never prevent
+        service startup.
+        """
+        desired = self._config.state.power.profile
+        if not desired:
+            return
+        cap = self._snapshots.snapshot.capabilities.get("power")
+        if cap is None or not cap.writable:
+            return
+        applied = self._snapshots.snapshot.power.applied_profile
+        if applied == desired:
+            return
+        log.info(
+            "reconciling power profile: desired=%s applied=%s",
+            desired,
+            applied or "(unknown)",
+        )
+        try:
+            async with self._mutation_lock:
+                result = await self._apply_power_profile(desired, persist_desired=False)
+            if result.applied:
+                log.info("power profile reconciled to '%s'", desired)
+            else:
+                log.warning("power profile reconciliation failed: %s", result.message)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("power profile reconciliation error: %s", exc)
 
     async def _refresh_all(self) -> None:
         """Refresh all domains and publish one snapshot."""
