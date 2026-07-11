@@ -1,0 +1,43 @@
+[Unit]
+Description=Honor Control D-Bus backend service
+Documentation=https://github.com/HonorLinux/honor-control
+After=dbus.service
+Wants=polkit.service
+
+[Service]
+Type=dbus
+BusName=org.honorlinux.Control1
+ExecStart=/usr/bin/honor-control-service
+ExecStopPost=-/usr/bin/honor-control-service --restore-fan-auto
+Restart=on-failure
+RestartSec=3
+# State and runtime directories (writable by the service).
+StateDirectory=honor-control
+StateDirectoryMode=0750
+RuntimeDirectory=honor-control
+RuntimeDirectoryMode=0750
+# Hardening: no home access, strict filesystem, private tmp.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+# Bounded stop timeout.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "honor-control"
+version = "0.2.0.dev0"
+description = "D-Bus service and Qt6 GUI for managing Honor MagicBook laptops on Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "ZachAR3" }]
+keywords = ["honor", "magicbook", "linux", "dbus", "kde", "power-management"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+
+# Core/service: sdbus + honor-tools.
+# GUI/tray: PySide6 (optional).
+# dbus-python is removed — all clients use sdbus.
+dependencies = [
+    "sdbus>=0.14,<0.15",
+    "honor-tools>=0.1,<0.2",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+dev = ["ruff", "pytest", "pytest-asyncio", "build"]
+
+[project.scripts]
+# Root backend service (runs under systemd as root).
+honor-control-service = "honor_control.backend.service:main"
+# Unprivileged CLI / GUI / tray entry points.
+honorctl = "honor_control.cli.honorctl:main"
+honor-control-gui = "honor_control.frontend.gui.app:main"
+honor-control-tray = "honor_control.frontend.tray.tray:main"
+
+[tool.setuptools.packages.find]
+include = ["honor_control*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

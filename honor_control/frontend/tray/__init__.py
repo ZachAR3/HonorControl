@@ -1,0 +1,1 @@
+"""System-tray frontend (QSystemTrayIcon)."""

@@ -1,0 +1,12 @@
+# D-Bus system-bus service activation file.
+# When a client calls a method on org.honorlinux.Control1 and nothing owns
+# the name yet, dbus-daemon starts this service via systemd (SystemdService)
+# rather than spawning a new process — so there is exactly one instance.
+
+[D-BUS Service]
+Name=org.honorlinux.Control1
+# systemd owns the lifecycle; no direct Exec here to avoid duplicate forks.
+SystemdService=honor-control.service
+# Fallback direct exec (used when systemd activation is unavailable):
+Exec=/usr/bin/honor-control-service
+User=root

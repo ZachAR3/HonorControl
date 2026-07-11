@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reverse engineering working data (large logs, disassembly dumps, duplicates)
+Reverse engineering/capture_logs/
+Reverse engineering/honor_drivers/
+
+# Generated repo map (local reference, not tracked)
+REPO_MAP.md

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  polkit actions for org.honorlinux.control.
+
+  Two tiers:
+    * "active local user" actions — low-risk writes (charge limit, power
+      profile, gesture mappings, debug bundle export).
+    * "admin auth" actions — EC / firmware writes, power definitions and
+      root transition hooks, GPU IRQ, config reload, restricted logs.
+-->
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<policyconfig>
+
+  <vendor>HonorLinux</vendor>
+  <vendor_url>https://github.com/HonorLinux/honor-control</vendor_url>
+
+  <!-- Charge limit (sysfs write, low-risk) — active local user -->
+  <action id="org.honorlinux.control.set-charge-limit">
+    <description>Set the battery charge limit / charge mode</description>
+    <message>Authentication is required to change the battery charge limit.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Power definitions and root transition hooks — admin auth -->
+  <action id="org.honorlinux.control.configure-power">
+    <description>Configure power profiles and automatic transition hooks</description>
+    <message>Administrator authentication is required to configure system power profiles and scripts.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Power profile (RAPL/governor/EPP/PPD) — active local user -->
+  <action id="org.honorlinux.control.set-power-profile">
+    <description>Switch the CPU power profile</description>
+    <message>Authentication is required to change the power profile.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Gesture mappings (config file only) — active local user -->
+  <action id="org.honorlinux.control.set-gestures">
+    <description>Edit touchpad gesture mappings</description>
+    <message>Authentication is required to edit gesture mappings.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Debug bundle export (reads config + sensors; local user) -->
+  <action id="org.honorlinux.control.export-debug">
+    <description>Export a hardware debug bundle</description>
+    <message>Authentication is required to export a debug bundle.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Service journal may contain privileged hardware details — admin auth -->
+  <action id="org.honorlinux.control.view-logs">
+    <description>View recent Honor Control service logs</description>
+    <message>Administrator authentication is required to view service logs.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Fan curve (EC write via acpi_call — admin auth) -->
+  <action id="org.honorlinux.control.set-fan-curve">
+    <description>Set the fan control curve (EC write)</description>
+    <message>Administrator authentication is required to change the fan curve.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- GPU IRQ fix (/proc/irq + cpuidle writes — admin auth) -->
+  <action id="org.honorlinux.control.set-gpu-irq">
+    <description>Apply the GPU IRQ pinning and C-state fix</description>
+    <message>Administrator authentication is required to pin GPU IRQs and disable deep C-states.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Config reload (admin auth) -->
+  <action id="org.honorlinux.control.reload-config">
+    <description>Reload the Honor Control configuration</description>
+    <message>Administrator authentication is required to reload configuration.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

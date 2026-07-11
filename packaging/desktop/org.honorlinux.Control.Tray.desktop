@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Honor Control Tray
+GenericName=Laptop Control Indicator
+Comment=System tray indicator for Honor MagicBook management
+Exec=honor-control-tray
+TryExec=honor-control-tray
+Icon=preferences-system
+Terminal=false
+Categories=System;Qt;
+Keywords=honor;magicbook;tray;
+StartupNotify=false
+OnlyShowIn=KDE;GNOME;XFCE;LXQt;
+NoDisplay=true
