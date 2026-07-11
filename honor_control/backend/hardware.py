@@ -841,8 +841,7 @@ class HonorToolsAdapter:
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
 
-    @staticmethod
-    def stop_competing_power_daemons() -> None:
+    def stop_competing_power_daemons(self) -> None:
         """Stop and mask PPD and intel_lpmd so they don't overwrite RAPL.
 
         Both daemons continuously write their own PL1/PL2 values to the
@@ -852,6 +851,9 @@ class HonorToolsAdapter:
         Also enables HWP dynamic boost, which allows the CPU to boost
         aggressively within the RAPL envelope.
 
+        Only runs on detected Honor platforms — on other hardware, PPD
+        is the standard power manager and should not be touched.
+
         This should be called once during service initialization, not on
         every profile apply.  Masking (not disabling) is used because it
         prevents systemd from restarting the unit even if another service
@@ -860,6 +862,12 @@ class HonorToolsAdapter:
         Best-effort: if the daemons aren't installed, the calls are
         silently ignored.
         """
+        # Only stop daemons on detected Honor platforms.  On other
+        # hardware, PPD is the standard power manager and should be left
+        # alone.
+        if self._require_platform_or_none() is None:
+            return
+
         import pathlib
         import subprocess
 
@@ -877,6 +885,7 @@ class HonorToolsAdapter:
                     pass
 
         # Enable HWP dynamic boost so the CPU uses the full RAPL envelope.
+        # This path only exists on Intel systems with intel_pstate.
         hwp_path = pathlib.Path(
             "/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost"
         )
