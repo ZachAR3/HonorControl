@@ -318,7 +318,7 @@ class TestHonorToolsAdapterFilesystem:
         definition = {
             "pl1_uw": 35_000_000,
             "pl2_uw": 55_000_000,
-            "governor": "performance",
+            "governor": "powersave",
             "epp": "performance",
             "ppd_profile": "performance",
             "turbo_enabled": True,
@@ -339,6 +339,77 @@ class TestHonorToolsAdapterFilesystem:
         assert ppd["profile"] == "performance"
         assert all(verify_power_definition(result["observed"], definition).values())
         assert adapter.read_power().available is True
+
+    def test_power_apply_sets_powersave_before_ppd_transition(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
+        for cpu in adapter._power_cpu_dirs():  # noqa: SLF001
+            (cpu / "cpufreq/scaling_governor").write_text(
+                "performance", encoding="utf-8"
+            )
+        governors_seen_by_ppd: list[tuple[str, ...]] = []
+        original_set_ppd = adapter._set_ppd_profile  # noqa: SLF001
+
+        def set_ppd(profile: str) -> bool:
+            governors_seen_by_ppd.append(
+                tuple(
+                    (cpu / "cpufreq/scaling_governor").read_text(
+                        encoding="utf-8"
+                    ).strip()
+                    for cpu in adapter._power_cpu_dirs()  # noqa: SLF001
+                )
+            )
+            return original_set_ppd(profile)
+
+        monkeypatch.setattr(adapter, "_set_ppd_profile", set_ppd)
+        definition = {
+            "pl1_uw": 25_000_000,
+            "pl2_uw": 35_000_000,
+            "governor": "powersave",
+            "epp": "balance_power",
+            "ppd_profile": "balanced",
+            "turbo_enabled": True,
+            "max_perf_pct": 100,
+        }
+        result = adapter.apply_power_profile("balanced", definition)
+
+        assert result.get("error") is None
+        assert governors_seen_by_ppd == [("powersave", "powersave")]
+        assert result["ppd_ok"] is True
+
+    def test_power_apply_reports_epp_conflict_with_performance_governor(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
+        original_write = adapter._write_text_verified  # noqa: SLF001
+
+        def reject_epp_in_performance_governor(path, value):
+            if path.name == "energy_performance_preference":
+                governor = path.parent.joinpath("scaling_governor").read_text(
+                    encoding="utf-8"
+                ).strip()
+                if governor == "performance":
+                    return False
+            return original_write(path, value)
+
+        monkeypatch.setattr(
+            adapter, "_write_text_verified", reject_epp_in_performance_governor
+        )
+        definition = {
+            "pl1_uw": 35_000_000,
+            "pl2_uw": 55_000_000,
+            "governor": "performance",
+            "epp": "performance",
+            "ppd_profile": "performance",
+            "turbo_enabled": True,
+            "max_perf_pct": 100,
+        }
+
+        result = adapter.apply_power_profile("performance", definition)
+
+        assert result["governor_ok"] is True
+        assert result["epp_ok"] is False
 
     def test_power_apply_reports_readback_mismatch(self, tmp_path, monkeypatch) -> None:
         adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
@@ -363,7 +434,7 @@ class TestHonorToolsAdapterFilesystem:
         assert result["epp_ok"] is False
         assert result["rapl_ok"] is True
 
-    def test_ppd_failure_aborts_direct_power_writes(
+    def test_ppd_failure_aborts_profile_power_writes(
         self, tmp_path, monkeypatch
     ) -> None:
         adapter, ppd = _make_power_adapter(tmp_path, monkeypatch)
@@ -379,7 +450,8 @@ class TestHonorToolsAdapterFilesystem:
         }
         result = adapter.apply_power_profile("silent", definition)
         assert result["ppd_ok"] is False
-        assert result["writes"] == {"ppd": False}
+        assert result["writes"]["ppd"] is False
+        assert all(result["writes"]["governor_pre"].values())
         assert (
             tmp_path / "sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"
         ).read_text(encoding="utf-8") == "25000000"

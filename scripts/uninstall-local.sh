@@ -2,8 +2,9 @@
 # Remove all honor-control system files installed by install-local.sh.
 #
 # Stops the service, removes symlinks, system packaging files, and the
-# dedicated venv.  Does NOT remove /var/lib/honor-control (state data)
-# unless --purge is passed.
+# dedicated venv.  It does NOT remove /var/lib/honor-control (state data)
+# unless --purge is passed, and does not restore honor-tools' legacy power
+# udev hook, which conflicts with PPD.
 #
 # Usage:
 #   sudo bash scripts/uninstall-local.sh             # keep state

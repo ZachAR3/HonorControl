@@ -98,6 +98,11 @@ sudo bash scripts/install-local.sh
 sudo systemctl enable --now honor-control.service
 ```
 
+The installer removes the stock `honor-tools` power-supply udev hook because
+it directly rewrites CPU EPP after calling `powerprofilesctl`, which conflicts
+with KDE's power-profiles-daemon slider. Honor Control owns AC/battery
+switching instead; PPD remains enabled for KDE.
+
 To uninstall:
 
 ```bash

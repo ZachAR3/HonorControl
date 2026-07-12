@@ -29,6 +29,11 @@ from honor_control.core.models import SystemSnapshot
 
 log = logging.getLogger("honor_control.frontend.gui.controller")
 
+# Profile saves/applies include PPD settling, sysfs readback, and serialized
+# hardware work.  Keep the frontend deadline above the backend's normal
+# operation time so a completed operation is not reported as a GUI timeout.
+GUI_DBUS_TIMEOUT_SECONDS = 15.0
+
 
 class GuiWorker(QThread):
     """Background worker thread running the asyncio loop and client.
@@ -42,7 +47,11 @@ class GuiWorker(QThread):
     error = Signal(str)  # error message
     operation_result = Signal(str, object)  # operation_id, OperationResult
 
-    def __init__(self, bus_kind: str = "system", timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        bus_kind: str = "system",
+        timeout: float = GUI_DBUS_TIMEOUT_SECONDS,
+    ) -> None:
         super().__init__()
         self._bus_kind = bus_kind
         self._timeout = timeout
@@ -180,7 +189,11 @@ class GuiController(QObject):
     operation_completed = Signal(str, object)  # operation_id, OperationResult
     error = Signal(str)  # error message
 
-    def __init__(self, bus_kind: str = "system", timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        bus_kind: str = "system",
+        timeout: float = GUI_DBUS_TIMEOUT_SECONDS,
+    ) -> None:
         super().__init__()
         self._worker = GuiWorker(bus_kind=bus_kind, timeout=timeout)
         self._worker.snapshot_ready.connect(self._on_snapshot)

@@ -1118,19 +1118,10 @@ class HonorToolsAdapter:
                     "error": capability.message or "Power control is unavailable",
                     "reason_code": capability.reason_code,
                 }
-            ppd_write_ok = self._set_ppd_profile(normalized["ppd_profile"])
-            if not ppd_write_ok:
-                observed = self._read_power_status()
-                return {
-                    "profile": profile,
-                    "writes": {"ppd": False},
-                    "observed": observed,
-                    **verify_power_definition(observed, normalized),
-                }
 
-            # Let PPD finish its profile transition before applying the
-            # definition-specific sysfs values that are verified below.
-            time.sleep(PPD_SETTLE_SECONDS)
+            # intel_pstate rejects EPP changes while the performance governor
+            # is active.  Move every policy to powersave before asking PPD to
+            # transition; PPD must write EPP as part of that transition.
             cpu_dirs = self._power_cpu_dirs()
             governor_pre = {
                 cpu.name[3:]: self._write_text_verified(
@@ -1138,6 +1129,24 @@ class HonorToolsAdapter:
                 )
                 for cpu in cpu_dirs
             }
+            ppd_write_ok = self._set_ppd_profile(normalized["ppd_profile"])
+            if not ppd_write_ok:
+                observed = self._read_power_status()
+                return {
+                    "profile": profile,
+                    "writes": {"governor_pre": governor_pre, "ppd": False},
+                    "observed": observed,
+                    "governor_ok": _all_true(governor_pre)
+                    and verify_power_definition(observed, normalized)["governor_ok"],
+                    "epp_ok": False,
+                    "ppd_ok": False,
+                    "rapl_ok": False,
+                    "misc_ok": False,
+                }
+
+            # Let PPD finish its profile transition before applying the
+            # definition-specific sysfs values that are verified below.
+            time.sleep(PPD_SETTLE_SECONDS)
             rapl_writes = {
                 tree.name: {
                     _RAPL_LIMIT_FILES[0]: self._write_text_verified(
@@ -1149,13 +1158,16 @@ class HonorToolsAdapter:
                 }
                 for tree in self._rapl_trees()
             }
-            epp_writes = self._write_epp(normalized["epp"], cpu_dirs)
+            # Intel P-State may reset EPP when the final governor changes to
+            # performance.  Apply the governor first, then make EPP the last
+            # CPU-policy write so the verified value is the one that remains.
             governor_writes = {
                 cpu.name[3:]: self._write_text_verified(
                     cpu / "cpufreq/scaling_governor", normalized["governor"]
                 )
                 for cpu in cpu_dirs
             }
+            epp_writes = self._write_epp(normalized["epp"], cpu_dirs)
             misc_writes = {
                 "no_turbo": self._write_text_verified(
                     self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo"),

@@ -79,6 +79,23 @@ class TestGuiState:
         assert state.stale_domains == ("battery",)
 
 
+class TestGuiController:
+    """Verify frontend transport defaults cover profile operations."""
+
+    def test_gui_dbus_timeout_has_backend_margin(self, qapp) -> None:
+        from honor_control.frontend.gui.controller import (
+            GUI_DBUS_TIMEOUT_SECONDS,
+            GuiController,
+            GuiWorker,
+        )
+
+        worker = GuiWorker()
+        controller = GuiController()
+        assert GUI_DBUS_TIMEOUT_SECONDS == 15.0
+        assert worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
+        assert controller._worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
+
+
 class TestGuiPageConstruction:
     """Verify pages can be constructed and render snapshots."""
 

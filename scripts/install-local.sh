@@ -29,6 +29,8 @@ RELEASE_DIR="$INSTALL_ROOT/releases/$RELEASE_ID"
 VENV_DIR="$RELEASE_DIR/venv"
 STATE_DIR=/var/lib/honor-control
 RUN_DIR=/run/honor-control
+LEGACY_HONOR_POWER_RULE=/etc/udev/rules.d/99-honor-power.rules
+LEGACY_HONOR_POWER_RULE_CONTENT='SUBSYSTEM=="power_supply", RUN+="/usr/bin/honor power udev-event"'
 STAGE="$(mktemp -d /tmp/honor-control-install.XXXXXX)"
 ACTIVATED=false
 cleanup() {
@@ -95,6 +97,21 @@ for script in honor-control-service honorctl honor-control-gui honor-control-tra
 done
 if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify "$ROOT/packaging/systemd/honor-control.service"
+fi
+
+# honor-tools installs a legacy udev hook that runs `honor power
+# udev-event`.  That handler writes EPP directly immediately after calling
+# powerprofilesctl, racing power-profiles-daemon (PPD) and causing PPD's
+# intel_pstate writes to fail with EBUSY.  Honor Control owns power-profile
+# and AC/battery switching now, so remove only the exact legacy rule.  Do
+# not touch a file that has been customized for another purpose.
+if [[ -f "$LEGACY_HONOR_POWER_RULE" ]] && \
+    [[ "$(cat "$LEGACY_HONOR_POWER_RULE")" == "$LEGACY_HONOR_POWER_RULE_CONTENT" ]]; then
+    echo "==> Removing conflicting legacy honor-tools power udev hook"
+    rm -f "$LEGACY_HONOR_POWER_RULE"
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules
+    fi
 fi
 
 echo "==> [4/7] Installing system packaging files"

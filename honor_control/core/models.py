@@ -299,7 +299,10 @@ POWER_PROFILES: tuple[PowerProfileEntry, ...] = (
         description="Maximum sustained power",
         pl1_uw=35_000_000,
         pl2_uw=55_000_000,
-        governor="performance",
+        # With active Intel P-State/HWP, the performance governor owns EPP and
+        # rejects the independently writable EPP policy.  Keep the PPD-
+        # compatible powersave selector and express performance through EPP.
+        governor="powersave",
         epp="performance",
         ppd_profile="performance",
         built_in=True,

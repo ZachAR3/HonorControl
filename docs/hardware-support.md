@@ -30,8 +30,16 @@ Detection checks:
 - Built-in and custom definitions control PL1/PL2, governor, EPP, PPD mode,
   turbo enablement, and `max_perf_pct`. An apply succeeds only after every
   requested field is read back from hardware.
+- On active Intel P-State/HWP, the built-in Performance profile intentionally
+  uses the `powersave` P-State selector with EPP `performance`. Intel's
+  `performance` selector owns EPP and rejects independent EPP writes, so that
+  governor/EPP pairing cannot be applied as a complete profile.
 - Honor Control coordinates through PPD; it never masks PPD or `intel_lpmd`
   and never writes `/dev/cpu/*/msr`.
+- The legacy `honor-tools` power-supply udev hook must be removed when
+  installing Honor Control. It directly rewrites EPP after calling PPD and
+  races KDE's power-profile slider; the installer removes only the exact
+  stock `/etc/udev/rules.d/99-honor-power.rules` rule.
 
 ### Fan control
 
