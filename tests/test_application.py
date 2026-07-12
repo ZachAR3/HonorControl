@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 from dataclasses import replace
 
 import pytest
@@ -32,6 +33,25 @@ def _make_service(tmp_path=None) -> ApplicationService:
         snapshot_store=SnapshotStore(),
         command_queue=HardwareCommandQueue(),
         supervisor=RuntimeSupervisor(),
+    )
+
+
+def _allow_test_hook(monkeypatch) -> None:
+    """Trust the system `true` binary in UID-remapped test containers."""
+    executable = pathlib.Path("/usr/bin/true").resolve()
+    if all(path.stat().st_uid == 0 for path in (executable, *executable.parents)):
+        return
+    original = ApplicationService._validate_script_command  # noqa: SLF001
+
+    def validate(command: str) -> list[str]:
+        if command == "/usr/bin/true":
+            return [command]
+        return original(command)
+
+    monkeypatch.setattr(
+        ApplicationService,
+        "_validate_script_command",
+        staticmethod(validate),
     )
 
 
@@ -205,8 +225,9 @@ class TestPowerMutation:
             asyncio.run(svc.delete_power_profile("balanced"))
 
     def test_auto_switch_configuration_persists_choices_and_scripts(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
+        _allow_test_hook(monkeypatch)
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -237,7 +258,10 @@ class TestPowerMutation:
                 )
             )
 
-    def test_transition_script_runs_direct_executable(self, tmp_path) -> None:
+    def test_transition_script_runs_direct_executable(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _allow_test_hook(monkeypatch)
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -250,8 +274,9 @@ class TestPowerMutation:
         asyncio.run(scenario())
 
     def test_auto_switch_applies_selected_profile_and_runs_hook_once(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
+        _allow_test_hook(monkeypatch)
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -263,7 +288,9 @@ class TestPowerMutation:
             await asyncio.sleep(2.1)
             snapshot = await svc.get_snapshot()
             assert snapshot.power.applied_profile == "performance"
-            assert snapshot.power.auto_switch_last_script_status == "ac script completed"
+            assert (
+                snapshot.power.auto_switch_last_script_status == "ac script completed"
+            )
             calls = sum(
                 name == "apply_power_profile"
                 for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
@@ -276,6 +303,169 @@ class TestPowerMutation:
                 )
                 == calls
             )
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_missing_hardware_results_cannot_report_success(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            monkeypatch.setattr(
+                svc._hw,  # noqa: SLF001
+                "apply_power_profile",
+                lambda _name, _definition: {"profile": "performance"},
+            )
+            result = await svc.set_power_profile("performance")
+            assert result.status == OperationStatus.PARTIAL
+            assert result.applied is False
+            assert result.persisted is False
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_hardware_success_and_persistence_failure_are_reported_separately(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def fail_update(_mutator) -> None:
+            raise OSError("disk full")
+
+        async def scenario() -> None:
+            await svc.initialize()
+            monkeypatch.setattr(svc.config_store, "update", fail_update)
+            result = await svc.set_power_profile("performance")
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "power_applied_not_persisted"
+            assert result.applied is True
+            assert result.persisted is False
+            assert svc.config_store.state.power.profile == "balanced"
+            assert (await svc.get_snapshot()).power.applied_profile == "performance"
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_power_apply_requires_fresh_observation(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            monkeypatch.setattr(svc, "_refresh_power", lambda: _false_refresh())
+            result = await svc.set_power_profile("performance")
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "power_observation_failed"
+            assert result.applied is False
+            assert result.persisted is True
+            await svc.shutdown()
+
+        async def _false_refresh() -> bool:
+            return False
+
+        asyncio.run(scenario())
+
+    def test_active_profile_save_reports_persisted_apply_failure(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            svc._hw.fail_next("apply_power_profile")  # noqa: SLF001
+            result = await svc.save_power_profile(
+                "balanced",
+                "Balanced",
+                "Updated definition",
+                26_000_000,
+                36_000_000,
+                "powersave",
+                "balance_power",
+                "balanced",
+                True,
+                100,
+            )
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "power_profile_saved_not_applied"
+            assert result.persisted is True
+            assert result.applied is False
+            assert (
+                svc.config_store.state.power.profiles["balanced"].pl1_uw == 26_000_000
+            )
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_reconciliation_compares_complete_observed_definition(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+        svc._hw._power_observed["rapl"]["intel-rapl:0"][  # noqa: SLF001
+            "constraint_0_power_limit_uw"
+        ] = 20_000_000
+
+        async def scenario() -> None:
+            await svc.initialize()
+            calls = [
+                name
+                for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+            ]
+            assert "apply_power_profile" in calls
+            assert (await svc.get_snapshot()).power.applied_profile == "balanced"
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_external_power_drift_clears_applied_profile(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            result = await svc.set_power_profile("performance")
+            assert result.applied is True
+            svc._hw._power_observed["epp"]["0"] = "power"  # noqa: SLF001
+            await svc._refresh_power()  # noqa: SLF001
+            assert (await svc.get_snapshot()).power.applied_profile == ""
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_auto_switch_failures_use_bounded_backoff(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        attempts: list[str] = []
+
+        def fail_apply(name, _definition):
+            attempts.append(name)
+            return {
+                "profile": name,
+                "governor_ok": False,
+                "epp_ok": False,
+                "ppd_ok": False,
+                "rapl_ok": False,
+                "misc_ok": False,
+            }
+
+        async def scenario() -> None:
+            await svc.initialize()
+            monkeypatch.setattr(svc._hw, "apply_power_profile", fail_apply)  # noqa: SLF001
+            monkeypatch.setattr(
+                "honor_control.backend.application.AUTO_SWITCH_POLL_SECONDS",
+                0.01,
+            )
+            monkeypatch.setattr(
+                "honor_control.backend.application.AUTO_SWITCH_MAX_RETRY_SECONDS",
+                0.04,
+            )
+            await svc.start_background()
+            await svc.configure_auto_switch(True, "performance", "silent", "", "")
+            await asyncio.sleep(0.13)
+            assert 2 <= len(attempts) <= 6
             await svc.shutdown()
 
         asyncio.run(scenario())

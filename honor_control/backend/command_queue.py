@@ -102,7 +102,7 @@ class HardwareCommandQueue:
                 timeout,
             )
             try:
-                result = await asyncio.wait_for(asyncio.shield(future), timeout)
+                result = await self._wait_for_completion(future, timeout)
                 log.debug(
                     "hw-queue: done %s in %.3fs",
                     name,
@@ -121,6 +121,23 @@ class HardwareCommandQueue:
                 raise
             finally:
                 self._running.pop(name, None)
+
+    @staticmethod
+    async def _wait_for_completion(future: asyncio.Future[T], timeout: float) -> T:
+        """Wait without relying solely on a cross-thread loop wakeup.
+
+        Some Python/runtime combinations queue ``call_soon_threadsafe``
+        callbacks without waking an otherwise idle event loop. A short timer
+        keeps the loop moving while preserving the non-cancellable future.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not future.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            await asyncio.sleep(min(0.01, remaining))
+        return future.result()
 
     def _worker(self) -> None:
         while True:

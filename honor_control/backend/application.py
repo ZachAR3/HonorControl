@@ -45,7 +45,7 @@ from honor_control.backend.gesture_runtime import (
     GestureRuntime,
     wmi_transport_present,
 )
-from honor_control.backend.hardware import HardwarePort
+from honor_control.backend.hardware import HardwarePort, verify_power_definition
 from honor_control.backend.snapshot_store import SnapshotStore
 from honor_control.backend.supervisor import RuntimeSupervisor
 from honor_control.core.errors import DomainError, DomainException
@@ -79,6 +79,8 @@ from honor_control.core.validation import (
 log = logging.getLogger("honor_control.backend.application")
 
 FAN_SPEED_WRITE_HYSTERESIS = 3
+AUTO_SWITCH_POLL_SECONDS = 2.0
+AUTO_SWITCH_MAX_RETRY_SECONDS = 60.0
 
 
 def _serialized_mutation(method):
@@ -90,6 +92,19 @@ def _serialized_mutation(method):
             return await method(self, *args, **kwargs)
 
     return wrapped
+
+
+def _power_definition(profile: PowerProfileState) -> dict[str, Any]:
+    """Return the hardware-facing fields of a persisted power profile."""
+    return {
+        "pl1_uw": profile.pl1_uw,
+        "pl2_uw": profile.pl2_uw,
+        "governor": profile.governor,
+        "epp": profile.epp,
+        "ppd_profile": profile.ppd_profile,
+        "turbo_enabled": profile.turbo_enabled,
+        "max_perf_pct": profile.max_perf_pct,
+    }
 
 
 class ApplicationService:
@@ -122,8 +137,6 @@ class ApplicationService:
         self._mutation_lock = asyncio.Lock()
         self._manual_ttl_seconds = 0
         self._last_auto_script_status = "Not run"
-        self._last_applied_power_profile = ""
-        self._pending_power_task: asyncio.Task[None] | None = None
         self._supervisor.register(
             "manual_fan_ttl", self._manual_fan_expiry, self._restore_fan_auto
         )
@@ -153,15 +166,9 @@ class ApplicationService:
     # -- Lifecycle --
 
     async def initialize(self) -> None:
-        """Load config, detect platform, probe capabilities, publish initial snapshot.
-
-        After publishing the initial snapshot, stop competing power daemons
-        (PPD, intel_lpmd) that continuously overwrite RAPL limits, then
-        reconcile the desired power profile with hardware.
-        """
+        """Load config, publish observed state, and reconcile user intent."""
         self._config.load()
         await self._refresh_all()
-        await self._queue.run("stop_daemons", self._hw.stop_competing_power_daemons)
         await self._reconcile_power_profile()
 
     async def start_background(self) -> None:
@@ -180,8 +187,6 @@ class ApplicationService:
 
     async def shutdown(self) -> None:
         """Stop all controllers, shut down the command queue."""
-        if self._pending_power_task is not None and not self._pending_power_task.done():
-            self._pending_power_task.cancel()
         await self._supervisor.stop_all()
         self._queue.shutdown(wait=False)
 
@@ -318,7 +323,14 @@ class ApplicationService:
         self, name: str, *, persist_desired: bool
     ) -> OperationResult:
         """Apply one profile; auto-switch calls do not rewrite manual intent."""
-        cap = await self._queue.run("power_cap", self._hw.get_power_capability)
+        try:
+            cap = await self._queue.run("power_cap", self._hw.get_power_capability)
+        except Exception as exc:  # noqa: BLE001
+            return OperationResult.failed(
+                code="power_preflight_failed",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+            )
         if not cap.writable:
             return OperationResult.unavailable(
                 code="power_unavailable",
@@ -326,99 +338,108 @@ class ApplicationService:
                 sequence=self._snapshots.sequence,
             )
         profile = self._config.state.power.profiles[name]
-        definition = {
-            "pl1_uw": profile.pl1_uw,
-            "pl2_uw": profile.pl2_uw,
-            "governor": profile.governor,
-            "epp": profile.epp,
-            "ppd_profile": profile.ppd_profile,
-            "turbo_enabled": profile.turbo_enabled,
-            "max_perf_pct": profile.max_perf_pct,
-        }
-        result = await self._queue.run(
-            "power_apply", self._hw.apply_power_profile, name, definition
-        )
+        definition = _power_definition(profile)
+        try:
+            result = await self._queue.run(
+                "power_apply", self._hw.apply_power_profile, name, definition
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._refresh_power()
+            return OperationResult.failed(
+                code="power_apply_failed",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+            )
         if result.get("error"):
+            await self._refresh_power()
             return OperationResult.failed(
                 code="power_apply_failed",
                 message=str(result["error"]),
                 sequence=self._snapshots.sequence,
                 details=result,
             )
-        governor_ok = bool(result.get("governor_ok", True))
-        epp_ok = bool(result.get("epp_ok", True))
-        ppd_ok = bool(result.get("ppd_ok", True))
-        rapl_ok = bool(result.get("rapl_ok", True))
-        misc_ok = bool(result.get("misc_ok", True))
-        if governor_ok and epp_ok and ppd_ok and rapl_ok and misc_ok:
-            self._last_applied_power_profile = name
-            if persist_desired:
-                await self._config.update(
-                    lambda s: replace(
-                        s,
-                        power=PowerState(
-                            profile=name,
-                            auto_switch=s.power.auto_switch,
-                            profiles=s.power.profiles,
-                        ),
-                    )
-                )
-            await self._refresh_power()
-            # Schedule a non-blocking re-write of RAPL MSR and EPP after
-            # a short delay.  PPD asynchronously overwrites both after
-            # powerprofilesctl set; re-writing after 0.5s makes our values
-            # stick.  The task reference is held to prevent GC.
-            self._pending_power_task = asyncio.ensure_future(
-                self._delayed_power_rewrite(profile)
+        checks = {
+            key: result.get(key) is True
+            for key in (
+                "governor_ok",
+                "epp_ok",
+                "ppd_ok",
+                "rapl_ok",
+                "misc_ok",
             )
+        }
+        if all(checks.values()):
+            persisted = False
+            if persist_desired:
+                try:
+                    await self._config.update(
+                        lambda s: replace(
+                            s,
+                            power=PowerState(
+                                profile=name,
+                                auto_switch=s.power.auto_switch,
+                                profiles=s.power.profiles,
+                            ),
+                        )
+                    )
+                    persisted = True
+                except Exception as exc:  # noqa: BLE001
+                    await self._refresh_power()
+                    return OperationResult.partial(
+                        code="power_applied_not_persisted",
+                        message=f"Profile '{name}' applied, but could not be saved",
+                        persisted=False,
+                        applied=True,
+                        sequence=self._snapshots.sequence,
+                        details={**result, "persistence_error": str(exc)},
+                    )
+
+            refreshed = await self._refresh_power()
+            if not refreshed:
+                return OperationResult.partial(
+                    code="power_observation_failed",
+                    message=f"Profile '{name}' applied but could not be verified",
+                    persisted=persisted,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details=result,
+                )
+            observed = self._snapshots.snapshot.power.observed_summary
+            final_checks = verify_power_definition(observed, definition)
+            if not all(final_checks.values()):
+                return OperationResult.partial(
+                    code="power_convergence_lost",
+                    message=f"Profile '{name}' did not remain applied",
+                    persisted=persisted,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details={
+                        **result,
+                        "final_verification": final_checks,
+                        "final_observed": observed,
+                    },
+                )
             return OperationResult.success(
                 message=f"Profile '{name}' applied",
                 changed=True,
-                persisted=persist_desired,
+                persisted=persisted,
                 applied=True,
                 sequence=self._snapshots.sequence,
                 details=result,
             )
+
+        await self._refresh_power()
         return OperationResult.partial(
             code="power_partial_apply",
-            message=f"Partial apply: governor={governor_ok}, epp={epp_ok},"
-            f" ppd={ppd_ok}, rapl={rapl_ok}, misc={misc_ok}",
+            message="Partial apply: "
+            + ", ".join(
+                f"{key.removesuffix('_ok')}={value}" for key, value in checks.items()
+            ),
+            persisted=False,
             applied=False,
             sequence=self._snapshots.sequence,
             details=result,
         )
-
-    async def _delayed_power_rewrite(self, profile: PowerProfileState) -> None:
-        """Re-write RAPL MSR and EPP after PPD's async overwrite (non-blocking).
-
-        PPD asynchronously overwrites both RAPL power limits and EPP
-        after ``powerprofilesctl set`` returns.  Waiting 0.5s and then
-        re-writing them makes our values stick:
-
-        * RAPL PL1/PL2 are written directly to the MSR (0x610), bypassing
-          both the sysfs cache and PPD's sysfs-based overwrite.
-        * EPP is re-written via sysfs with a read-back, which causes
-          PPD's competing write to get EBUSY.
-
-        This runs as a fire-and-forget task so it never blocks the apply
-        return or the command queue.
-        """
-        await asyncio.sleep(0.5)
-        try:
-            await self._queue.run(
-                "rapl_msr",
-                self._hw.write_rapl_msr,
-                profile.pl1_uw,
-                profile.pl2_uw,
-            )
-            await self._queue.run(
-                "epp_rewrite",
-                self._hw.rewrite_epp,
-                profile.epp,
-                profile.governor,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("delayed power re-write failed: %s", exc)
 
     @_serialized_mutation
     async def set_auto_switch(self, enabled: bool) -> OperationResult:
@@ -478,6 +499,7 @@ class ApplicationService:
             turbo_enabled=bool(turbo_enabled),
             max_perf_pct=int(max_perf_pct),
         )
+        active = self._snapshots.snapshot.power.applied_profile == profile_name
         await self._config.update(
             lambda state: replace(
                 state,
@@ -488,13 +510,20 @@ class ApplicationService:
                 ),
             )
         )
-        active = self._snapshots.snapshot.power.applied_profile == profile_name
         if active:
             result = await self._apply_power_profile(
                 profile_name, persist_desired=False
             )
             if not result.applied:
-                return result
+                await self._refresh_power()
+                return OperationResult.partial(
+                    code="power_profile_saved_not_applied",
+                    message=f"Profile '{profile_name}' was saved but not applied",
+                    persisted=True,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details={"apply_result": result.to_dict()},
+                )
         await self._refresh_power()
         return OperationResult.success(
             message=f"Profile '{profile_name}' saved"
@@ -1099,7 +1128,7 @@ class ApplicationService:
         except Exception as exc:  # noqa: BLE001
             await self._snapshots.mark_stale("battery", str(exc))
 
-    async def _refresh_power(self) -> None:
+    async def _refresh_power(self) -> bool:
         try:
             pw = await self._queue.run("pw_read", self._hw.read_power)
             desired = self._config.state.power
@@ -1129,10 +1158,28 @@ class ApplicationService:
                 )
                 for name in ordered_names
             )
+            matched_names = [
+                name
+                for name, profile in desired.profiles.items()
+                if all(
+                    verify_power_definition(
+                        pw.observed_summary,
+                        _power_definition(profile),
+                    ).values()
+                )
+            ]
+            if pw.applied_profile in matched_names:
+                applied_profile = pw.applied_profile
+            elif desired.profile in matched_names:
+                applied_profile = desired.profile
+            elif len(matched_names) == 1:
+                applied_profile = matched_names[0]
+            else:
+                applied_profile = ""
             pw = replace(
                 pw,
                 desired_profile=desired.profile,
-                applied_profile=self._last_applied_power_profile or pw.applied_profile,
+                applied_profile=applied_profile,
                 auto_switch_enabled=desired.auto_switch.enabled,
                 auto_switch_on_ac=desired.auto_switch.on_ac,
                 auto_switch_on_battery=desired.auto_switch.on_battery,
@@ -1142,8 +1189,10 @@ class ApplicationService:
                 profiles=profiles,
             )
             await self._snapshots.update("power", pw)
+            return True
         except Exception as exc:  # noqa: BLE001
             await self._snapshots.mark_stale("power", str(exc))
+            return False
 
     async def _refresh_fan(self) -> None:
         try:
@@ -1327,12 +1376,17 @@ class ApplicationService:
     async def _auto_switch_loop(self) -> None:
         last_ac: bool | None = None
         last_policy: tuple[str, str, str, str] | None = None
+        failed_key: tuple[bool, str, str, str, str] | None = None
+        failure_count = 0
+        retry_at = 0.0
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(AUTO_SWITCH_POLL_SECONDS)
             state = self._config.state.power.auto_switch
             if not state.enabled:
                 last_ac = None
                 last_policy = None
+                failed_key = None
+                failure_count = 0
                 continue
             await self._refresh_power()
             ac = self._snapshots.snapshot.power.ac_online
@@ -1343,6 +1397,9 @@ class ApplicationService:
                 state.on_battery_script,
             )
             if ac is None or (ac == last_ac and policy == last_policy):
+                continue
+            key = (ac, *policy)
+            if key == failed_key and time.monotonic() < retry_at:
                 continue
             async with self._mutation_lock:
                 state = self._config.state.power.auto_switch
@@ -1366,6 +1423,8 @@ class ApplicationService:
                 if result.applied:
                     last_ac = ac
                     last_policy = policy
+                    failed_key = None
+                    failure_count = 0
                     command = state.on_ac_script if ac else state.on_battery_script
                     self._last_auto_script_status = await self._run_transition_script(
                         command,
@@ -1374,7 +1433,18 @@ class ApplicationService:
                     )
                     await self._refresh_power()
             if not result.applied:
-                log.warning("auto-switch failed: %s", result.message)
+                failure_count = failure_count + 1 if failed_key == key else 1
+                failed_key = key
+                delay = min(
+                    AUTO_SWITCH_MAX_RETRY_SECONDS,
+                    AUTO_SWITCH_POLL_SECONDS * (2 ** min(failure_count - 1, 10)),
+                )
+                retry_at = time.monotonic() + delay
+                log.warning(
+                    "auto-switch failed; retrying in %.0fs: %s",
+                    delay,
+                    result.message,
+                )
 
     @staticmethod
     def _validate_script_command(command: str) -> list[str]:

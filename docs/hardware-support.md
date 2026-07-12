@@ -22,10 +22,16 @@ Detection checks:
 
 ### Power profiles
 
-- `powerprofilesctl` binary (for PPD integration).
-- RAPL/governor/EPP sysfs files (for direct writes).
+- Compatible `honor-tools` 0.1.0 platform backend.
+- Running `power-profiles-daemon` and a working `powerprofilesctl` client.
+- At least one Intel RAPL sysfs tree with writable PL1/PL2 controls.
+- Per-CPU governor and EPP sysfs controls, plus Intel `no_turbo` and
+  `max_perf_pct` controls.
 - Built-in and custom definitions control PL1/PL2, governor, EPP, PPD mode,
-  turbo enablement, and `max_perf_pct`; every mechanism is checked separately.
+  turbo enablement, and `max_perf_pct`. An apply succeeds only after every
+  requested field is read back from hardware.
+- Honor Control coordinates through PPD; it never masks PPD or `intel_lpmd`
+  and never writes `/dev/cpu/*/msr`.
 
 ### Fan control
 
@@ -58,6 +64,8 @@ Detection checks:
 - **GPU mitigation is intentionally unavailable.** The dependency cannot yet
   restore the exact pre-change IRQ affinity and C-state values.
 - **No fallback to a default platform.** Unknown hardware cannot perform
-  any write.
+  model-specific power, fan, or GPU writes.
+- **AMD power profiles are unsupported.** Non-allowlisted AMD and Intel
+  systems report the power domain as unsupported without attempting writes.
 - **Fan curve validation is strict.** 2-12 points, strictly increasing
   temperatures, non-decreasing speeds, at/above 95°C must target 100%.

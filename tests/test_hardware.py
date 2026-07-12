@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from honor_control.backend.hardware import (
     FakeHardware,
     HonorToolsAdapter,
     _discover_fan_inputs,
+    verify_power_definition,
 )
 from honor_control.core.errors import DomainError, DomainException
 from honor_control.core.models import (
@@ -19,6 +22,51 @@ from honor_control.core.models import (
     GpuSnapshot,
     PlatformInfo,
 )
+
+
+def _make_power_adapter(tmp_path, monkeypatch):
+    cpu_root = tmp_path / "sys/devices/system/cpu"
+    for index in range(2):
+        cpufreq = cpu_root / f"cpu{index}/cpufreq"
+        cpufreq.mkdir(parents=True)
+        (cpufreq / "scaling_governor").write_text("powersave", encoding="utf-8")
+        (cpufreq / "energy_performance_preference").write_text(
+            "balance_power", encoding="utf-8"
+        )
+    pstate = cpu_root / "intel_pstate"
+    pstate.mkdir()
+    (pstate / "no_turbo").write_text("0", encoding="utf-8")
+    (pstate / "max_perf_pct").write_text("100", encoding="utf-8")
+
+    rapl = tmp_path / "sys/class/powercap/intel-rapl:0"
+    rapl.mkdir(parents=True)
+    (rapl / "constraint_0_power_limit_uw").write_text("25000000", encoding="utf-8")
+    (rapl / "constraint_1_power_limit_uw").write_text("35000000", encoding="utf-8")
+
+    ppd = {"profile": "balanced", "set_ok": True}
+
+    def run_powerprofilesctl(*args: str) -> subprocess.CompletedProcess[str]:
+        if args == ("get",):
+            return subprocess.CompletedProcess(
+                ["powerprofilesctl", *args], 0, ppd["profile"] + "\n", ""
+            )
+        if args[:1] == ("set",) and ppd["set_ok"]:
+            ppd["profile"] = args[1]
+            return subprocess.CompletedProcess(["powerprofilesctl", *args], 0, "", "")
+        return subprocess.CompletedProcess(
+            ["powerprofilesctl", *args], 1, "", "set failed"
+        )
+
+    adapter = HonorToolsAdapter(root_path=tmp_path)
+    adapter._platform = object()  # noqa: SLF001
+    adapter._platform_detected = True  # noqa: SLF001
+    monkeypatch.setattr(adapter, "_run_powerprofilesctl", run_powerprofilesctl)
+    monkeypatch.setattr(
+        "honor_control.backend.hardware.shutil.which",
+        lambda _cmd: "/usr/bin/powerprofilesctl",
+    )
+    monkeypatch.setattr("honor_control.backend.hardware.PPD_SETTLE_SECONDS", 0)
+    return adapter, ppd
 
 
 class TestFakeHardwarePlatform:
@@ -254,3 +302,114 @@ class TestHonorToolsAdapterFilesystem:
         result = adapter.write_battery_thresholds(90, 85)
         assert result["write_order"] == ("end", "start")
         assert result["readback_ok"] is True
+
+    def test_power_capability_checks_every_required_resource(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
+        capability = adapter.get_power_capability()
+        assert capability.status == CapabilityStatus.SUPPORTED
+        assert all(str(tmp_path) in path for path in capability.resources)
+
+    def test_power_apply_writes_and_verifies_complete_definition(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, ppd = _make_power_adapter(tmp_path, monkeypatch)
+        definition = {
+            "pl1_uw": 35_000_000,
+            "pl2_uw": 55_000_000,
+            "governor": "performance",
+            "epp": "performance",
+            "ppd_profile": "performance",
+            "turbo_enabled": True,
+            "max_perf_pct": 95,
+        }
+        result = adapter.apply_power_profile("performance", definition)
+        assert result.get("error") is None
+        assert all(
+            result[key] is True
+            for key in (
+                "governor_ok",
+                "epp_ok",
+                "ppd_ok",
+                "rapl_ok",
+                "misc_ok",
+            )
+        )
+        assert ppd["profile"] == "performance"
+        assert all(verify_power_definition(result["observed"], definition).values())
+        assert adapter.read_power().available is True
+
+    def test_power_apply_reports_readback_mismatch(self, tmp_path, monkeypatch) -> None:
+        adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
+        original_write = adapter._write_text_verified  # noqa: SLF001
+
+        def skip_epp_write(path, value):
+            if path.name == "energy_performance_preference":
+                return True
+            return original_write(path, value)
+
+        monkeypatch.setattr(adapter, "_write_text_verified", skip_epp_write)
+        definition = {
+            "pl1_uw": 12_000_000,
+            "pl2_uw": 18_000_000,
+            "governor": "powersave",
+            "epp": "power",
+            "ppd_profile": "power-saver",
+            "turbo_enabled": True,
+            "max_perf_pct": 80,
+        }
+        result = adapter.apply_power_profile("silent", definition)
+        assert result["epp_ok"] is False
+        assert result["rapl_ok"] is True
+
+    def test_ppd_failure_aborts_direct_power_writes(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, ppd = _make_power_adapter(tmp_path, monkeypatch)
+        ppd["set_ok"] = False
+        definition = {
+            "pl1_uw": 12_000_000,
+            "pl2_uw": 18_000_000,
+            "governor": "powersave",
+            "epp": "power",
+            "ppd_profile": "power-saver",
+            "turbo_enabled": False,
+            "max_perf_pct": 70,
+        }
+        result = adapter.apply_power_profile("silent", definition)
+        assert result["ppd_ok"] is False
+        assert result["writes"] == {"ppd": False}
+        assert (
+            tmp_path / "sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"
+        ).read_text(encoding="utf-8") == "25000000"
+
+    def test_invalid_definition_is_rejected_before_hardware_writes(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        adapter, ppd = _make_power_adapter(tmp_path, monkeypatch)
+        definition = {
+            "pl1_uw": 12_000_000,
+            "pl2_uw": 18_000_000,
+            "governor": "powersave",
+            "epp": "power",
+            "ppd_profile": "power-saver",
+            "turbo_enabled": "yes",
+            "max_perf_pct": 70,
+        }
+        result = adapter.apply_power_profile("silent", definition)
+        assert "error" in result
+        assert ppd["profile"] == "balanced"
+
+
+def test_incomplete_power_observation_never_verifies() -> None:
+    definition = {
+        "pl1_uw": 25_000_000,
+        "pl2_uw": 35_000_000,
+        "governor": "powersave",
+        "epp": "balance_power",
+        "ppd_profile": "balanced",
+        "turbo_enabled": True,
+        "max_perf_pct": 100,
+    }
+    assert not any(verify_power_definition({}, definition).values())

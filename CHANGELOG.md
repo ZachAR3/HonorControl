@@ -2,6 +2,17 @@
 
 ## [Unreleased] - 0.2.0
 
+### Fixed
+
+- Power-profile application now coordinates with PPD without masking host
+  services or using raw MSR access, verifies every sysfs field before reporting
+  success, and reconciles complete observed definitions instead of PPD names.
+- Profile persistence and active-profile edits now report hardware and durable
+  state independently when only one stage succeeds.
+- The hardware queue remains responsive on runtimes where cross-thread event
+  loop wakeups are delayed, and automatic profile retries use bounded backoff.
+- `honor-tools` is pinned and preflighted against the supported 0.1.0 API.
+
 ### Changed — overhaul
 
 - **Architecture:** rebuilt as a safe, testable system service with thin

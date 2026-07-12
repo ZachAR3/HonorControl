@@ -59,11 +59,13 @@ GUI / Tray                    CLI
 
 - **Desired:** what the user asked for (persisted in
   `/var/lib/honor-control/state.toml`).
-- **Applied:** what the service last verified on hardware.
+- **Applied:** the profile definition that matches the current complete
+  hardware observation. A cached logical name never replaces live state.
 - **Observed:** what the live hardware reports right now.
 
 These are never conflated. A successful config save is not proof that
-hardware changed.
+hardware changed, and a PPD label alone is not proof that a full definition
+is active.
 
 ## Why hardware mutations are serialized
 

@@ -8,16 +8,16 @@ D-Bus service and Qt6 GUI for managing Honor MagicBook laptops on Linux.
 verified against fake hardware in CI; real hardware testing is an
 explicit, manual pre-release gate.
 
-**Compatibility:** Intel-only. All Honor MagicBook laptops released to
-date use Intel CPUs, and the power profile code (RAPL MSR writes, EPP
-re-writes, HWP dynamic boost) uses Intel-specific registers and quirks.
-AMD support is not implemented; on AMD-based Honor laptops the power
-features will fail safely (no MSR writes, sysfs-only EPP) but will not
-deliver full functionality.
+**Compatibility:** hardware writes are enabled only for the verified Honor
+MagicBook Art 14 (`MRA-XXX`) with a supported Intel Core Ultra/Meteor Lake
+CPU. Other Intel and AMD models are not allowlisted and receive no power,
+fan, or GPU writes. Power profiles use PPD plus standard Intel sysfs controls;
+the service does not write raw CPU MSRs or disable host power-management
+services.
 
 - **Battery charge control:** verified (sysfs charge thresholds)
-- **Power profiles:** enabled only on the verified MRA-XXX platform (depends on
-  `powerprofilesctl` and CPU support)
+- **Power profiles:** enabled only on the verified MRA-XXX platform (requires
+  working PPD, Intel RAPL/intel_pstate sysfs controls, and exact readback)
 - **Fan control:** enabled only on verified MRA-XXX hardware with a valid CPU
   temperature sensor (EC writes via `acpi_call`)
 - **Touchpad gesture actions:** input decoder and Linux uinput dispatcher

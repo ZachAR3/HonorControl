@@ -87,6 +87,8 @@ fi
 echo "==> [3/7] Validating isolated installation"
 "$PY" -m pip check
 "$PY" -c 'import honor_control, honor, sdbus, PySide6'
+"$PY" -c \
+    'from honor_control.backend.hardware import HonorToolsAdapter; assert HonorToolsAdapter().check_dependency()'
 "$PY" -m compileall -q "$VENV_DIR/lib"/python*/site-packages/honor_control
 for script in honor-control-service honorctl honor-control-gui honor-control-tray; do
     test -x "$VENV_DIR/bin/$script"

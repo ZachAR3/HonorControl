@@ -14,8 +14,11 @@ Key safety invariants:
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import shutil
+import subprocess
+import time
 from typing import Any, Protocol
 
 from honor_control.backend.gesture_runtime import (
@@ -49,6 +52,127 @@ _SUPPORTED_FAN_IDENTITIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_CPU_ROOT = "/sys/devices/system/cpu"
+_INTEL_PSTATE_ROOT = f"{_CPU_ROOT}/intel_pstate"
+_RAPL_TREES = (
+    "/sys/class/powercap/intel-rapl:0",
+    "/sys/class/powercap/intel-rapl-mmio:0",
+)
+_RAPL_LIMIT_FILES = (
+    "constraint_0_power_limit_uw",
+    "constraint_1_power_limit_uw",
+)
+PPD_SETTLE_SECONDS = 0.5
+_POWER_CHECK_KEYS = (
+    "governor_ok",
+    "epp_ok",
+    "ppd_ok",
+    "rapl_ok",
+    "misc_ok",
+)
+_POWER_DEFINITION_FIELDS = frozenset(
+    {
+        "pl1_uw",
+        "pl2_uw",
+        "governor",
+        "epp",
+        "ppd_profile",
+        "turbo_enabled",
+        "max_perf_pct",
+    }
+)
+
+
+def _all_true(value: Any) -> bool:
+    """Return whether a nested result contains only successful leaves."""
+    if isinstance(value, dict):
+        return bool(value) and all(_all_true(item) for item in value.values())
+    return value is True
+
+
+def verify_power_definition(
+    observed: dict[str, Any], definition: dict[str, Any]
+) -> dict[str, bool]:
+    """Compare every supported power-profile field with live observation."""
+    if not _POWER_DEFINITION_FIELDS.issubset(definition):
+        return dict.fromkeys(_POWER_CHECK_KEYS, False)
+    rapl = observed.get("rapl")
+    rapl_ok = isinstance(rapl, dict) and bool(rapl)
+    if rapl_ok:
+        rapl_ok = all(
+            isinstance(values, dict)
+            and values.get(_RAPL_LIMIT_FILES[0]) == definition.get("pl1_uw")
+            and values.get(_RAPL_LIMIT_FILES[1]) == definition.get("pl2_uw")
+            for values in rapl.values()
+        )
+
+    governors = observed.get("governors")
+    governor_ok = (
+        isinstance(governors, dict)
+        and bool(governors)
+        and all(value == definition.get("governor") for value in governors.values())
+    )
+    epp = observed.get("epp")
+    epp_ok = (
+        isinstance(epp, dict)
+        and bool(epp)
+        and all(value == definition.get("epp") for value in epp.values())
+    )
+    ppd_ok = observed.get("ppd_profile") == definition.get("ppd_profile")
+    no_turbo = 0 if definition.get("turbo_enabled") is True else 1
+    misc_ok = observed.get("no_turbo") == no_turbo and observed.get(
+        "max_perf_pct"
+    ) == definition.get("max_perf_pct")
+    return {
+        "governor_ok": governor_ok,
+        "epp_ok": epp_ok,
+        "ppd_ok": ppd_ok,
+        "rapl_ok": rapl_ok,
+        "misc_ok": misc_ok,
+    }
+
+
+def _normalize_power_definition(definition: dict[str, Any]) -> dict[str, Any]:
+    """Validate untrusted power-profile data at the hardware boundary."""
+    if not _POWER_DEFINITION_FIELDS.issubset(definition):
+        raise ValueError("Power profile definition is incomplete")
+    integer_fields = ("pl1_uw", "pl2_uw", "max_perf_pct")
+    if any(
+        isinstance(definition[key], bool) or not isinstance(definition[key], int)
+        for key in integer_fields
+    ):
+        raise ValueError("Power limits and max_perf_pct must be integers")
+    if not isinstance(definition["turbo_enabled"], bool):
+        raise ValueError("turbo_enabled must be a boolean")
+    string_fields = ("governor", "epp", "ppd_profile")
+    if any(not isinstance(definition[key], str) for key in string_fields):
+        raise ValueError("Governor, EPP, and PPD profile must be strings")
+
+    normalized = {key: definition[key] for key in _POWER_DEFINITION_FIELDS}
+    if not 3_000_000 <= normalized["pl1_uw"] <= 100_000_000:
+        raise ValueError("PL1 is outside the supported range")
+    if not normalized["pl1_uw"] <= normalized["pl2_uw"] <= 150_000_000:
+        raise ValueError("PL2 is outside the supported range")
+    if normalized["governor"] not in {"powersave", "performance"}:
+        raise ValueError("Governor is unsupported")
+    if normalized["epp"] not in {
+        "power",
+        "default",
+        "balance_power",
+        "balance_performance",
+        "performance",
+    }:
+        raise ValueError("EPP value is unsupported")
+    if normalized["ppd_profile"] not in {
+        "power-saver",
+        "balanced",
+        "performance",
+    }:
+        raise ValueError("PPD profile is unsupported")
+    if not 1 <= normalized["max_perf_pct"] <= 100:
+        raise ValueError("max_perf_pct is outside the supported range")
+    return normalized
+
 
 class HardwarePort(Protocol):
     """The narrow interface every hardware implementation must provide.
@@ -74,9 +198,7 @@ class HardwarePort(Protocol):
     def apply_power_profile(
         self, profile: str, definition: dict[str, Any] | None = None
     ) -> dict[str, Any]: ...
-    def rewrite_epp(self, epp: str, governor: str) -> bool: ...
-    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool: ...
-    def stop_competing_power_daemons(self) -> None: ...
+
     # -- Fan --
     def read_fan(self) -> FanSnapshot: ...
     def set_fan_auto(self) -> bool: ...
@@ -122,6 +244,19 @@ class FakeHardware:
         self._battery_end = 90
         self._battery_start = 85
         self._power_profile = "balanced"
+        self._power_observed: dict[str, Any] = {
+            "rapl": {
+                "intel-rapl:0": {
+                    _RAPL_LIMIT_FILES[0]: 25_000_000,
+                    _RAPL_LIMIT_FILES[1]: 35_000_000,
+                }
+            },
+            "governors": {"0": "powersave"},
+            "epp": {"0": "balance_power"},
+            "ppd_profile": "balanced",
+            "no_turbo": 0,
+            "max_perf_pct": 100,
+        }
         self._fan_speed = 0
         self._fan_mode = FanMode.STOCK
         self._fan_temp = 45_000
@@ -222,9 +357,8 @@ class FakeHardware:
         self._check_fail("read_power")
         return PowerSnapshot(
             available=True,
-            desired_profile=self._power_profile,
             applied_profile=self._power_profile,
-            observed_summary={"governor": "powersave", "epp": "balance_performance"},
+            observed_summary=self._power_observed,
             ac_online=True,
         )
 
@@ -233,26 +367,29 @@ class FakeHardware:
     ) -> dict[str, Any]:
         self._log("apply_power_profile", profile, definition)
         self._check_fail("apply_power_profile")
+        if definition is None:
+            return {"error": "A complete power profile definition is required"}
         self._power_profile = profile
+        self._power_observed = {
+            "rapl": {
+                "intel-rapl:0": {
+                    _RAPL_LIMIT_FILES[0]: definition["pl1_uw"],
+                    _RAPL_LIMIT_FILES[1]: definition["pl2_uw"],
+                }
+            },
+            "governors": {"0": definition["governor"]},
+            "epp": {"0": definition["epp"]},
+            "ppd_profile": definition["ppd_profile"],
+            "no_turbo": 0 if definition["turbo_enabled"] else 1,
+            "max_perf_pct": definition["max_perf_pct"],
+        }
         return {
             "profile": profile,
-            "governor_ok": True,
-            "epp_ok": True,
-            "ppd_ok": True,
-            "rapl_ok": True,
-            "misc_ok": True,
+            "observed": self._power_observed,
+            **verify_power_definition(self._power_observed, definition),
         }
 
-    def rewrite_epp(self, epp: str, governor: str) -> bool:
-        self._log("rewrite_epp", epp, governor)
-        return True
-
-    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool:
-        self._log("write_rapl_msr", pl1_uw, pl2_uw)
-        return True
-
-    def stop_competing_power_daemons(self) -> None:
-        self._log("stop_competing_power_daemons")  # -- Fan --
+    # -- Fan --
 
     def read_fan(self) -> FanSnapshot:
         self._log("read_fan")
@@ -443,6 +580,7 @@ class HonorToolsAdapter:
 
     def __init__(self, root_path: pathlib.Path | None = None) -> None:
         self._root = root_path or pathlib.Path("/")
+        self._honor_error = ""
         self._honor_ok = self._try_import()
         self._platform: Any = None
         self._platform_detected = False
@@ -475,11 +613,33 @@ class HonorToolsAdapter:
 
     def _try_import(self) -> bool:
         try:
-            import honor  # noqa: F401
+            from importlib.metadata import version
 
+            import honor  # noqa: F401
+            from honor.config import Config  # noqa: F401
+            from honor.fan import read_state, set_auto, set_manual, set_speed
+            from honor.gpu import apply_irq_fix, find_gpu_irqs, get_status
+            from honor.platform import detect
+
+            required = (
+                read_state,
+                set_auto,
+                set_manual,
+                set_speed,
+                apply_irq_fix,
+                find_gpu_irqs,
+                get_status,
+                detect,
+            )
+            if not all(callable(item) for item in required):
+                raise TypeError("honor-tools exports an incompatible API")
+            installed = version("honor-tools")
+            if installed != "0.1.0":
+                raise RuntimeError(f"honor-tools 0.1.0 is required; found {installed}")
             return True
-        except ImportError as exc:
-            log.warning("honor package not importable: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            self._honor_error = str(exc)
+            log.warning("honor-tools is unavailable or incompatible: %s", exc)
             return False
 
     def check_dependency(self) -> bool:
@@ -490,7 +650,7 @@ class HonorToolsAdapter:
         if not self._honor_ok:
             raise DomainException(
                 DomainError.DEPENDENCY,
-                "honor-tools package is not importable",
+                self._honor_error or "honor-tools package is not compatible",
             )
 
     def _require_platform(self) -> Any:
@@ -594,12 +754,68 @@ class HonorToolsAdapter:
             resources=(str(end_file), str(start_file)),
         )
 
+    def _power_cpu_dirs(self) -> tuple[pathlib.Path, ...]:
+        root = self._rooted(_CPU_ROOT)
+        if not root.is_dir():
+            return ()
+        return tuple(
+            path
+            for path in sorted(root.glob("cpu[0-9]*"))
+            if path.name[3:].isdigit() and (path / "cpufreq").is_dir()
+        )
+
+    def _rapl_trees(self) -> tuple[pathlib.Path, ...]:
+        return tuple(
+            path
+            for path in (self._rooted(item) for item in _RAPL_TREES)
+            if path.is_dir()
+        )
+
+    @staticmethod
+    def _path_is_readable_and_writable(path: pathlib.Path) -> bool:
+        try:
+            path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return os.access(path, os.W_OK)
+
+    @staticmethod
+    def _run_powerprofilesctl(*args: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(
+                ["powerprofilesctl", *args],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _get_ppd_profile(self) -> str:
+        result = self._run_powerprofilesctl("get")
+        if result is None or result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+
+    def _set_ppd_profile(self, profile: str) -> bool:
+        result = self._run_powerprofilesctl("set", profile)
+        if result is None or result.returncode != 0:
+            if result is not None and result.stderr.strip():
+                log.warning(
+                    "powerprofilesctl set %s failed: %s",
+                    profile,
+                    result.stderr.strip(),
+                )
+            return False
+        return True
+
     def get_power_capability(self) -> Capability:
         if not self._honor_ok:
             return Capability(
                 status=CapabilityStatus.UNAVAILABLE,
-                reason_code="honor_tools_missing",
-                message="honor-tools is required for power profile writes",
+                reason_code="honor_tools_incompatible",
+                message=self._honor_error or "honor-tools is unavailable",
             )
         if self._require_platform_or_none() is None:
             return Capability(
@@ -607,15 +823,56 @@ class HonorToolsAdapter:
                 reason_code="platform_not_supported",
                 message="Power profiles are disabled on unverified hardware",
             )
-        if shutil.which("powerprofilesctl") is not None:
+        if shutil.which("powerprofilesctl") is None:
             return Capability(
-                status=CapabilityStatus.SUPPORTED,
-                message="Power profile control available via powerprofilesctl",
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="powerprofilesctl_missing",
+                message="powerprofilesctl not found",
+            )
+        if not self._get_ppd_profile():
+            return Capability(
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="power_profiles_daemon_unavailable",
+                message="power-profiles-daemon did not report an active profile",
+            )
+
+        cpu_dirs = self._power_cpu_dirs()
+        rapl_trees = self._rapl_trees()
+        required = [
+            *(
+                path / "cpufreq" / filename
+                for path in cpu_dirs
+                for filename in (
+                    "scaling_governor",
+                    "energy_performance_preference",
+                )
+            ),
+            *(path / filename for path in rapl_trees for filename in _RAPL_LIMIT_FILES),
+            self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo"),
+            self._rooted(f"{_INTEL_PSTATE_ROOT}/max_perf_pct"),
+        ]
+        if not cpu_dirs or not rapl_trees:
+            return Capability(
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="power_sysfs_missing",
+                message="CPU frequency or Intel RAPL controls are unavailable",
+            )
+        inaccessible = [
+            str(path)
+            for path in required
+            if not self._path_is_readable_and_writable(path)
+        ]
+        if inaccessible:
+            return Capability(
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="power_sysfs_inaccessible",
+                message="Required power controls are not readable and writable",
+                resources=tuple(inaccessible),
             )
         return Capability(
-            status=CapabilityStatus.UNAVAILABLE,
-            reason_code="powerprofilesctl_missing",
-            message="powerprofilesctl not found",
+            status=CapabilityStatus.SUPPORTED,
+            message="PPD-coordinated power profile control is available",
+            resources=tuple(str(path) for path in required),
         )
 
     def get_fan_capability(self) -> Capability:
@@ -775,6 +1032,40 @@ class HonorToolsAdapter:
 
     # -- Power --
 
+    @staticmethod
+    def _read_path(path: pathlib.Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _read_power_status(self) -> dict[str, Any]:
+        rapl: dict[str, dict[str, int | None]] = {}
+        for tree in self._rapl_trees():
+            rapl[tree.name] = {
+                filename: self._read_int(tree / filename)
+                for filename in _RAPL_LIMIT_FILES
+            }
+
+        governors: dict[str, str] = {}
+        epp: dict[str, str] = {}
+        for cpu in self._power_cpu_dirs():
+            index = cpu.name[3:]
+            cpufreq = cpu / "cpufreq"
+            governors[index] = self._read_path(cpufreq / "scaling_governor")
+            epp[index] = self._read_path(cpufreq / "energy_performance_preference")
+
+        return {
+            "rapl": rapl,
+            "governors": governors,
+            "epp": epp,
+            "ppd_profile": self._get_ppd_profile(),
+            "no_turbo": self._read_int(self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo")),
+            "max_perf_pct": self._read_int(
+                self._rooted(f"{_INTEL_PSTATE_ROOT}/max_perf_pct")
+            ),
+        }
+
     def read_power(self) -> PowerSnapshot:
         if self._require_platform_or_none() is None:
             return PowerSnapshot(
@@ -782,23 +1073,32 @@ class HonorToolsAdapter:
                 last_error="Power status is disabled on unverified hardware",
             )
         try:
-            from honor.power import get_status
-
-            status = get_status()
-            ppd = str(status.get("ppd_profile", ""))
-            applied = {
-                "power-saver": "silent",
-                "balanced": "balanced",
-                "performance": "performance",
-            }.get(ppd, "")
+            status = self._read_power_status()
+            rapl = status["rapl"]
+            complete = (
+                isinstance(rapl, dict)
+                and bool(rapl)
+                and all(
+                    isinstance(values, dict)
+                    and all(value is not None for value in values.values())
+                    for values in rapl.values()
+                )
+                and bool(status["governors"])
+                and all(status["governors"].values())
+                and bool(status["epp"])
+                and all(status["epp"].values())
+                and bool(status["ppd_profile"])
+                and status["no_turbo"] is not None
+                and status["max_perf_pct"] is not None
+            )
             ac_online = None
             if self._ac_path is not None:
                 ac_online = self._read_int(self._ac_path / "online") == 1
             return PowerSnapshot(
-                available=True,
-                applied_profile=applied,
+                available=complete,
                 observed_summary=status,
                 ac_online=ac_online,
+                last_error="" if complete else "Power observation is incomplete",
             )
         except Exception as exc:  # noqa: BLE001
             return PowerSnapshot(available=False, last_error=str(exc))
@@ -807,241 +1107,117 @@ class HonorToolsAdapter:
         self, profile: str, definition: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         self._require_honor()
+        self._require_platform()
+        if definition is None:
+            return {"error": "A complete power profile definition is required"}
         try:
-            from honor.config import Config, PowerProfile
-            from honor.power import apply_profile
+            normalized = _normalize_power_definition(definition)
+            capability = self.get_power_capability()
+            if not capability.writable:
+                return {
+                    "error": capability.message or "Power control is unavailable",
+                    "reason_code": capability.reason_code,
+                }
+            ppd_write_ok = self._set_ppd_profile(normalized["ppd_profile"])
+            if not ppd_write_ok:
+                observed = self._read_power_status()
+                return {
+                    "profile": profile,
+                    "writes": {"ppd": False},
+                    "observed": observed,
+                    **verify_power_definition(observed, normalized),
+                }
 
-            cfg = Config()
-            if definition is not None:
-                cfg.power.profiles[profile] = PowerProfile(
-                    pl1_uw=int(definition["pl1_uw"]),
-                    pl2_uw=int(definition["pl2_uw"]),
-                    governor=str(definition["governor"]),
-                    epp=str(definition["epp"]),
-                    ppd_profile=str(definition["ppd_profile"]),
-                    turbo_enabled=bool(definition["turbo_enabled"]),
-                    max_perf_pct=int(definition["max_perf_pct"]),
+            # Let PPD finish its profile transition before applying the
+            # definition-specific sysfs values that are verified below.
+            time.sleep(PPD_SETTLE_SECONDS)
+            cpu_dirs = self._power_cpu_dirs()
+            governor_pre = {
+                cpu.name[3:]: self._write_text_verified(
+                    cpu / "cpufreq/scaling_governor", "powersave"
                 )
-            raw = apply_profile(profile, cfg)
-
-            def _all_true(value: Any) -> bool:
-                if isinstance(value, dict):
-                    return bool(value) and all(_all_true(v) for v in value.values())
-                return value is True
-
+                for cpu in cpu_dirs
+            }
+            rapl_writes = {
+                tree.name: {
+                    _RAPL_LIMIT_FILES[0]: self._write_text_verified(
+                        tree / _RAPL_LIMIT_FILES[0], normalized["pl1_uw"]
+                    ),
+                    _RAPL_LIMIT_FILES[1]: self._write_text_verified(
+                        tree / _RAPL_LIMIT_FILES[1], normalized["pl2_uw"]
+                    ),
+                }
+                for tree in self._rapl_trees()
+            }
+            epp_writes = self._write_epp(normalized["epp"], cpu_dirs)
+            governor_writes = {
+                cpu.name[3:]: self._write_text_verified(
+                    cpu / "cpufreq/scaling_governor", normalized["governor"]
+                )
+                for cpu in cpu_dirs
+            }
+            misc_writes = {
+                "no_turbo": self._write_text_verified(
+                    self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo"),
+                    0 if normalized["turbo_enabled"] else 1,
+                ),
+                "max_perf_pct": self._write_text_verified(
+                    self._rooted(f"{_INTEL_PSTATE_ROOT}/max_perf_pct"),
+                    normalized["max_perf_pct"],
+                ),
+            }
+            observed = self._read_power_status()
+            verified = verify_power_definition(observed, normalized)
+            writes = {
+                "ppd": ppd_write_ok,
+                "governor_pre": governor_pre,
+                "rapl": rapl_writes,
+                "epp": epp_writes,
+                "governor": governor_writes,
+                "misc": misc_writes,
+            }
             return {
-                **raw,
-                "governor_ok": _all_true(raw.get("governor", {})),
-                "epp_ok": _all_true(raw.get("epp", {})),
-                "ppd_ok": raw.get("ppd_ok") is True,
-                "rapl_ok": _all_true(raw.get("rapl", {})),
-                "misc_ok": raw.get("no_turbo") is True
-                and raw.get("max_perf_pct") is True,
+                "profile": profile,
+                "writes": writes,
+                "observed": observed,
+                "governor_ok": _all_true(governor_pre)
+                and _all_true(governor_writes)
+                and verified["governor_ok"],
+                "epp_ok": _all_true(epp_writes) and verified["epp_ok"],
+                "ppd_ok": ppd_write_ok and verified["ppd_ok"],
+                "rapl_ok": _all_true(rapl_writes) and verified["rapl_ok"],
+                "misc_ok": _all_true(misc_writes) and verified["misc_ok"],
             }
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
 
-    def stop_competing_power_daemons(self) -> None:
-        """Stop and mask PPD and intel_lpmd so they don't overwrite RAPL.
-
-        Both daemons continuously write their own PL1/PL2 values to the
-        RAPL MSR, clobbering our values within ~1 second.  Stopping and
-        masking them ensures our RAPL limits stick and survive reboots.
-
-        Also enables HWP dynamic boost, which allows the CPU to boost
-        aggressively within the RAPL envelope.
-
-        Only runs on detected Honor platforms — on other hardware, PPD
-        is the standard power manager and should not be touched.
-
-        This should be called once during service initialization, not on
-        every profile apply.  Masking (not disabling) is used because it
-        prevents systemd from restarting the unit even if another service
-        depends on it, and is cleanly reversible with ``systemctl unmask``.
-
-        Best-effort: if the daemons aren't installed, the calls are
-        silently ignored.
-        """
-        # Only stop daemons on detected Honor platforms.  On other
-        # hardware, PPD is the standard power manager and should be left
-        # alone.
-        if self._require_platform_or_none() is None:
-            return
-
-        import pathlib
-        import subprocess
-
-        for daemon in ("power-profiles-daemon", "intel_lpmd"):
-            for action in ("stop", "mask"):
-                try:
-                    subprocess.run(
-                        ["systemctl", action, daemon],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=5,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-
-        # Enable HWP dynamic boost so the CPU uses the full RAPL envelope.
-        # This path only exists on Intel systems with intel_pstate.
-        hwp_path = pathlib.Path(
-            "/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost"
-        )
-        if hwp_path.exists():
-            try:
-                hwp_path.write_text("1", encoding="utf-8")
-            except OSError:
-                pass
-
-    def rewrite_epp(self, epp: str, governor: str) -> bool:
-        """Re-write EPP after PPD's asynchronous overwrite.
-
-        Returns True if all CPU EPP writes succeeded.
-
-        Two intel_pstate quirks are handled here:
-
-        1. **Read-back requirement:** an EPP sysfs write does not
-           reliably commit to hardware unless immediately followed by a
-           read of the same file.  The read-back flushes the write into
-           intel_pstate, causing PPD's competing write to get EBUSY.
-
-        2. **Governor guard:** intel_pstate rejects EPP writes when the
-           governor is ``performance``, and setting the governor back to
-           ``performance`` after the EPP write resets EPP to
-           ``default``.  So when the requested governor is
-           ``performance`` we leave it at ``powersave`` — EPP is the
-           primary performance control on modern Intel CPUs.
-        """
-        import glob
-        import pathlib
-        import time
-
-        cpu_dirs = sorted(
-            p
-            for p in glob.glob("/sys/devices/system/cpu/cpu[0-9]*")
-            if pathlib.Path(p).name[3:].isdigit()
-        )
-        # Flip to powersave so EPP is writable.
-        for cpu in cpu_dirs:
-            self._write_sysfs(f"{cpu}/cpufreq/scaling_governor", "powersave")
-        # Write EPP with read-back + retries.  The read-back commits the
-        # write into intel_pstate so PPD's async overwrite gets EBUSY.
-        all_ok = True
-        for cpu in cpu_dirs:
-            path = f"{cpu}/cpufreq/energy_performance_preference"
-            ok = False
-            for _attempt in range(5):
-                if self._write_sysfs(path, epp):
-                    # Read back immediately — this is what makes the write
-                    # stick by flushing it into the driver.
-                    try:
-                        pathlib.Path(path).read_text(encoding="utf-8")
-                    except OSError:
-                        pass
-                    ok = True
-                    break
-                time.sleep(0.1)
-            if not ok:
-                log.warning("EPP re-write failed for %s", path)
-                all_ok = False
-        # Restore the governor only when it won't reset EPP.
-        if governor != "performance":
-            for cpu in cpu_dirs:
-                self._write_sysfs(f"{cpu}/cpufreq/scaling_governor", governor)
-        else:
-            log.info(
-                "keeping governor=powersave to preserve EPP=%s "
-                "(performance governor would reset EPP to default)",
-                epp,
-            )
-        return all_ok
-
-    def write_rapl_msr(self, pl1_uw: int, pl2_uw: int) -> bool:
-        """Write PL1/PL2 directly to the RAPL MSR (0x610).
-
-        PPD and intel_lpmd overwrite RAPL limits via sysfs, and the sysfs
-        driver caches the write without actually reaching the MSR.  Writing
-        the MSR directly bypasses both layers so our values stick.
-
-        MSR 0x610 is package-scoped, so writing to CPU 0 is sufficient.
-        """
-        import os
-        import struct
-
-        MSR_RAPL_POWER_UNIT = 0x606
-        MSR_PKG_POWER_LIMIT = 0x610
-
-        # Bounds check: reject values outside a sane range.
-        # Minimum 3W (idle floor), maximum 150W (well above any laptop SKU).
-        for label, value in (("PL1", pl1_uw), ("PL2", pl2_uw)):
-            watts = value / 1_000_000
-            if watts < 3.0 or watts > 150.0:
-                log.warning(
-                    "RAPL MSR write rejected: %s=%.1fW out of range [3, 150]",
-                    label,
-                    watts,
-                )
-                return False
-
+    @staticmethod
+    def _write_text_verified(path: pathlib.Path, value: str | int) -> bool:
+        """Write one sysfs value and require exact immediate readback."""
         try:
-            # Read power units from CPU 0.
-            fd = os.open("/dev/cpu/0/msr", os.O_RDONLY)
-            os.lseek(fd, MSR_RAPL_POWER_UNIT, os.SEEK_SET)
-            units_val = struct.unpack("<Q", os.read(fd, 8))[0]
-            os.close(fd)
-            power_unit = units_val & 0xF
-            watts_per_unit = 1.0 / (2**power_unit)
-            pl1_units = int(round(pl1_uw / 1_000_000 / watts_per_unit))
-            pl2_units = int(round(pl2_uw / 1_000_000 / watts_per_unit))
-
-            # Read current PKG_POWER_LIMIT to preserve time windows.
-            fd = os.open("/dev/cpu/0/msr", os.O_RDONLY)
-            os.lseek(fd, MSR_PKG_POWER_LIMIT, os.SEEK_SET)
-            old = struct.unpack("<Q", os.read(fd, 8))[0]
-            os.close(fd)
-            tw1 = (old >> 17) & 0x7F
-            tw2 = (old >> 49) & 0x7F
-
-            # Build new value: PL1 + enabled + clamp + time window, PL2 same.
-            lo = (
-                pl1_units
-                | (1 << 15)  # PL1 enabled
-                | (1 << 16)  # PL1 clamp
-                | (tw1 << 17)
-            )
-            hi = (
-                pl2_units
-                | (1 << 47)  # PL2 enabled
-                | (tw2 << 49)
-            )
-            val = (lo | (hi << 32)) & 0xFFFFFFFFFFFFFFFF
-
-            # MSR 0x610 is package-scoped — writing to CPU 0 is sufficient.
-            fd = os.open("/dev/cpu/0/msr", os.O_WRONLY)
-            os.lseek(fd, MSR_PKG_POWER_LIMIT, os.SEEK_SET)
-            os.write(fd, struct.pack("<Q", val))
-            os.close(fd)
-            log.info(
-                "RAPL MSR written: PL1=%dW (%d units), PL2=%dW (%d units)",
-                pl1_uw // 1_000_000,
-                pl1_units,
-                pl2_uw // 1_000_000,
-                pl2_units,
-            )
-            return True
-        except OSError as exc:
-            log.warning("RAPL MSR write failed: %s", exc)
-            return False
-
-    def _write_sysfs(self, path: str, value: str) -> bool:
-        """Write a string to a sysfs path (root-owned, best-effort)."""
-        try:
-            pathlib.Path(path).write_text(value, encoding="utf-8")
-            return True
+            expected = str(value)
+            path.write_text(expected, encoding="utf-8")
+            return path.read_text(encoding="utf-8").strip() == expected
         except OSError:
             return False
+
+    def _write_epp(
+        self, value: str, cpu_dirs: tuple[pathlib.Path, ...]
+    ) -> dict[str, bool]:
+        """Write and verify EPP with one bounded retry budget."""
+        deadline = time.monotonic() + 2.0
+        result: dict[str, bool] = {}
+        for cpu in cpu_dirs:
+            path = cpu / "cpufreq/energy_performance_preference"
+            ok = False
+            for attempt in range(3):
+                ok = self._write_text_verified(path, value)
+                if ok or time.monotonic() >= deadline:
+                    break
+                if attempt < 2:
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            result[cpu.name[3:]] = ok
+        return result
 
     # -- Fan --
 
