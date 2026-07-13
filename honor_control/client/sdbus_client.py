@@ -269,6 +269,26 @@ class SdbusClient(ControlClient):
     async def set_daemon_enabled(self, enabled: bool) -> OperationResult:
         return _decode_result(await self._call_method("SetDaemonEnabled", enabled))
 
+    async def apply_touchpad_settings(
+        self, settings: dict[str, int]
+    ) -> OperationResult:
+        return _decode_result(
+            await self._call_method("ApplyTouchpadSettings", settings)
+        )
+
+    async def set_touchpad_setting(
+        self, setting: str, value: int
+    ) -> OperationResult:
+        return _decode_result(
+            await self._call_method("SetTouchpadSetting", setting, value)
+        )
+
+    async def query_touchpad_support(self) -> dict[str, Any]:
+        return await self._call_method("QueryTouchpadSupport")
+
+    async def probe_touchpad_firmware(self) -> dict[str, Any]:
+        return await self._call_method("ProbeTouchpadFirmware")
+
     # -- GPU --
 
     async def set_mitigation_enabled(self, enabled: bool) -> OperationResult:
@@ -434,6 +454,22 @@ class FakeClient:
     async def set_daemon_enabled(self, enabled: bool) -> OperationResult:
         return await self._app.set_gesture_daemon_enabled(enabled)
 
+    async def apply_touchpad_settings(
+        self, settings: dict[str, int]
+    ) -> OperationResult:
+        return await self._app.apply_touchpad_settings(settings)
+
+    async def set_touchpad_setting(
+        self, setting: str, value: int
+    ) -> OperationResult:
+        return await self._app.set_touchpad_setting(setting, value)
+
+    async def query_touchpad_support(self) -> dict[str, Any]:
+        return await self._app.query_touchpad_support()
+
+    async def probe_touchpad_firmware(self) -> dict[str, Any]:
+        return await self._app.probe_touchpad_firmware()
+
     async def set_mitigation_enabled(self, enabled: bool) -> OperationResult:
         return await self._app.set_gpu_mitigation_enabled(enabled)
 
@@ -592,6 +628,12 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
             firmware_settings_supported=_bool(
                 gestures.get("firmware_settings_supported")
             ),
+            firmware_settings={
+                str(name): int(value)
+                for name, value in _dict(
+                    gestures.get("firmware_settings")
+                ).items()
+            },
             last_error=_str(gestures.get("last_error")),
         ),
         gpu=GpuSnapshot(

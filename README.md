@@ -21,13 +21,15 @@ services.
 - **Fan control:** enabled only on verified MRA-XXX hardware with a valid CPU
   temperature sensor (EC writes via `acpi_call`)
 - **Touchpad gesture actions:** input decoder and Linux uinput dispatcher
-  implemented; firmware setting writes remain unsupported
+  implemented; typed firmware settings are available through D-Bus and the
+  standalone `honor-touchpadctl` transport
 - **GPU mitigation:** disabled until its original IRQ/C-state values can be
   captured and restored reliably
-- **Firmware setting writes:** unsupported (the Windows
-  service/driver-to-hardware protocol and WMI buffer effects are unknown)
+- **Firmware setting writes:** implemented for the descriptor-verified vendor
+  HID collection on exact DMI `HONOR/MRA-XXX`; Linux on-hardware replay remains
+  the final validation step
 
-See [gesture Linux remaining work](docs/gesture-linux-remaining-work.md) for
+See [touchpad protocol and Linux validation](docs/gesture-linux-remaining-work.md) for
 the confirmed protocol, Windows capture procedure, and implementation gate.
 
 ## Architecture
@@ -157,9 +159,14 @@ sudo install -D -o root -g root -m 0755 my-ac-hook \
 ### GUI
 
 ```bash
-honor-control-gui        # launch the GUI
-honor-control-tray       # launch the system tray
+honor-control-gui        # GUI + integrated system tray
+honor-control-tray       # optional tray-only process
 ```
+
+Closing the GUI window hides it to the tray by default. Left-click the tray
+icon to restore the existing window; its menu provides quick power-profile,
+charge-limit, gesture-daemon, and touchpad controls. Use **Quit** from the File
+or tray menu to exit. This behavior can be disabled on the Settings page.
 
 ## Development
 
@@ -183,9 +190,9 @@ honor-control-gui --bus session
 ## Configuration
 
 - `/var/lib/honor-control/state.toml` — service-owned desired state
-  (battery thresholds, power profile, fan curves, gesture mappings,
-  GPU mitigation). Atomic, versioned, validated.
-- `QSettings` — window geometry, refresh preference only.
+  (battery thresholds, power profile, fan curves, touchpad firmware settings,
+  gesture mappings, GPU mitigation). Atomic, versioned, validated.
+- `QSettings` — window geometry and close-to-tray preference only.
 
 ## License
 

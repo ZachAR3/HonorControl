@@ -18,13 +18,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import pathlib
 import sys
 from typing import Any
 
 from honor_control import __version__
 from honor_control.client.errors import ClientError
 from honor_control.client.sdbus_client import SdbusClient
-from honor_control.core.errors import DomainException, TransportError
+from honor_control.core.errors import DomainError, DomainException, TransportError
+from honor_control.core.touchpad import (
+    TOUCHPAD_SETTING_SPECS,
+    TouchpadSetting,
+    parse_touchpad_setting,
+    parse_touchpad_value,
+)
 
 #: Exit codes (stable, scriptable).
 EXIT_OK = 0
@@ -314,6 +321,64 @@ async def cmd_gesture_daemon(args: argparse.Namespace, client) -> int:
     return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
 
 
+async def cmd_touchpad_probe(args: argparse.Namespace, client) -> int:
+    probe = await client.probe_touchpad_firmware()
+    _emit(args, probe, _fmt_dict(probe))
+    return EXIT_OK if probe.get("available") else EXIT_UNAVAILABLE
+
+
+async def cmd_touchpad_list(args: argparse.Namespace, client) -> int:
+    settings = [
+        {
+            "setting": setting.value,
+            "minimum": TOUCHPAD_SETTING_SPECS[setting].minimum,
+            "maximum": TOUCHPAD_SETTING_SPECS[setting].maximum,
+            "labels": list(TOUCHPAD_SETTING_SPECS[setting].labels),
+        }
+        for setting in TouchpadSetting
+    ]
+    human = "\n".join(
+        f"{item['setting']}: {item['minimum']}..{item['maximum']}"
+        + (f" ({', '.join(item['labels'])})" if item["labels"] else "")
+        for item in settings
+    )
+    _emit(args, {"settings": settings}, human)
+    return EXIT_OK
+
+
+async def cmd_touchpad_set(args: argparse.Namespace, client) -> int:
+    setting = parse_touchpad_setting(args.setting)
+    value = parse_touchpad_value(setting, args.value)
+    result = await client.set_touchpad_setting(setting.value, value)
+    _emit(args, result.to_dict(), f"Touchpad setting: {result.message}")
+    return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
+
+
+async def cmd_touchpad_apply(args: argparse.Namespace, client) -> int:
+    from honor_control.cli.touchpadctl import _load_profile
+
+    settings, master = _load_profile(args.profile)
+    if master is not None:
+        raise DomainException(
+            code=DomainError.INVALID_ARGUMENT,
+            message=(
+                "honorctl touchpad apply does not manage [master]; use "
+                "honor-touchpadctl with the optional WMI module"
+            ),
+        )
+    result = await client.apply_touchpad_settings(
+        {setting.value: value for setting, value in settings.items()}
+    )
+    _emit(args, result.to_dict(), f"Touchpad profile: {result.message}")
+    return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
+
+
+async def cmd_touchpad_support(args: argparse.Namespace, client) -> int:
+    support = await client.query_touchpad_support()
+    _emit(args, support, _fmt_dict(support))
+    return EXIT_OK
+
+
 async def cmd_gpu_enable(args: argparse.Namespace, client) -> int:
     result = await client.set_mitigation_enabled(True)
     _emit(args, result.to_dict(), f"GPU: {result.message}")
@@ -498,6 +563,27 @@ def build_parser() -> argparse.ArgumentParser:
     daemon = ge_sub.add_parser("daemon", help="start/stop gesture dispatch")
     daemon.add_argument("enabled", choices=["on", "off"])
     daemon.set_defaults(func=cmd_gesture_daemon)
+
+    touchpad = sub.add_parser("touchpad", help="touchpad firmware controls")
+    tp_sub = touchpad.add_subparsers(
+        dest="subcommand", required=True, metavar="ACTION"
+    )
+    tp_sub.add_parser("probe", help="check DMI, descriptor, and access").set_defaults(
+        func=cmd_touchpad_probe
+    )
+    tp_sub.add_parser("list", help="list typed firmware settings").set_defaults(
+        func=cmd_touchpad_list
+    )
+    tp_set = tp_sub.add_parser("set", help="apply one firmware setting")
+    tp_set.add_argument("setting")
+    tp_set.add_argument("value")
+    tp_set.set_defaults(func=cmd_touchpad_set)
+    tp_apply = tp_sub.add_parser("apply", help="apply a TOML settings profile")
+    tp_apply.add_argument("profile", type=pathlib.Path)
+    tp_apply.set_defaults(func=cmd_touchpad_apply)
+    tp_sub.add_parser("support", help="query firmware capability bitmap").set_defaults(
+        func=cmd_touchpad_support
+    )
 
     gpu = sub.add_parser("gpu", help="GPU mitigation controls")
     gpu_sub = gpu.add_subparsers(dest="subcommand", required=True, metavar="ACTION")

@@ -92,7 +92,7 @@ echo "==> [3/7] Validating isolated installation"
 "$PY" -c \
     'from honor_control.backend.hardware import HonorToolsAdapter; assert HonorToolsAdapter().check_dependency()'
 "$PY" -m compileall -q "$VENV_DIR/lib"/python*/site-packages/honor_control
-for script in honor-control-service honorctl honor-control-gui honor-control-tray; do
+for script in honor-control-service honorctl honor-touchpadctl honor-control-gui honor-control-tray; do
     test -x "$VENV_DIR/bin/$script"
 done
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -127,6 +127,26 @@ install -m644 "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" \
     /usr/share/applications/org.honorlinux.Control.desktop
 install -m644 "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" \
     /usr/share/applications/org.honorlinux.Control.Tray.desktop
+install -m644 "$ROOT/packaging/systemd/honor-touchpad-restore.service" \
+    /etc/systemd/system/honor-touchpad-restore.service
+install -D -m755 "$ROOT/packaging/systemd/honor-touchpad-system-sleep" \
+    /usr/lib/systemd/system-sleep/honor-touchpad-restore
+install -D -m644 "$ROOT/packaging/touchpad/honor-touchpad.example.toml" \
+    /usr/share/doc/honor-control/honor-touchpad.example.toml
+install -d -m755 /usr/lib/honor-touchpad/honor_control/{core,backend,cli}
+install -m644 "$ROOT/honor_control/__init__.py" \
+    /usr/lib/honor-touchpad/honor_control/__init__.py
+install -m644 "$ROOT/honor_control/core/__init__.py" \
+    "$ROOT/honor_control/core/touchpad.py" \
+    /usr/lib/honor-touchpad/honor_control/core/
+install -m644 "$ROOT/honor_control/backend/__init__.py" \
+    "$ROOT/honor_control/backend/touchpad_firmware.py" \
+    /usr/lib/honor-touchpad/honor_control/backend/
+install -m644 "$ROOT/honor_control/cli/__init__.py" \
+    "$ROOT/honor_control/cli/touchpadctl.py" \
+    /usr/lib/honor-touchpad/honor_control/cli/
+install -m755 "$ROOT/packaging/touchpad/honor-touchpadctl" \
+    /usr/bin/honor-touchpadctl
 
 echo "==> [5/7] Creating state and runtime directories"
 install -d -m 0750 "$STATE_DIR"

@@ -1,0 +1,192 @@
+{
+  "schema_version": 2,
+  "scope": {
+    "platform": "HONOR MRA-XXX",
+    "windows_bios_observed": "3.05",
+    "windows_ec_observed": "3.5",
+    "acpi_device": "TOPS0102",
+    "hid_bus": "I2C",
+    "vendor_id": "0x35cc",
+    "product_id": "0x0104",
+    "release": "0x0101",
+    "usage_page": "0xff00",
+    "usage": "0x0001",
+    "windows_collection": "COL05",
+    "input_report_bytes": 9,
+    "output_report_bytes": 9
+  },
+  "evidence_status": {
+    "updated_windows_static_analysis": "complete",
+    "windows_hid_enumeration": "confirmed_read_only",
+    "linux_encoder_and_transport_offline_tests": "complete",
+    "linux_on_hardware_replay": "required_after_booting_linux",
+    "hid_setting_value_readback": "not_implemented_by_oem_protocol"
+  },
+  "hid_output": {
+    "api_on_windows": "WriteFile with overlapped I/O",
+    "report_template": "0e CC VV 00 00 00 00 00 00",
+    "startup_resume_template": "0e 00 TT TT TT TT TT 00 00",
+    "startup_resume_timestamp": "low five bytes of time(NULL), little-endian",
+    "support_query": "0e f0 00 00 00 00 00 00 00",
+    "support_response": "0e f0 BB BB BB BB BB BB BB"
+  },
+  "linux_transport_requirements": {
+    "platform_gate": "exact DMI sys_vendor HONOR and product_name MRA-XXX",
+    "discovery": "match VID/PID, then parse the HID descriptor and require Application ff00:0001, report ID 0e, 9-byte input and output",
+    "node_stability": "never hardcode hidrawN; rediscover after boot, resume, and reconnect",
+    "open_mode": "O_RDWR",
+    "write_contract": "include report ID byte and require exactly 9 bytes written",
+    "profile_validation": "validate every setting and value before opening the device",
+    "setting_order": "the order of the settings array",
+    "three_finger_drag_order": ["0x05", "0x11"],
+    "readback": "not available for HID settings; maintain and reapply desired state",
+    "partial_failure": "report accepted setting-report count; do not claim transactional rollback",
+    "capability_reader": "only one process may read while awaiting the asynchronous f0 response",
+    "resume": "rediscover, send a fresh timestamp report, then reapply the profile",
+    "master_order": "enable before HID settings; disable after HID settings"
+  },
+  "settings": [
+    {
+      "name": "sensitivity",
+      "helper_message_id": "0x02",
+      "registry_name": "sensitivity",
+      "command": "0x01",
+      "values": {"low": 0, "high": 1}
+    },
+    {
+      "name": "vibration_intensity",
+      "helper_message_id": "0x03",
+      "registry_name": "shock",
+      "command": "0x02",
+      "values": {"low": 0, "medium": 1, "high": 2}
+    },
+    {
+      "name": "press_text",
+      "helper_message_id": "0x04",
+      "registry_name": "SensitivityPressText",
+      "command": "0x03",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "press_picture",
+      "helper_message_id": "0x05",
+      "registry_name": "SensitivityPressPicture",
+      "command": "0x04",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "three_finger_drag",
+      "helper_message_id": "0x06",
+      "registry_name": "ThreeFingerDrag",
+      "command": "0x05",
+      "companion_command": "0x11",
+      "companion_registry_name": "TripleFingerLightTouch",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "mouse_like_mode",
+      "helper_message_id": "0x07",
+      "registry_name": "MouseLikeMode",
+      "command": "0x06",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "edge_brightness",
+      "helper_message_id": "0x08",
+      "registry_name": "EdgeGestureAdjusBrightness",
+      "command": "0x07",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "edge_volume",
+      "helper_message_id": "0x09",
+      "registry_name": "EdgeGestureAdjusVolume",
+      "command": "0x08",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "edge_control_center",
+      "helper_message_id": "0x0a",
+      "registry_name": "EdgeGestureOpenHiCenter",
+      "command": "0x09",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "edge_close_or_minimize",
+      "helper_message_id": "0x0b",
+      "registry_name": "EdgeGestureCloesOrMinWnd",
+      "command": "0x0a",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "knuckle_screenshot",
+      "helper_message_id": "0x0c",
+      "registry_name": "KnuckleScreenShot",
+      "command": "0x0b",
+      "values": {"off": 0, "on": 1}
+    },
+    {
+      "name": "knuckle_screen_record",
+      "helper_message_id": "0x0d",
+      "registry_name": "KnuckleRecordScreen",
+      "command": "0x0c",
+      "values": {"off": 0, "on": 1}
+    }
+  ],
+  "master_switch_wmi": {
+    "namespace": "ROOT\\WMI",
+    "class": "OemWMIMethod",
+    "method": "OemWMIfun",
+    "instance": "ACPI\\PNP0C14\\HWMI_0",
+    "guid": "ABBC0F5B-8EA1-11D1-A000-C90629100000",
+    "method_id": 1,
+    "input_bytes": 64,
+    "output_bytes": 256,
+    "input_encoding": "little-endian u64 command followed by 56 zero bytes",
+    "query": "0x00000f02",
+    "disable": "0x00001002",
+    "enable": "0x00011002",
+    "query_result": "output[0] is status (zero succeeds), output[1] is enabled"
+  },
+  "support_bits": {
+    "1": "one_knuckle_double_tap",
+    "2": "two_knuckle_double_tap",
+    "3": "left_edge_up",
+    "4": "left_edge_down",
+    "5": "right_edge_up",
+    "6": "right_edge_down",
+    "15": "top_left_corner_press",
+    "16": "top_right_corner_press",
+    "17": "single_finger_heavy_pressure",
+    "18": "right_to_left_slide",
+    "20": "three_finger_drag",
+    "26": "double_finger_pressure",
+    "27": "three_finger_light_touch"
+  },
+  "hid_input_events": {
+    "3": "brightness; byte 2 selects direction",
+    "4": "volume; byte 2 selects direction",
+    "5": "switch windows; byte 2 value 4 selects the alternate direction",
+    "6": "screenshot",
+    "7": "screen recording",
+    "8": "minimize window",
+    "9": "close window",
+    "10": "control center",
+    "11": "single-finger heavy pressure",
+    "12": "three-finger drag",
+    "14": "diagnostic dump",
+    "15": "double-finger pressure",
+    "16": "three-finger light touch / AI search",
+    "240": "support bitmap response"
+  },
+  "internal_or_legacy": {
+    "shutdown_reset": "0e 0e 00 00 00 00 00 00 00",
+    "screen_off_wmi": "0x00001502",
+    "screen_on_wmi": "0x00011502",
+    "single_finger_heavy_press_command": "0x03",
+    "double_finger_pressure_command": "0x10",
+    "legacy_edge_gesture_command": "0x04",
+    "legacy_knuckle_command": "0x05",
+    "warning": "legacy aliases conflict byte-for-byte with current public controls and must not be exposed as independent settings"
+  }
+}

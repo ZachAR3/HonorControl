@@ -136,6 +136,61 @@ class TestBatteryMutation:
             asyncio.run(svc.set_battery_mode("custom"))
 
 
+class TestTouchpadFirmwareMutation:
+    """Verify typed touchpad writes and desired-state persistence."""
+
+    def test_apply_profile_persists_only_after_acceptance(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        result = asyncio.run(
+            svc.apply_touchpad_settings(
+                {"edge_volume": 0, "three_finger_drag": 1}
+            )
+        )
+
+        assert result.status == OperationStatus.SUCCESS
+        assert result.applied is True
+        assert result.persisted is True
+        assert result.details["reports_applied"] == 3
+        assert svc._config.state.touchpad.settings == {  # noqa: SLF001
+            "edge_volume": 0,
+            "three_finger_drag": 1,
+        }
+
+    def test_invalid_profile_never_reaches_hardware(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        before = len(
+            [
+                entry
+                for entry in svc._hw.call_log  # noqa: SLF001
+                if entry[0] == "apply_touchpad_settings"
+            ]
+        )
+
+        with pytest.raises(DomainException):
+            asyncio.run(svc.apply_touchpad_settings({"raw_command": 1}))
+
+        after = len(
+            [
+                entry
+                for entry in svc._hw.call_log  # noqa: SLF001
+                if entry[0] == "apply_touchpad_settings"
+            ]
+        )
+        assert after == before
+
+    def test_support_query_returns_named_bitmap(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        support = asyncio.run(svc.query_touchpad_support())
+
+        assert 20 in support["supported_bits"]
+        assert support["known"]["20"] == "three_finger_drag"
+
+
 class TestPowerMutation:
     """Verify power profile mutations."""
 

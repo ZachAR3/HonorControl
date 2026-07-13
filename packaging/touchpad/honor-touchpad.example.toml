@@ -1,0 +1,24 @@
+# Complete Honor MagicBook Art 14 touchpad profile.
+#
+# Copy to /etc/honor-touchpad.toml, edit, inspect with:
+#   honor-touchpadctl apply --dry-run /etc/honor-touchpad.toml
+# and only then enable honor-touchpad-restore.service.
+
+[settings]
+sensitivity = "low"                 # low | high
+vibration_intensity = "high"        # low | medium | high
+press_text = false
+press_picture = false
+three_finger_drag = false
+mouse_like_mode = false
+edge_brightness = true
+edge_volume = false
+edge_control_center = false
+edge_close_or_minimize = false
+knuckle_screenshot = false
+knuckle_screen_record = false
+
+# Optional. Uncomment only after loading and querying the supplied
+# honor-touchpad-wmi kernel module with an external mouse available.
+# [master]
+# enabled = true

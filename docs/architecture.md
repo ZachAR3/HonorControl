@@ -113,5 +113,5 @@ honor_control/
     │   ├── controller.py        # worker loop, commands, refresh/reconnect
     │   ├── state.py             # typed Qt-facing store
     │   └── pages/...
-    └── tray/tray.py
+    └── tray/tray.py              # integrated + optional tray-only frontend
 ```

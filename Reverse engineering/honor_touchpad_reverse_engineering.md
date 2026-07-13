@@ -620,9 +620,12 @@ KeplerR, NobelK, NobelB, VoltaR, Hubble
 | `capture_logs/subscribers_capture.log` | 4-subscriber capture (HnPerfPowerNexus + HnPCAIService ×2 + HnPerformanceCenter) |
 | `capture_logs/all_settings_capture.log` | **Full 6-process capture** with all 9 touchpad settings toggled (19 events, 7380 lines) |
 | `capture_logs/battery_capture.log` | **Battery protection capture** with 7 processes incl PCManager.exe (6 toggle events, 4.3 MB) |
+| `capture_logs/ioctl_trace_full.log` | **IOCTL trace** hooking DeviceIoControl on all 7 Honor processes (6500 lines) |
 | `capture_honor_touchpad.js` | Frida capture script (UI hooks) |
 | `capture_honor_subscribers.js` | Frida capture script (subscriber process hooks) |
 | `capture_subscribers_driver.py` | Python driver for multi-process Frida attach |
+| `trace_honor_ioctl.js` | Frida script: hooks DeviceIoControl on HNOs2EcX64/OS2SOC handles |
+| `trace_honor_driver.py` | Python driver for the IOCTL trace |
 | `honor_drivers/HNOs2EC10x64.sys` | Honor PC BIOS EC driver (extracted from PC Manager) |
 | `honor_drivers/OS2SOC.sys` | Honor SOC driver (extracted from PC Manager) |
 | `honor_touchpad_linux.c` | Linux hidapi replay skeleton |

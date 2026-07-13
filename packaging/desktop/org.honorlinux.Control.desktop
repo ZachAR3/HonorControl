@@ -2,13 +2,13 @@
 Type=Application
 Name=Honor Control
 GenericName=Laptop Control Center
-Comment=Manage power, battery, fan, and gestures on Honor MagicBook laptops
+Comment=Manage power, battery, fan, and touchpad settings on Honor MagicBook laptops
 Comment[de]=Energie, Akku, Lüfter und Gesten am Honor MagicBook verwalten
 Exec=honor-control-gui
 TryExec=honor-control-gui
 Icon=preferences-system
 Terminal=false
 Categories=Settings;HardwareSettings;Qt;
-Keywords=honor;magicbook;power;battery;fan;gestures;
+Keywords=honor;magicbook;power;battery;fan;touchpad;gestures;tray;
 StartupNotify=true
 StartupWMClass=Honor Control

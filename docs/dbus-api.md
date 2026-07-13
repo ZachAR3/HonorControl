@@ -11,7 +11,7 @@ Object path: `/org/honorlinux/Control1`
 | Method | Signature | Description |
 |---|---|---|
 | `GetApiVersion` | `() -> u` | D-Bus API version (currently 1) |
-| `GetSchemaVersion` | `() -> u` | Snapshot schema version (currently 3) |
+| `GetSchemaVersion` | `() -> u` | Snapshot schema version (currently 4) |
 | `GetSnapshot` | `() -> a{sv}` | Current system snapshot |
 | `RunChecks` | `() -> a{sv}` | Run diagnostic checks |
 
@@ -48,6 +48,10 @@ Object path: `/org/honorlinux/Control1`
 | `SetEnabled` | `(s id, b enabled) -> a{sv}` | Enable/disable gesture |
 | `SetAllEnabled` | `(b enabled) -> a{sv}` | Batch enable/disable |
 | `SetDaemonEnabled` | `(b enabled) -> a{sv}` | Toggle gesture daemon |
+| `ApplyTouchpadSettings` | `(a{si} settings) -> a{sv}` | Apply a validated settings profile |
+| `SetTouchpadSetting` | `(s setting, i value) -> a{sv}` | Apply one typed firmware setting |
+| `QueryTouchpadSupport` | `() -> a{sv}` | Query support bitmap with exclusive reader access |
+| `ProbeTouchpadFirmware` | `() -> a{sv}` | Check DMI, HID descriptor, and device access |
 
 #### GPU (admin auth)
 

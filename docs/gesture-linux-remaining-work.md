@@ -1,197 +1,201 @@
-# Honor Touchpad Gestures: Remaining Windows-to-Linux Work
+# Honor Touchpad Protocol and Linux Validation
 
-## Scope and current result
+## Result
 
-The Linux action path is implemented for the confirmed vendor input report:
+The missing Windows-to-hardware boundary is recovered. Ordinary touchpad
+settings do not use the Honor EC driver, `DeviceIoControl`, a HID Feature
+report, or the registry. The updated `MagicTouchPadPlugin.dll` opens the
+touchpad's vendor HID collection and sends nine-byte **Output** reports with
+overlapped `WriteFile`:
 
-`TOPS0102 touchpad → /dev/hidraw* → GestureRuntime → /dev/uinput → Linux keys`
-
-The service discovers HID VID `0x35cc`, PID `0x0104`, accepts only report ID
-`0x0e`, reads the gesture type/subtype from bytes 1/2, and dispatches validated
-key chords. It reconnects after device removal and exposes device, report, and
-emission status through D-Bus/UI. It performs no HID output, WMI, or EC write.
-
-Fully enabling/configuring every firmware gesture from Linux is **not yet
-possible**. The missing artifact is the Windows service/driver-to-hardware
-write protocol. The existing captures establish UI IPC and input events, but
-not that final write.
-
-## Evidence that is safe to use
-
-| Evidence | Established meaning | Linux use |
-|---|---|---|
-| ACPI `TOPS0102`; HID `0018:35CC:0104` | Target device identity | Exact hidraw discovery |
-| HID page `0xff00`, report ID `0x0e`, 8-byte payload | Vendor **input** report | Read only |
-| `3:1`, `3:2` | Brightness up/down | Implemented defaults |
-| `4:1`, `4:2` | Volume up/down | Implemented defaults |
-| `10:3` | Two-finger swipe left | Implemented default |
-| types `6`, `7`, `8`, `9` | Knuckle/corner actions | Implemented defaults |
-| 61-byte PC Manager IPC; setting ID at byte 27, value at byte 52 | UI-to-`PCManagerMainService` message | RE lead only |
-| setting IDs `02`, `03`, `06`, `08`–`0d` | Windows UI setting identifiers | Do not send to hardware |
-| Registry values | Windows persistence/cache mirror | Do not treat as hardware protocol |
-| WMI GUID `ABBC0F5B-8EA1-11D1-A000-C90629100000`, MethodId 1 | A transport exists | Read-only presence probe |
-| WMI buffers beginning `06 02` / `06 0e` | Unknown operations/effects | Never execute |
-
-Conflicting claims in the existing markdown reports are hypotheses, not proof.
-The duplicated ` (1)` files contain no independent corroboration. The C PoC
-`Reverse engineering/honor_touchpad_linux.c` is a placeholder: its mappings
-are empty and it names the hidapi type incorrectly, so it is not an
-implementation reference.
-
-## What must be captured on Windows
-
-Use the same MRA-XXX machine and record the exact PC Manager, service, driver,
-and BIOS versions. Keep Windows offline during capture where practical and
-retain original binaries. Hash every binary with SHA-256.
-
-Required artifacts:
-
-1. Export the relevant driver packages with `pnputil /export-driver`, including
-   INF, catalog, service executable/DLLs, and `.sys` files. Save `driverquery
-   /v`, device instance IDs, service names, and file versions.
-2. Record one clean boot with all gesture settings at a known baseline. Export
-   the relevant registry branch before and after; registry changes alone are
-   not protocol evidence.
-3. Capture one setting transition at a time: `off→on`, then `on→off`. Do not
-   click other PC Manager controls in the same trace. Include a no-change click
-   as a negative control.
-4. Repeat each transition at least three times. Then reboot Windows and verify
-   whether the hardware behavior persisted before opening PC Manager.
-5. Separately perform each physical gesture while no setting changes occur.
-   This separates input reports from configuration traffic.
-
-For every experiment save synchronized timestamps and this row:
-
-| Field | Required value |
-|---|---|
-| setting name / UI ID | exact name and observed 61-byte ID |
-| old/new value | `0→1` or `1→0` |
-| UI IPC | complete request/response bytes |
-| service call stack | module + RVA/symbol at hardware boundary |
-| device handle | path/interface GUID and owning PID |
-| operation | API plus IOCTL/report/method identifier |
-| input/output buffers | exact bytes and lengths, before and after call |
-| return status | Win32/NTSTATUS and bytes returned |
-| observed effect | behavior before/after and after reboot |
-
-## Capture order
-
-### 1. Identify the real hardware boundary
-
-Use Process Monitor first to correlate the UI action with
-`PCManagerMainService` and child/helper processes. Capture process/thread
-activity, registry writes, device opens, and image loads. Procmon will not
-usually expose kernel IOCTL payloads; its purpose here is to identify the
-process, device path, and timing.
-
-In the service and loaded DLLs, locate imports/call sites for:
-
-- `CreateFileW`, `WriteFile`, `DeviceIoControl`;
-- `HidD_SetFeature`, `HidD_SetOutputReport`, `HidD_GetFeature`;
-- `SetupDi*`, `CM_Get_Device_Interface_List*`;
-- `IWbemServices::ExecMethod` / WMI COM calls.
-
-Use Ghidra/IDA to trace the 61-byte IPC parser from the setting ID to one of
-those boundary calls. Record module-relative offsets and decompile the buffer
-builder. Static matches without a live call are insufficient.
-
-### 2. Capture user-mode calls and buffers
-
-Attach to the **service process**, not only the PC Manager UI. Use WinDbg or
-Frida hooks on the boundary functions above. Log entry and return, thread ID,
-handle, control code/report ID, input/output lengths, full buffers, and return
-status. Resolve each handle to its NT/DOS device path.
-
-If the process is protected or injection is blocked, use a test-signed VM or
-kernel debugging on a cloned installation. Do not disable protections on the
-only working Windows install without a recoverable image.
-
-Success criterion: toggling one setting produces a reproducible call whose
-payload changes only in understood fields and whose success/failure matches the
-observed hardware behavior.
-
-### 3. Trace the kernel driver when user mode ends at an IOCTL
-
-If the service calls a vendor driver, use WinDbg kernel debugging to break on
-that driver's `IRP_MJ_DEVICE_CONTROL` / `IRP_MJ_INTERNAL_DEVICE_CONTROL`
-dispatch. Record:
-
-- IOCTL value and decoded transfer method/access bits;
-- input/output buffer lengths and bytes;
-- dispatch handler and downstream calls;
-- any ACPI `_DSM`/WMI method, I2C HID transfer, EC command, or HID class request;
-- completion status and output bytes.
-
-Static analysis must then explain the observed live path. The current
-`HNOs2EC10x64.sys`/`OS2SOC.sys` reports do not yet prove that a particular
-IOCTL carries touchpad settings.
-
-### 4. Capture the final transport
-
-- For HID class calls, record report type, report ID, total length, and every
-  byte. Confirm with the HID report descriptor whether it is Feature or Output.
-- For ACPI/WMI, record GUID, instance, method ID, input/output buffers, ACPI
-  status, and AML method reached. Never infer semantics from the first two
-  bytes alone.
-- For I2C/EC traffic, prefer kernel/driver instrumentation. USBPcap does not
-  capture an internal I2C-HID touchpad.
-
-Change one setting per trace and compute bytewise diffs across repetitions.
-Fields that vary with timestamps, sequence numbers, checksums, or device IDs
-must be identified before Linux reproduction.
-
-## Protocol acceptance gate
-
-Do not add a Linux write implementation until all items pass:
-
-1. The same Windows call occurs for at least three repetitions of one toggle.
-2. Opposite values produce a stable, explained payload difference.
-3. A negative-control UI action does not produce the call.
-4. The complete route is known: UI IPC → service parser → driver/API → final
-   HID/WMI/ACPI/I2C/EC operation.
-5. Return status and any readback are understood.
-6. The exact target identity and supported firmware/driver versions are known.
-7. Recovery is proven: stock value can be restored after interruption,
-   malformed input is rejected, and a failed write cannot leave an unsafe
-   partial state.
-8. The operation has been replayed first on Windows through a minimal harness,
-   then on Linux in a readback-only or reversible laboratory test.
-
-## Linux implementation after the gate
-
-Keep firmware configuration separate from `GestureRuntime`:
-
-1. Add a narrow `GestureFirmwareTransport` implementation for the proven
-   transport. No generic raw-command D-Bus method.
-2. Add an exact platform/firmware allowlist and a non-mutating capability
-   probe. Unknown versions are read-only/unsupported.
-3. Model each setting as a typed enum/boolean with explicit encoding. Reject
-   unknown IDs, lengths, values, and reserved bits.
-4. Serialize writes through `HardwareCommandQueue`; apply one setting at a
-   time with timeout, readback, and structured partial-failure reporting.
-5. Save desired state only after verified success. Preserve observed,
-   desired, and applied values separately.
-6. Add golden-vector tests from sanitized Windows captures, invalid-buffer
-   tests, timeout/queue-poison tests, disconnect tests, and restore tests.
-7. Expose only typed D-Bus methods protected by the gesture polkit action.
-8. Add an explicit opt-in experimental flag until multiple cold boots and
-   suspend/resume cycles pass on real hardware.
-
-## What is usable now
-
-After installing the current source, verify:
-
-```bash
-systemctl status honor-control.service
-honorctl status
-honorctl gestures daemon on
-honorctl gestures list
-journalctl -u honor-control.service -n 100
+```text
+0e CC VV 00 00 00 00 00 00
 ```
 
-The service account must be able to read the discovered `/dev/hidraw*` node and
-write `/dev/uinput`; the production root service normally can. The UI reports
-the selected device, daemon state, reports seen, emitted actions, and last
-error. If firmware already emits the confirmed reports, Linux key actions work
-without any Windows-side protocol work. Windows RE is required only to change
-the touchpad firmware's own gesture enable/configuration settings from Linux.
+`CC` is the setting command and `VV` is the validated value. The global
+touchpad enable switch is the one exception: it uses `OemWMIMethod.OemWMIfun`
+in `ROOT\WMI` with a fixed 64-byte input.
+
+The Linux implementation consists of:
+
+- `honor_control/core/touchpad.py`: canonical commands and encoders;
+- `honor_control/backend/touchpad_firmware.py`: strict descriptor discovery,
+  typed hidraw transport, timeout handling, batching, and support query;
+- `honor_control/cli/touchpadctl.py`: `probe`, `encode`, `set`, `apply`,
+  `support`, and `master` operations;
+- `Reverse engineering/finish-trackpad-re/linux/wmi/`: optional narrow kernel
+  driver for the master switch;
+- `packaging/systemd/honor-touchpad-restore.service`: boot restore plus a
+  system-sleep hook for resume;
+- `Reverse engineering/finish-trackpad-re/protocol.json`: machine-readable
+  protocol contract.
+
+## Proven route
+
+```text
+MagicTouchPadSettingUI.exe
+  -> MagicTouchPadHelper.dll (one int argument)
+  -> 61-byte IPC message (message ID + value)
+  -> PCManagerMainService.exe / MagicTouchPadPlugin.dll
+  -> typed DLOpermpl setter
+  -> HIDClient::WriteToDev
+  -> WriteFile(COL05, 9-byte output report)
+  -> TOPS0102 touchpad firmware
+```
+
+The master switch branches at `DLOpermpl::SetTouchPadEnable` to the OEM WMI
+method instead. The plugin constructs a HID-shaped temporary buffer in that
+function but does not send it.
+
+## Exact endpoint
+
+The Linux writer accepts the endpoint only when all of these checks pass:
+
+| Property | Required value |
+|---|---:|
+| DMI vendor / product | `HONOR` / `MRA-XXX` |
+| ACPI device | `TOPS0102` |
+| HID VID / PID | `35cc` / `0104` |
+| Windows-observed release | `0101` (recorded, not a Linux selector) |
+| Usage page / usage | `ff00` / `0001` |
+| Collection type | Application |
+| Report ID | `0e` |
+| Input / output length | 9 / 9 bytes |
+
+On Windows this is collection `COL05`. On Linux the collection is discovered
+from the hidraw report descriptor; no `/dev/hidrawN` number is hardcoded.
+
+## Public setting calls
+
+All reserved bytes are zero. Boolean values are `0` and `1`.
+
+| Linux name | OEM registry name | Helper ID | Output report(s) |
+|---|---|---:|---|
+| `sensitivity` | `sensitivity` | `02` | `0e 01 VV 00 00 00 00 00 00` |
+| `vibration_intensity` | `shock` | `03` | `0e 02 VV 00 00 00 00 00 00` |
+| `press_text` | `SensitivityPressText` | `04` | `0e 03 VV 00 00 00 00 00 00` |
+| `press_picture` | `SensitivityPressPicture` | `05` | `0e 04 VV 00 00 00 00 00 00` |
+| `three_finger_drag` | `ThreeFingerDrag` | `06` | command `05`, then companion `11` |
+| `mouse_like_mode` | `MouseLikeMode` | `07` | `0e 06 VV 00 00 00 00 00 00` |
+| `edge_brightness` | `EdgeGestureAdjusBrightness` | `08` | `0e 07 VV 00 00 00 00 00 00` |
+| `edge_volume` | `EdgeGestureAdjusVolume` | `09` | `0e 08 VV 00 00 00 00 00 00` |
+| `edge_control_center` | `EdgeGestureOpenHiCenter` | `0a` | `0e 09 VV 00 00 00 00 00 00` |
+| `edge_close_or_minimize` | `EdgeGestureCloesOrMinWnd` | `0b` | `0e 0a VV 00 00 00 00 00 00` |
+| `knuckle_screenshot` | `KnuckleScreenShot` | `0c` | `0e 0b VV 00 00 00 00 00 00` |
+| `knuckle_screen_record` | `KnuckleRecordScreen` | `0d` | `0e 0c VV 00 00 00 00 00 00` |
+
+Sensitivity is `low=0`, `high=1`. Vibration intensity is `low=0`,
+`medium=1`, `high=2`. Updated managed UI IL proves those label mappings.
+Three-finger drag always sends both `05` and `11` with the same value, matching
+the OEM's `ThreeFingerDrag` and `TripleFingerLightTouch` persistence keys.
+
+## Lifecycle and capability calls
+
+At startup and resume the OEM service sends:
+
+```text
+0e 00 TT TT TT TT TT 00 00
+```
+
+The five `TT` bytes are the low five bytes of `time(NULL)`, little-endian.
+Linux sends this once per open/profile transaction by default.
+
+The capability query is `0e f0 00 00 00 00 00 00 00`. A matching input report
+starts `0e f0`; supported gesture bits begin at byte 2. Stop the gesture daemon
+before running `honor-touchpadctl support`, because two hidraw readers can race
+for the asynchronous response.
+
+The shutdown/reset report is command `0e`, value `00`. It is internal and is
+not exposed by the Linux CLI because its externally visible effect and recovery
+contract are not needed for setting control.
+
+## Master switch WMI contract
+
+| Field | Value |
+|---|---|
+| Namespace | `ROOT\WMI` |
+| Class / method | `OemWMIMethod` / `OemWMIfun` |
+| Instance | `ACPI\PNP0C14\HWMI_0` |
+| GUID | `ABBC0F5B-8EA1-11D1-A000-C90629100000` |
+| WMI method ID | `1` |
+| Input | 64 bytes: little-endian command `u64`, then 56 zero bytes |
+| Output | 256-byte `u8Output` (`u32Resrved` is the other MOF output field) |
+| Query | `0x00000f02` |
+| Disable / enable | `0x00001002` / `0x00011002` |
+| Query result | output byte 0 status; byte 1 enabled |
+
+The optional kernel module exposes only `touchpad_enabled`; there is no raw WMI
+command passthrough. The OEM screen lifecycle calls (`0x1502` off and
+`0x11502` on) are deliberately not exposed as user settings.
+
+## Linux use
+
+Install the project, then perform read-only checks first:
+
+```bash
+sudo honor-touchpadctl probe
+honor-touchpadctl list
+honor-touchpadctl encode vibration_intensity high
+honor-touchpadctl apply --dry-run \
+  /usr/share/doc/honor-control/honor-touchpad.example.toml
+```
+
+Apply one reversible HID setting:
+
+```bash
+sudo honor-touchpadctl set edge_brightness off
+sudo honor-touchpadctl set edge_brightness on
+```
+
+For a complete persistent profile:
+
+```bash
+sudo cp /usr/share/doc/honor-control/honor-touchpad.example.toml \
+  /etc/honor-touchpad.toml
+sudoedit /etc/honor-touchpad.toml
+honor-touchpadctl apply --dry-run /etc/honor-touchpad.toml
+sudo honor-touchpadctl apply /etc/honor-touchpad.toml
+sudo systemctl enable --now honor-touchpad-restore.service
+```
+
+The service waits up to ten seconds for the validated endpoint. Its sleep hook
+restarts the oneshot after resume. If `[master]` is present, enabling occurs
+before HID writes and disabling occurs last so the endpoint cannot disappear
+mid-profile.
+
+## State and failure semantics
+
+The HID protocol has no setting-value readback. `WriteFile` completion proves
+only that the kernel accepted the report. The OEM code itself ignores the
+`WriteToDev` boolean before updating its registry mirror, so the registry is
+not independent firmware confirmation.
+
+Linux therefore reports:
+
+- exact reports requested;
+- count of reports successfully written;
+- whether the clock handshake completed;
+- partial progress if the two-report three-finger operation fails;
+- WMI query readback separately for the master switch.
+
+No arbitrary report, command, length, reserved byte, WMI method, EC offset, or
+IOCTL is accepted. A profile is completely validated before the HID node is
+opened.
+
+## Remaining hardware-only gate
+
+Offline reconstruction and tests are complete. This Windows environment has no
+running Linux kernel or WSL installation, so the following cannot honestly be
+claimed until the laptop boots Linux:
+
+1. compile/load `honor_touchpad_wmi.ko` against the target kernel;
+2. confirm `honor-touchpadctl probe` selects the Linux vendor collection;
+3. set one HID boolean off/on and restore its original value;
+4. query the support bitmap with the gesture daemon stopped;
+5. query the master state, toggle with an external mouse, and restore it;
+6. repeat profile restore after suspend/resume and a cold boot;
+7. inspect kernel/journal logs for timeout, disconnect, or ACPI shape errors.
+
+These are execution checks, not unresolved protocol fields. If the WMI module
+returns `EPROTO` or `EMSGSIZE`, do not broaden its decoder blindly; capture the
+raw ACPI return object and adjust only to the observed fixed layout.

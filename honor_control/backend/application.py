@@ -40,6 +40,7 @@ from honor_control.backend.config_store import (
     PowerProfileState,
     PowerState,
     ServiceState,
+    TouchpadState,
 )
 from honor_control.backend.gesture_runtime import (
     GestureRuntime,
@@ -48,6 +49,7 @@ from honor_control.backend.gesture_runtime import (
 from honor_control.backend.hardware import HardwarePort, verify_power_definition
 from honor_control.backend.snapshot_store import SnapshotStore
 from honor_control.backend.supervisor import RuntimeSupervisor
+from honor_control.backend.touchpad_firmware import TouchpadFirmwareError
 from honor_control.core.errors import DomainError, DomainException
 from honor_control.core.gestures import DEFAULT_GESTURE_MAPPINGS, GESTURE_NAMES
 from honor_control.core.models import (
@@ -63,6 +65,11 @@ from honor_control.core.models import (
     SystemSnapshot,
     derive_charge_mode,
     utc_now,
+)
+from honor_control.core.touchpad import (
+    SUPPORTED_GESTURE_BITS,
+    parse_touchpad_setting,
+    parse_touchpad_value,
 )
 from honor_control.core.validation import (
     thresholds_for_mode,
@@ -268,6 +275,7 @@ class ApplicationService:
                     power=s.power,
                     fan=s.fan,
                     gestures=s.gestures,
+                    touchpad=s.touchpad,
                     gpu=s.gpu,
                 )
             )
@@ -903,6 +911,164 @@ class ApplicationService:
             sequence=self._snapshots.sequence,
         )
 
+    # -- Touchpad firmware --
+
+    async def probe_touchpad_firmware(self) -> dict[str, Any]:
+        """Return a read-only, descriptor-verified firmware endpoint probe."""
+        probe = await self._queue.run(
+            "touchpad_probe", self._hw.probe_touchpad_firmware
+        )
+        return {
+            "available": probe.available,
+            "platform_verified": probe.platform_verified,
+            "dmi_vendor": probe.dmi_vendor,
+            "dmi_product": probe.dmi_product,
+            "device_found": probe.device_found,
+            "permission_denied": probe.permission_denied,
+            "descriptor_verified": probe.descriptor_verified,
+            "device_path": probe.device_path,
+            "report_id": probe.report_id if probe.report_id is not None else -1,
+            "input_report_bytes": probe.input_report_bytes,
+            "output_report_bytes": probe.output_report_bytes,
+            "error": probe.error,
+        }
+
+    @_serialized_mutation
+    async def apply_touchpad_settings(
+        self, settings: dict[str, int]
+    ) -> OperationResult:
+        """Validate and apply a profile, persisting only accepted writes."""
+        if not isinstance(settings, dict) or not settings:
+            raise DomainException(
+                DomainError.INVALID_ARGUMENT,
+                "Touchpad settings profile must be a non-empty dictionary",
+            )
+        normalized: dict[str, int] = {}
+        try:
+            for name, value in settings.items():
+                if not isinstance(name, str):
+                    raise ValueError("touchpad setting names must be strings")
+                canonical = parse_touchpad_setting(name)
+                if canonical.value in normalized:
+                    raise ValueError(
+                        f"duplicate touchpad setting {canonical.value!r}"
+                    )
+                normalized[canonical.value] = parse_touchpad_value(canonical, value)
+        except ValueError as exc:
+            raise DomainException(DomainError.INVALID_ARGUMENT, str(exc)) from exc
+
+        probe = await self._queue.run(
+            "touchpad_probe", self._hw.probe_touchpad_firmware
+        )
+        if not probe.available:
+            return OperationResult.unavailable(
+                code="touchpad_firmware_unavailable",
+                message=probe.error or "Touchpad firmware endpoint unavailable",
+                sequence=self._snapshots.sequence,
+            )
+        try:
+            result = await self._queue.run(
+                "touchpad_apply", self._hw.apply_touchpad_settings, normalized
+            )
+        except TouchpadFirmwareError as exc:
+            details = {
+                "device_path": exc.device_path,
+                "reports_applied": exc.reports_applied,
+                "total_reports": exc.total_reports,
+                "readback": "unavailable",
+            }
+            if exc.reports_applied:
+                return OperationResult.partial(
+                    code="touchpad_partial_apply",
+                    message=str(exc),
+                    persisted=False,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details=details,
+                )
+            return OperationResult.failed(
+                code="touchpad_apply_failed",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+                details=details,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return OperationResult.failed(
+                code="touchpad_apply_failed",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+            )
+
+        details = {
+            "device_path": result.device_path,
+            "settings": normalized,
+            "reports_applied": result.reports_applied,
+            "total_reports": result.total_reports,
+            "clock_synchronized": result.clock_synchronized,
+            "readback": "unavailable",
+        }
+        try:
+            await self._config.update(
+                lambda state: replace(
+                    state,
+                    touchpad=TouchpadState(
+                        settings={**state.touchpad.settings, **normalized}
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return OperationResult.partial(
+                code="touchpad_applied_not_persisted",
+                message="Touchpad settings were accepted but could not be saved",
+                persisted=False,
+                applied=True,
+                sequence=self._snapshots.sequence,
+                details={**details, "persistence_error": str(exc)},
+            )
+        await self._refresh_gestures()
+        return OperationResult.success(
+            message=f"Applied {len(normalized)} touchpad setting(s)",
+            changed=True,
+            persisted=True,
+            applied=True,
+            sequence=self._snapshots.sequence,
+            details=details,
+        )
+
+    @_serialized_mutation
+    async def set_touchpad_setting(self, setting: str, value: int) -> OperationResult:
+        """Apply and persist one typed firmware setting."""
+        return await self.apply_touchpad_settings.__wrapped__(
+            self, {setting: value}
+        )
+
+    @_serialized_mutation
+    async def query_touchpad_support(self) -> dict[str, Any]:
+        """Query capabilities while holding exclusive ownership of the reader."""
+        restart_runtime = bool(
+            self._gesture_runtime is not None
+            and self._config.state.gestures.daemon_enabled
+        )
+        if self._gesture_runtime is not None:
+            await self._supervisor.stop("gesture_daemon")
+        try:
+            bits = await self._queue.run(
+                "touchpad_support", self._hw.query_touchpad_support
+            )
+        finally:
+            if restart_runtime:
+                await self._supervisor.start("gesture_daemon")
+                await asyncio.sleep(0)
+            await self._refresh_gestures()
+        return {
+            "supported_bits": sorted(bits),
+            "known": {
+                str(bit): SUPPORTED_GESTURE_BITS[bit]
+                for bit in sorted(bits & SUPPORTED_GESTURE_BITS.keys())
+            },
+            "unknown_bits": sorted(bits - SUPPORTED_GESTURE_BITS.keys()),
+        }
+
     # -- GPU --
 
     @_serialized_mutation
@@ -1222,6 +1388,9 @@ class ApplicationService:
         try:
             if self._gesture_runtime is not None:
                 probe = self._gesture_runtime.probe()
+                firmware_probe = await self._queue.run(
+                    "touchpad_probe", self._hw.probe_touchpad_firmware
+                )
                 status = self._gesture_runtime.status
                 ges = GesturesSnapshot(
                     available=probe.available,
@@ -1236,7 +1405,8 @@ class ApplicationService:
                     gestures_emitted=status.gestures_emitted,
                     mappings=self._gesture_entries(),
                     wmi_transport_present=wmi_transport_present(),
-                    firmware_settings_supported=False,
+                    firmware_settings_supported=firmware_probe.available,
+                    firmware_settings=dict(self._config.state.touchpad.settings),
                     last_error=status.last_error or probe.error,
                 )
             else:
@@ -1248,6 +1418,7 @@ class ApplicationService:
                     ges,
                     daemon_enabled=self._config.state.gestures.daemon_enabled,
                     mappings=self._gesture_entries(entries),
+                    firmware_settings=dict(self._config.state.touchpad.settings),
                 )
             await self._snapshots.update("gestures", ges)
         except Exception as exc:  # noqa: BLE001

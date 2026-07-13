@@ -56,6 +56,9 @@ Detection checks:
 - Touchpad HID identity VID `0x35cc`, PID `0x0104` on hidraw.
 - `/dev/uinput` (for virtual keyboard output).
 - hidraw access to the touchpad device.
+- Firmware setting writes additionally require exact DMI `HONOR/MRA-XXX` and
+  the descriptor-verified vendor collection (`ff00:0001`, report ID `0x0e`,
+  9-byte input/output reports).
 
 ### GPU mitigation
 
@@ -66,9 +69,9 @@ Detection checks:
 
 ## Known limitations
 
-- **Firmware setting writes are unsupported.** The observed Windows UI IPC,
-  registry values, WMI buffers, and HID input reports do not establish the
-  service-to-driver/EC write protocol. Unknown WMI/HID output is never sent.
+- **Touchpad firmware writes are narrowly gated.** The typed HID protocol is
+  implemented and offline-tested, but physical Linux replay is still required.
+  Arbitrary HID/WMI commands are never exposed.
 - **GPU mitigation is intentionally unavailable.** The dependency cannot yet
   restore the exact pre-change IRQ affinity and C-state values.
 - **No fallback to a default platform.** Unknown hardware cannot perform

@@ -72,6 +72,18 @@ class TestCodec:
         decoded = from_variant(vd)
         assert decoded["api_version"] == 1
 
+    def test_touchpad_desired_settings_round_trip(self) -> None:
+        from honor_control.core.models import GesturesSnapshot
+
+        snap = SystemSnapshot(
+            gestures=GesturesSnapshot(
+                firmware_settings_supported=True,
+                firmware_settings={"edge_volume": 1},
+            )
+        )
+        decoded = _decode_snapshot(from_variant(snapshot_to_vardict(snap)))
+        assert decoded.gestures.firmware_settings == {"edge_volume": 1}
+
     def test_operation_result_round_trip(self) -> None:
         result = OperationResult.success(message="ok", applied=True)
         vd = operation_result_to_vardict(result)

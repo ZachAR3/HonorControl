@@ -30,9 +30,20 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Reverse engineering working data (large logs, disassembly dumps, duplicates)
-Reverse engineering/capture_logs/
-Reverse engineering/honor_drivers/
+# Reverse-engineering evidence stays local. Keep only the compact source of
+# truth and the optional narrow WMI driver in Git; tracked historical files
+# remain tracked even though this pattern covers their directory.
+Reverse engineering/*
+!Reverse engineering/README.md
+!Reverse engineering/finish-trackpad-re/
+Reverse engineering/finish-trackpad-re/*
+!Reverse engineering/finish-trackpad-re/protocol.json
+!Reverse engineering/finish-trackpad-re/linux/
+Reverse engineering/finish-trackpad-re/linux/*
+!Reverse engineering/finish-trackpad-re/linux/PORTING_SPEC.md
+!Reverse engineering/finish-trackpad-re/linux/README.md
+!Reverse engineering/finish-trackpad-re/linux/wmi/
+!Reverse engineering/finish-trackpad-re/linux/wmi/*
 
 # Generated repo map (local reference, not tracked)
 REPO_MAP.md

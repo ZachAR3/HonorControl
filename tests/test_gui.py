@@ -22,6 +22,7 @@ from honor_control.core.models import (  # noqa: E402
     ChargeMode,
     FanMode,
     FanSnapshot,
+    GesturesSnapshot,
     PlatformInfo,
     PowerProfileEntry,
     PowerSnapshot,
@@ -236,9 +237,100 @@ class TestGuiPageConstruction:
         assert page.api_version_row is not None
 
     def test_gestures_page_construction(self, qapp) -> None:
-        from honor_control.frontend.gui.pages.gestures import GesturesPage
+        from honor_control.frontend.gui.pages.touchpad import TouchpadPage
 
         state = GuiState()
-        page = GesturesPage(state)
-        snap = SystemSnapshot()
+        page = TouchpadPage(state)
+        snap = SystemSnapshot(
+            gestures=GesturesSnapshot(
+                firmware_settings_supported=True,
+                firmware_settings={"edge_volume": 1, "sensitivity": 0},
+            )
+        )
         page._on_snapshot(snap)
+        assert page._firmware_rows["edge_volume"].combo.currentData() == 1  # noqa: SLF001
+        assert page._firmware_rows["sensitivity"].combo.currentData() == 0  # noqa: SLF001
+
+    def test_touchpad_editor_batches_and_preserves_dirty_values(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.touchpad import TouchpadPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = TouchpadPage(state)
+        snap = SystemSnapshot(
+            sequence=1,
+            gestures=GesturesSnapshot(
+                firmware_settings_supported=True,
+                firmware_settings={"edge_volume": 1},
+            ),
+        )
+        state.set_snapshot(snap)
+        emitted: list[tuple[str, object]] = []
+        page.intent.connect(lambda method, args: emitted.append((method, args)))
+
+        row = page._firmware_rows["three_finger_drag"]  # noqa: SLF001
+        row.combo.setCurrentIndex(row.combo.findData(1))
+        page._on_snapshot(replace(snap, sequence=2))  # noqa: SLF001
+        page.apply_button.click()
+
+        assert row.combo.currentData() == 1
+        assert emitted == [
+            (
+                "apply_touchpad_settings",
+                ({"edge_volume": 1, "three_finger_drag": 1},),
+            )
+        ]
+
+
+class TestIntegratedTray:
+    def test_left_click_uses_existing_window_callback(self, qapp) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.tray.tray import HonorTray
+
+        opened: list[bool] = []
+        controller = GuiController()
+        tray = HonorTray(
+            controller=controller,
+            open_window=lambda: opened.append(True),
+        )
+        tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)  # noqa: SLF001
+        tray.shutdown()
+        assert opened == [True]
+
+    def test_touchpad_shortcuts_follow_snapshot(self, qapp) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.tray.tray import HonorTray
+
+        tray = HonorTray(controller=GuiController())
+        tray._on_snapshot(  # noqa: SLF001
+            SystemSnapshot(
+                gestures=GesturesSnapshot(
+                    firmware_settings_supported=True,
+                    firmware_settings={"edge_volume": 1},
+                )
+            )
+        )
+        assert tray.touchpad_actions["edge_volume"].isChecked()
+        assert not tray.touchpad_actions["edge_brightness"].isChecked()
+        tray.shutdown()
+
+    def test_window_close_hides_to_available_tray(self, qapp, monkeypatch) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.gui.main_window import MainWindow
+        from honor_control.frontend.tray.tray import HonorTray
+
+        monkeypatch.setattr(GuiController, "start", lambda _self: None)
+        monkeypatch.setattr(GuiController, "stop", lambda _self: None)
+        monkeypatch.setattr(
+            HonorTray, "available", property(lambda _self: True)
+        )
+        window = MainWindow(bus_kind="session")
+        window._close_to_tray = True  # noqa: SLF001
+        window.show()
+        window.close()
+        qapp.processEvents()
+        assert window.isHidden()
+        assert window._shutdown is False  # noqa: SLF001
+        window._shutdown_application()  # noqa: SLF001

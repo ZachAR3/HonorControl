@@ -22,7 +22,7 @@ systemctl stop honor-control.service 2>/dev/null || true
 systemctl disable honor-control.service 2>/dev/null || true
 
 echo "==> Removing entry point symlinks"
-for script in honor-control-service honorctl honor-control-gui honor-control-tray; do
+for script in honor-control-service honorctl honor-touchpadctl honor-control-gui honor-control-tray; do
     rm -f "/usr/bin/$script"
 done
 
@@ -33,6 +33,10 @@ rm -f /usr/share/dbus-1/system-services/org.honorlinux.Control1.service
 rm -f /usr/share/polkit-1/actions/org.honorlinux.control.policy
 rm -f /usr/share/applications/org.honorlinux.Control.desktop
 rm -f /usr/share/applications/org.honorlinux.Control.Tray.desktop
+rm -f /etc/systemd/system/honor-touchpad-restore.service
+rm -f /usr/lib/systemd/system-sleep/honor-touchpad-restore
+rm -f /usr/share/doc/honor-control/honor-touchpad.example.toml
+rm -rf /usr/lib/honor-touchpad
 
 echo "==> Removing venv"
 rm -rf "$INSTALL_ROOT"

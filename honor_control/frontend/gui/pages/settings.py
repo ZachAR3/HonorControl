@@ -7,12 +7,12 @@ section.  No synchronous version/path calls.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from honor_control import __version__
 from honor_control.core.models import SystemSnapshot
 from honor_control.frontend.gui.pages import PageBase
-from honor_control.frontend.gui.widgets import Card, InfoRow
+from honor_control.frontend.gui.widgets import Card, InfoRow, ToggleSwitch
 
 
 class SettingsPage(PageBase):
@@ -27,6 +27,22 @@ class SettingsPage(PageBase):
         app_card.layout.addWidget(self.version_row)
         self.api_version_row = InfoRow("API version", "—")
         app_card.layout.addWidget(self.api_version_row)
+        close_host = QWidget()
+        close_layout = QHBoxLayout(close_host)
+        close_layout.setContentsMargins(0, 6, 0, 0)
+        close_copy = QLabel(
+            "<b>Keep running in the tray</b><br>"
+            "<span style='color: rgba(128, 128, 128, 210);'>"
+            "Closing the window hides it; Quit exits the application.</span>"
+        )
+        close_layout.addWidget(close_copy, 1)
+        self.close_to_tray = ToggleSwitch(True)
+        self.close_to_tray.setToolTip("Hide the window instead of exiting")
+        self.close_to_tray.toggled.connect(
+            lambda enabled: self.intent.emit("set_close_to_tray", (enabled,))
+        )
+        close_layout.addWidget(self.close_to_tray)
+        app_card.layout.addWidget(close_host)
         self.add_widget(app_card)
 
         backend = Card("Backend")
@@ -59,3 +75,7 @@ class SettingsPage(PageBase):
         snap = self.state.snapshot
         if snap is not None:
             self._on_snapshot(snap)
+
+    def set_close_to_tray(self, enabled: bool) -> None:
+        """Update the local close behavior without emitting an intent."""
+        self.close_to_tray.setChecked(enabled)

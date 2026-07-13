@@ -225,6 +225,7 @@ def _gestures_to_dict(snap: SystemSnapshot) -> dict[str, Any]:
         ],
         "wmi_transport_present": ges.wmi_transport_present,
         "firmware_settings_supported": ges.firmware_settings_supported,
+        "firmware_settings": dict(ges.firmware_settings),
         "last_error": ges.last_error,
     }
 

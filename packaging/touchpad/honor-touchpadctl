@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH=/usr/lib/honor-touchpad${PYTHONPATH:+:$PYTHONPATH}
+exec python3 -m honor_control.cli.touchpadctl "$@"

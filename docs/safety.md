@@ -52,7 +52,7 @@
 
 - `/var/lib/honor-control/state.toml` — service-owned desired state.
   Atomic, versioned, validated. Root never writes a user's home.
-- `QSettings` — window geometry, refresh preference only.
+- `QSettings` — window geometry and close-to-tray preference only.
 
 ## Debug redaction
 

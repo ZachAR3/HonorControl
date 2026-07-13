@@ -19,11 +19,18 @@ import pathlib
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from honor_control.backend.gesture_runtime import (
     probe_gesture_environment,
     wmi_transport_present,
+)
+from honor_control.backend.touchpad_firmware import (
+    TouchpadBatchApplyResult,
+    TouchpadFirmwareProbe,
+    TouchpadFirmwareTransport,
+    probe_touchpad_firmware,
 )
 from honor_control.core.errors import CapabilityStatus, DomainError, DomainException
 from honor_control.core.models import (
@@ -210,6 +217,13 @@ class HardwarePort(Protocol):
     def read_gestures(self) -> GesturesSnapshot: ...
     def list_gesture_mappings(self) -> list[GestureEntry]: ...
 
+    # -- Touchpad firmware --
+    def probe_touchpad_firmware(self) -> TouchpadFirmwareProbe: ...
+    def apply_touchpad_settings(
+        self, settings: Mapping[str, int]
+    ) -> TouchpadBatchApplyResult: ...
+    def query_touchpad_support(self) -> frozenset[int]: ...
+
     # -- GPU --
     def read_gpu(self) -> GpuSnapshot: ...
     def apply_gpu_mitigation(self) -> dict[str, Any]: ...
@@ -266,6 +280,8 @@ class FakeHardware:
             "3:2": (True, "leftmeta,c"),
             "3:3": (False, "leftmeta,tab"),
         }
+        self._touchpad_settings: dict[str, int] = {}
+        self._touchpad_support = frozenset({1, 3, 4, 20, 27})
         self._dependency_ok = True
 
     def fail_next(self, operation: str) -> None:
@@ -435,7 +451,8 @@ class FakeHardware:
             device_found=True,
             mappings=tuple(self.list_gesture_mappings()),
             wmi_transport_present=True,
-            firmware_settings_supported=False,
+            firmware_settings_supported=True,
+            firmware_settings=dict(self._touchpad_settings),
         )
 
     def list_gesture_mappings(self) -> list[GestureEntry]:
@@ -452,6 +469,70 @@ class FakeHardware:
                 )
             )
         return entries
+
+    # -- Touchpad firmware --
+
+    def probe_touchpad_firmware(self) -> TouchpadFirmwareProbe:
+        self._log("probe_touchpad_firmware")
+        self._check_fail("probe_touchpad_firmware")
+        return TouchpadFirmwareProbe(
+            available=True,
+            platform_verified=True,
+            dmi_vendor="HONOR",
+            dmi_product="MRA-XXX",
+            device_found=True,
+            descriptor_verified=True,
+            device_path="/dev/hidraw0",
+            report_id=0x0E,
+            input_report_bytes=9,
+            output_report_bytes=9,
+        )
+
+    def apply_touchpad_settings(
+        self, settings: Mapping[str, int]
+    ) -> TouchpadBatchApplyResult:
+        self._log("apply_touchpad_settings", dict(settings))
+        self._check_fail("apply_touchpad_settings")
+        from honor_control.backend.touchpad_firmware import TouchpadApplyResult
+        from honor_control.core.touchpad import (
+            TouchpadSetting,
+            encode_touchpad_setting,
+            parse_touchpad_setting,
+            parse_touchpad_value,
+        )
+
+        normalized = {
+            parse_touchpad_setting(name): parse_touchpad_value(name, value)
+            for name, value in settings.items()
+        }
+        results = tuple(
+            TouchpadApplyResult(
+                setting=setting,
+                value=normalized[setting],
+                device_path="/dev/hidraw0",
+                reports=encode_touchpad_setting(setting, normalized[setting]),
+                reports_applied=len(encode_touchpad_setting(setting, normalized[setting])),
+                clock_synchronized=True,
+            )
+            for setting in TouchpadSetting
+            if setting in normalized
+        )
+        total = sum(len(item.reports) for item in results)
+        self._touchpad_settings.update(
+            {setting.value: value for setting, value in normalized.items()}
+        )
+        return TouchpadBatchApplyResult(
+            device_path="/dev/hidraw0",
+            settings=results,
+            reports_applied=total,
+            total_reports=total,
+            clock_synchronized=True,
+        )
+
+    def query_touchpad_support(self) -> frozenset[int]:
+        self._log("query_touchpad_support")
+        self._check_fail("query_touchpad_support")
+        return self._touchpad_support
 
     def set_gesture_mapping(self, gesture_id: str, mapping: str) -> bool:
         self._log("set_gesture_mapping", gesture_id, mapping)
@@ -1309,6 +1390,7 @@ class HonorToolsAdapter:
             sysfs_root=self._root / "sys/class/hidraw",
             dev_root=self._root / "dev",
         )
+        firmware_probe = self.probe_touchpad_firmware()
         return GesturesSnapshot(
             available=probe.available,
             device_found=probe.device_found,
@@ -1317,7 +1399,8 @@ class HonorToolsAdapter:
             wmi_transport_present=wmi_transport_present(
                 self._root / "sys/bus/wmi/devices"
             ),
-            firmware_settings_supported=False,
+            firmware_settings_supported=firmware_probe.available,
+            firmware_settings={},
             last_error=probe.error,
         )
 
@@ -1326,6 +1409,30 @@ class HonorToolsAdapter:
         # empty base lets ApplicationService merge confirmed built-in defaults
         # with that authoritative state without reading root's home directory.
         return []
+
+    # -- Touchpad firmware --
+
+    def _touchpad_transport(self) -> TouchpadFirmwareTransport:
+        return TouchpadFirmwareTransport(
+            sysfs_root=self._root / "sys/class/hidraw",
+            dev_root=self._root / "dev",
+            dmi_root=self._root / "sys/class/dmi/id",
+        )
+
+    def probe_touchpad_firmware(self) -> TouchpadFirmwareProbe:
+        return probe_touchpad_firmware(
+            sysfs_root=self._root / "sys/class/hidraw",
+            dev_root=self._root / "dev",
+            dmi_root=self._root / "sys/class/dmi/id",
+        )
+
+    def apply_touchpad_settings(
+        self, settings: Mapping[str, int]
+    ) -> TouchpadBatchApplyResult:
+        return self._touchpad_transport().apply_settings(settings)
+
+    def query_touchpad_support(self) -> frozenset[int]:
+        return self._touchpad_transport().query_supported_gestures()
 
     # -- GPU --
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore validated Honor touchpad firmware settings
+Documentation=file:/usr/share/doc/honor-control/honor-touchpad.example.toml
+ConditionPathExists=/etc/honor-touchpad.toml
+Before=honor-control.service
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/honor-touchpadctl apply --wait 10 /etc/honor-touchpad.toml
+RemainAfterExit=yes
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -53,10 +53,12 @@ def main(argv: list[str] | None = None) -> int:
     if not QIcon.themeName():
         QIcon.setThemeName("breeze")
     _apply_metadata(app)
+    app.setQuitOnLastWindowClosed(False)
 
     from honor_control.frontend.gui.main_window import MainWindow
 
     window = MainWindow(bus_kind=args.bus)
+    app.aboutToQuit.connect(window.shutdown)
     window.show()
     return app.exec()
 

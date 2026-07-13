@@ -380,6 +380,7 @@ class GesturesSnapshot:
     mappings: tuple[GestureEntry, ...] = field(default_factory=tuple)
     wmi_transport_present: bool = False
     firmware_settings_supported: bool = False
+    firmware_settings: dict[str, int] = field(default_factory=dict)
     last_error: str = ""
 
 

@@ -103,6 +103,16 @@ class TestCliSafety:
         assert args.speed == 50
         assert args.ttl == 120
 
+    def test_touchpad_commands_are_typed(self) -> None:
+        parser = build_parser()
+        set_args = parser.parse_args(["touchpad", "set", "edge_volume", "on"])
+        apply_args = parser.parse_args(["touchpad", "apply", "profile.toml"])
+        support_args = parser.parse_args(["touchpad", "support"])
+        assert set_args.setting == "edge_volume"
+        assert set_args.value == "on"
+        assert apply_args.profile.name == "profile.toml"
+        assert support_args.subcommand == "support"
+
     def test_power_profile_save_has_complete_variables(self) -> None:
         parser = build_parser()
         args = parser.parse_args(

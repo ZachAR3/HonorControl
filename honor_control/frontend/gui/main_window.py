@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QStackedWidget,
+    QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -35,11 +37,12 @@ from honor_control.frontend.gui.pages.battery import BatteryPage
 from honor_control.frontend.gui.pages.dashboard import DashboardPage
 from honor_control.frontend.gui.pages.diagnostics import DiagnosticsPage
 from honor_control.frontend.gui.pages.fan import FanPage
-from honor_control.frontend.gui.pages.gestures import GesturesPage
 from honor_control.frontend.gui.pages.power import PowerPage
 from honor_control.frontend.gui.pages.settings import SettingsPage
+from honor_control.frontend.gui.pages.touchpad import TouchpadPage
 from honor_control.frontend.gui.state import GuiState
 from honor_control.frontend.gui.widgets import StatusDot
+from honor_control.frontend.tray.tray import HonorTray
 
 log = logging.getLogger("honor_control.frontend.gui.main_window")
 
@@ -48,7 +51,7 @@ PAGES: list[tuple[type[PageBase], str, str]] = [
     (DashboardPage, "go-home", "Dashboard"),
     (BatteryPage, "battery-good", "Battery"),
     (PowerPage, "preferences-system-power", "Power"),
-    (GesturesPage, "input-touchpad", "Gestures"),
+    (TouchpadPage, "input-touchpad", "Touchpad"),
     (FanPage, "preferences-system-performance", "Fan"),
     (DiagnosticsPage, "preferences-system-devices", "Diagnostics"),
     (SettingsPage, "preferences-system", "Settings"),
@@ -66,10 +69,20 @@ class MainWindow(QMainWindow):
         self.controller = GuiController(bus_kind=bus_kind)
         self.state = GuiState()
         self._pages: list[PageBase] = []
+        self._settings = QSettings()
+        self._close_to_tray = self._settings.value(
+            "window/close_to_tray", True, type=bool
+        )
+        self._quitting = False
+        self._shutdown = False
+        self._tray_notice_shown = False
 
         self.setWindowTitle("Honor Control")
         self.resize(980, 700)
         self.setMinimumSize(800, 600)
+        geometry = self._settings.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
         self._build_ui()
         self._build_menu()
@@ -77,6 +90,18 @@ class MainWindow(QMainWindow):
 
         # Start the worker thread.
         self.controller.start()
+        self.tray = HonorTray(
+            bus_kind=bus_kind,
+            controller=self.controller,
+            open_window=self.restore_from_tray,
+            quit_application=self.quit_application,
+        )
+
+        settings_page = next(
+            (page for page in self._pages if isinstance(page, SettingsPage)), None
+        )
+        if settings_page is not None:
+            settings_page.set_close_to_tray(self._close_to_tray)
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
@@ -222,7 +247,7 @@ class MainWindow(QMainWindow):
         file_menu = QMenu("&File", self)
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self.quit_application)
         file_menu.addAction(quit_action)
         menubar.addMenu(file_menu)
         view_menu = QMenu("&View", self)
@@ -274,6 +299,16 @@ class MainWindow(QMainWindow):
 
     def _on_intent(self, method: str, args: object) -> None:
         values = tuple(args) if isinstance(args, (tuple, list)) else ()
+        if method == "set_close_to_tray":
+            self._close_to_tray = bool(values[0]) if values else True
+            self._settings.setValue("window/close_to_tray", self._close_to_tray)
+            self.statusBar().showMessage(
+                "Close button will hide to tray"
+                if self._close_to_tray
+                else "Close button will quit Honor Control",
+                3000,
+            )
+            return
         operation_id = f"{method}:{':'.join(str(x) for x in values)}"
         self.controller.call(operation_id, method, *values)
 
@@ -300,7 +335,50 @@ class MainWindow(QMainWindow):
             f"<p>Licensed under the LGPL-3.0-or-later.</p>",
         )
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def restore_from_tray(self) -> None:
+        """Show, raise, and focus the existing control-center window."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_application(self) -> None:
+        """Exit the GUI process explicitly from File or the tray menu."""
+        self._quitting = True
+        self._shutdown_application()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def shutdown(self) -> None:
+        """Release the tray and worker during desktop-session shutdown."""
+        self._shutdown_application()
+
+    def _shutdown_application(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
+        self._settings.setValue("window/geometry", self.saveGeometry())
         self._timer.stop()
+        self.tray.shutdown()
         self.controller.stop()
-        super().closeEvent(event)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._settings.setValue("window/geometry", self.saveGeometry())
+        if self._close_to_tray and not self._quitting and self.tray.available:
+            event.ignore()
+            self.hide()
+            if not self._tray_notice_shown:
+                self.tray.tray.showMessage(
+                    "Honor Control is still running",
+                    "Click the tray icon to reopen it; choose Quit from the tray "
+                    "menu to exit.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
+                self._tray_notice_shown = True
+            return
+        self._shutdown_application()
+        event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()

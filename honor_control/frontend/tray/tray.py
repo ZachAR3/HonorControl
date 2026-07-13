@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction, QActionGroup, QIcon
@@ -39,8 +40,18 @@ def _load_icon() -> QIcon:
 class HonorTray:
     """Tray icon + context-menu controller."""
 
-    def __init__(self, bus_kind: str = "system") -> None:
-        self.controller = GuiController(bus_kind=bus_kind)
+    def __init__(
+        self,
+        bus_kind: str = "system",
+        *,
+        controller: GuiController | None = None,
+        open_window: Callable[[], None] | None = None,
+        quit_application: Callable[[], None] | None = None,
+    ) -> None:
+        self._owns_controller = controller is None
+        self.controller = controller or GuiController(bus_kind=bus_kind)
+        self._open_window = open_window
+        self._quit_application = quit_application
         self._profiles: list[tuple[str, str]] = []
 
         self.tray = QSystemTrayIcon(_load_icon())
@@ -53,7 +64,8 @@ class HonorTray:
         self.controller.error.connect(self._notify)
         self.controller.operation_completed.connect(self._on_operation)
         self._set_online(False)
-        self.controller.start()
+        if self._owns_controller:
+            self.controller.start()
 
         self._timer = QTimer()
         self._timer.setInterval(TRAY_REFRESH_MS)
@@ -90,6 +102,23 @@ class HonorTray:
         self.gestures_action.setChecked(False)
         self.gestures_action.toggled.connect(self._toggle_gesture_daemon)
         self.menu.addAction(self.gestures_action)
+
+        self.touchpad_menu: QMenu = self.menu.addMenu("Touchpad shortcuts")
+        self.touchpad_actions: dict[str, QAction] = {}
+        for setting, label in (
+            ("edge_volume", "Edge volume"),
+            ("edge_brightness", "Edge brightness"),
+            ("three_finger_drag", "Three-finger drag"),
+            ("mouse_like_mode", "Mouse-like mode"),
+        ):
+            action = QAction(label, self.touchpad_menu, checkable=True)
+            action.toggled.connect(
+                lambda enabled, name=setting: self._set_touchpad_setting(
+                    name, enabled
+                )
+            )
+            self.touchpad_menu.addAction(action)
+            self.touchpad_actions[setting] = action
 
         self.menu.addSeparator()
         self.menu.addAction("Quit").triggered.connect(self._quit)
@@ -133,14 +162,38 @@ class HonorTray:
         self.gestures_action.blockSignals(True)
         self.gestures_action.setChecked(snap.gestures.daemon_enabled)
         self.gestures_action.blockSignals(False)
+        for setting, action in self.touchpad_actions.items():
+            action.blockSignals(True)
+            configured = setting in snap.gestures.firmware_settings
+            action.setChecked(bool(snap.gestures.firmware_settings.get(setting, 0)))
+            action.blockSignals(False)
+            action.setEnabled(
+                self.controller.connected
+                and snap.gestures.firmware_settings_supported
+                and configured
+            )
+            action.setToolTip(
+                ""
+                if configured
+                else "Configure this setting in the Touchpad page first"
+            )
+        self.touchpad_menu.setEnabled(
+            self.controller.connected and snap.gestures.firmware_settings_supported
+        )
 
     def _open_gui(self) -> None:
+        if self._open_window is not None:
+            self._open_window()
+            return
         import os
         import subprocess
 
         cmd = ["honor-control-gui"]
         try:
             subprocess.Popen(cmd, env=dict(os.environ), start_new_session=True)
+            # The GUI owns an integrated tray. Hand off instead of leaving two
+            # tray icons and two independent D-Bus clients running.
+            self._quit()
         except Exception as exc:  # noqa: BLE001
             self.tray.showMessage(
                 "Honor Control",
@@ -155,10 +208,17 @@ class HonorTray:
     def _toggle_gesture_daemon(self, enabled: bool) -> None:
         self.controller.call("gestures:daemon", "set_daemon_enabled", enabled)
 
+    def _set_touchpad_setting(self, setting: str, enabled: bool) -> None:
+        self.controller.call(
+            f"touchpad:{setting}", "set_touchpad_setting", setting, int(enabled)
+        )
+
     def _set_online(self, online: bool) -> None:
         for menu in (self.profile_menu, self.battery_menu):
             menu.setEnabled(online)
         self.gestures_action.setEnabled(online)
+        if not online:
+            self.touchpad_menu.setEnabled(False)
 
     def _on_operation(self, _operation: str, result: object) -> None:
         self.controller.refresh()
@@ -167,6 +227,7 @@ class HonorTray:
 
     def _on_activated(self, reason) -> None:
         if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
             QSystemTrayIcon.ActivationReason.MiddleClick,
         ):
@@ -178,11 +239,25 @@ class HonorTray:
         )
 
     def _quit(self) -> None:
-        self.controller.stop()
-        self.tray.hide()
+        if self._quit_application is not None:
+            self._quit_application()
+            return
+        self.shutdown()
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    @property
+    def available(self) -> bool:
+        """Return whether Qt currently has a system tray host."""
+        return QSystemTrayIcon.isSystemTrayAvailable()
+
+    def shutdown(self) -> None:
+        """Stop tray activity without stopping a shared GUI controller."""
+        self._timer.stop()
+        self.tray.hide()
+        if self._owns_controller:
+            self.controller.stop()
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

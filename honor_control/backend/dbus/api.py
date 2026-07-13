@@ -388,6 +388,42 @@ class ControlInterface(DbusInterfaceCommonAsync, interface_name=IFACE_ROOT):
         result = await self._call(self._app.set_gesture_daemon_enabled(bool(enabled)))
         return operation_result_to_vardict(result)
 
+    @dbus_method_async(
+        flags=DbusUnprivilegedFlag, input_signature="a{si}", result_signature="a{sv}"
+    )
+    async def ApplyTouchpadSettings(self, settings: dict) -> dict:
+        """Apply a validated touchpad firmware settings profile."""
+        await self._authorize("ApplyTouchpadSettings")
+        result = await self._call(
+            self._app.apply_touchpad_settings(
+                {str(name): int(value) for name, value in settings.items()}
+            )
+        )
+        return operation_result_to_vardict(result)
+
+    @dbus_method_async(
+        flags=DbusUnprivilegedFlag, input_signature="si", result_signature="a{sv}"
+    )
+    async def SetTouchpadSetting(self, setting: str, value: int) -> dict:
+        """Apply one validated touchpad firmware setting."""
+        await self._authorize("SetTouchpadSetting")
+        result = await self._call(
+            self._app.set_touchpad_setting(str(setting), int(value))
+        )
+        return operation_result_to_vardict(result)
+
+    @dbus_method_async(flags=DbusUnprivilegedFlag, result_signature="a{sv}")
+    async def QueryTouchpadSupport(self) -> dict:
+        """Query the firmware support bitmap with exclusive reader access."""
+        await self._authorize("QueryTouchpadSupport")
+        return to_vardict(await self._call(self._app.query_touchpad_support()))
+
+    @dbus_method_async(flags=DbusUnprivilegedFlag, result_signature="a{sv}")
+    async def ProbeTouchpadFirmware(self) -> dict:
+        """Probe DMI, hidraw identity, descriptor, and access."""
+        await self._authorize("ProbeTouchpadFirmware")
+        return to_vardict(await self._call(self._app.probe_touchpad_firmware()))
+
     # -- GPU mutations --
 
     @dbus_method_async(

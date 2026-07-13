@@ -30,6 +30,7 @@ from typing import Any
 
 from honor_control.core.errors import DomainError, DomainException
 from honor_control.core.models import POWER_PROFILES
+from honor_control.core.touchpad import parse_touchpad_setting, parse_touchpad_value
 from honor_control.core.validation import (
     parse_curve,
     validate_fan_mode,
@@ -42,7 +43,7 @@ from honor_control.core.validation import (
 log = logging.getLogger("honor_control.backend.config_store")
 
 #: Current state schema version.
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 #: Default state file path.
 DEFAULT_STATE_PATH = "/var/lib/honor-control/state.toml"
@@ -136,6 +137,13 @@ class GesturesState:
 
 
 @dataclass(frozen=True)
+class TouchpadState:
+    """Desired firmware settings accepted by the touchpad transport."""
+
+    settings: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GpuState:
     """Desired GPU mitigation enablement."""
 
@@ -151,6 +159,7 @@ class ServiceState:
     power: PowerState = field(default_factory=PowerState)
     fan: FanState = field(default_factory=FanState)
     gestures: GesturesState = field(default_factory=GesturesState)
+    touchpad: TouchpadState = field(default_factory=TouchpadState)
     gpu: GpuState = field(default_factory=GpuState)
 
 
@@ -312,6 +321,23 @@ def _state_from_dict(data: dict[str, Any]) -> ServiceState:
         daemon_enabled=boolean(ges_data, "daemon_enabled", False),
     )
 
+    # Touchpad firmware desired state (introduced in schema 3).
+    touchpad_data = table(data, "touchpad")
+    raw_touchpad_settings = table(touchpad_data, "settings")
+    touchpad_settings: dict[str, int] = {}
+    for name, value in raw_touchpad_settings.items():
+        if not isinstance(name, str):
+            raise DomainException(
+                DomainError.INVALID_ARGUMENT,
+                "Touchpad setting names must be strings",
+            )
+        try:
+            canonical = parse_touchpad_setting(name)
+            touchpad_settings[canonical.value] = parse_touchpad_value(canonical, value)
+        except ValueError as exc:
+            raise DomainException(DomainError.INVALID_ARGUMENT, str(exc)) from exc
+    touchpad = TouchpadState(settings=touchpad_settings)
+
     # GPU
     gpu_data = table(data, "gpu")
     gpu = GpuState(
@@ -324,6 +350,7 @@ def _state_from_dict(data: dict[str, Any]) -> ServiceState:
         power=power,
         fan=fan,
         gestures=gestures,
+        touchpad=touchpad,
         gpu=gpu,
     )
     _validate_state(state)
@@ -605,6 +632,14 @@ def _validate_state(state: ServiceState) -> None:
             DomainError.INVALID_ARGUMENT,
             "Gesture daemon enabled flag must be a boolean",
         )
+    for name, value in state.touchpad.settings.items():
+        try:
+            canonical = parse_touchpad_setting(name)
+            if canonical.value != name:
+                raise ValueError(f"touchpad setting {name!r} is not canonical")
+            parse_touchpad_value(canonical, value)
+        except ValueError as exc:
+            raise DomainException(DomainError.INVALID_ARGUMENT, str(exc)) from exc
     if not isinstance(state.gpu.mitigation_enabled, bool):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
