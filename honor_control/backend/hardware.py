@@ -947,12 +947,9 @@ class HonorToolsAdapter:
         return True
 
     def get_power_capability(self) -> Capability:
-        if not self._honor_ok:
-            return Capability(
-                status=CapabilityStatus.UNAVAILABLE,
-                reason_code="honor_tools_incompatible",
-                message=self._honor_error or "honor-tools is unavailable",
-            )
+        # Power control is implemented here through sysfs and
+        # powerprofilesctl.  It does not use honor-tools; platform detection
+        # below remains the safety gate for writes.
         if self._require_platform_or_none() is None:
             return Capability(
                 status=CapabilityStatus.UNSUPPORTED,
@@ -1252,7 +1249,6 @@ class HonorToolsAdapter:
     def apply_power_profile(
         self, profile: str, definition: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        self._require_honor()
         self._require_platform()
         if definition is None:
             return {"error": "A complete power profile definition is required"}
