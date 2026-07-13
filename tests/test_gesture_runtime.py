@@ -20,6 +20,10 @@ from honor_control.backend.gesture_runtime import (
 )
 from honor_control.core.gestures import gesture_keys_from_report
 
+VENDOR_DESCRIPTOR = bytes.fromhex(
+    "06 00 ff 09 01 a1 01 85 0e 75 08 95 08 81 02 91 02 c0"
+)
+
 
 def _make_hidraw_tree(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     sysfs = tmp_path / "sys/class/hidraw"
@@ -32,6 +36,7 @@ def _make_hidraw_tree(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Pat
         "HID_NAME=TOPS0102:00 35CC:0104\n",
         encoding="utf-8",
     )
+    (sysfs / "hidraw7/device/report_descriptor").write_bytes(VENDOR_DESCRIPTOR)
     (dev / "hidraw7").touch()
     (dev / "uinput").touch()
     return sysfs, dev
@@ -51,8 +56,10 @@ def test_probe_reports_complete_environment(tmp_path: pathlib.Path) -> None:
 
 
 def test_report_parser_rejects_non_vendor_reports() -> None:
-    assert gesture_keys_from_report(b"\x0e\x03\x01") == ("3:1", "3")
-    assert gesture_keys_from_report(b"\x01\x03\x01") is None
+    valid = b"\x0e\x03\x01\x00\x00\x00\x00\x00\x00"
+    assert gesture_keys_from_report(valid) == ("3:1", "3")
+    assert gesture_keys_from_report(b"\x01" + valid[1:]) is None
+    assert gesture_keys_from_report(valid + b"\x00") is None
     assert gesture_keys_from_report(b"\x0e\x03") is None
 
 
@@ -106,6 +113,33 @@ def test_runtime_dispatches_current_mapping() -> None:
             payload = os.read(event_read, 4096)
             assert payload
             assert runtime.status.reports_seen == 1
+            assert runtime.status.gestures_emitted == 1
+        finally:
+            runtime._hid_fd = None  # noqa: SLF001
+            runtime._uinput_fd = None  # noqa: SLF001
+            for fd in (hid_read, hid_write, event_read, event_write):
+                os.close(fd)
+
+    asyncio.run(exercise())
+
+
+def test_runtime_debounces_duplicate_reports() -> None:
+    async def exercise() -> None:
+        runtime = GestureRuntime(
+            lambda: {"3:1": GestureMappingState(enabled=True, mapping="leftmeta,x")}
+        )
+        hid_read, hid_write = os.pipe2(os.O_NONBLOCK)
+        event_read, event_write = os.pipe2(os.O_NONBLOCK)
+        runtime._hid_fd = hid_read  # noqa: SLF001
+        runtime._uinput_fd = event_write  # noqa: SLF001
+        runtime._session_done = asyncio.get_running_loop().create_future()  # noqa: SLF001
+        report = b"\x0e\x03\x01\x00\x00\x00\x00\x00\x00"
+        try:
+            os.write(hid_write, report)
+            runtime._read_ready()  # noqa: SLF001
+            os.write(hid_write, report)
+            runtime._read_ready()  # noqa: SLF001
+            assert os.read(event_read, 4096)
             assert runtime.status.gestures_emitted == 1
         finally:
             runtime._hid_fd = None  # noqa: SLF001

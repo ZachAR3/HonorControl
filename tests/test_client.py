@@ -11,7 +11,7 @@ from honor_control.backend.dbus.codec import (
     to_vardict,
     to_variant,
 )
-from honor_control.client.errors import classify_dbus_error
+from honor_control.client.errors import ClientError, classify_dbus_error
 from honor_control.client.sdbus_client import (
     FakeClient,
     _decode_result,
@@ -153,10 +153,10 @@ class TestDecodeResult:
         assert result.status == OperationStatus.REJECTED
         assert result.code == "bad_input"
 
-    def test_decode_invalid_status_falls_back(self) -> None:
+    def test_decode_invalid_status_is_protocol_error(self) -> None:
         data = {"status": ("s", "bogus")}
-        result = _decode_result(data)
-        assert result.status == OperationStatus.FAILED
+        with pytest.raises(ClientError):
+            _decode_result(data)
 
 
 class TestDecodeSnapshot:

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -244,7 +245,7 @@ class TouchpadPage(PageBase):
 
         explanation = QLabel(
             "Changes are applied together in one firmware transaction and saved as "
-            "desired state for restore after boot or resume. The firmware does not "
+            "desired state. The firmware does not "
             "provide setting readback, so “Not configured” means Honor Control has "
             "not written that value yet."
         )
@@ -346,9 +347,20 @@ class TouchpadPage(PageBase):
 
     def _apply_firmware_changes(self) -> None:
         if self._firmware_draft and self._firmware_dirty:
-            self.intent.emit(
-                "apply_touchpad_settings", (dict(self._firmware_draft),)
-            )
+            if self.isVisible():
+                answer = QMessageBox.warning(
+                    self,
+                    "Apply touchpad firmware settings",
+                    "This writes settings to the descriptor-verified touchpad firmware "
+                    "endpoint. Firmware setting readback and rollback are unavailable. "
+                    "Continue?",
+                    QMessageBox.StandardButton.Apply
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if answer != QMessageBox.StandardButton.Apply:
+                    return
+            self.intent.emit("apply_touchpad_settings", (dict(self._firmware_draft),))
 
     def _discard_firmware_changes(self) -> None:
         snap = self.state.snapshot

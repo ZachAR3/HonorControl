@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Honor Control")
         self.resize(980, 700)
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(640, 480)
         geometry = self._settings.value("window/geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -172,7 +172,8 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("HonorSidebar")
-        bar.setFixedWidth(190)
+        bar.setMinimumWidth(160)
+        bar.setMaximumWidth(220)
         lay = QVBoxLayout(bar)
         lay.setContentsMargins(8, 12, 8, 12)
         lay.setSpacing(6)
@@ -204,7 +205,7 @@ class MainWindow(QMainWindow):
     def _build_header(self) -> QWidget:
         header = QFrame()
         header.setObjectName("HonorHeader")
-        header.setFixedHeight(52)
+        header.setMinimumHeight(52)
         h = QHBoxLayout(header)
         h.setContentsMargins(16, 6, 12, 6)
         self.page_title = QLabel("Dashboard")
@@ -225,7 +226,7 @@ class MainWindow(QMainWindow):
     def _build_banner(self) -> QFrame:
         banner = QFrame()
         banner.setObjectName("HonorBanner")
-        banner.setFixedHeight(36)
+        banner.setMinimumHeight(36)
         bh = QHBoxLayout(banner)
         bh.setContentsMargins(16, 4, 16, 4)
         label = QLabel(
@@ -270,6 +271,7 @@ class MainWindow(QMainWindow):
         self.controller.operation_completed.connect(self.state.emit_completed)
         self.controller.operation_completed.connect(self._on_operation_completed)
         self.state.connection_changed.connect(self._update_availability)
+        self.state.stale_changed.connect(self._on_stale_changed)
         self.state.error_occurred.connect(
             lambda msg: self.statusBar().showMessage(f"Error: {msg}", 4000)
         )
@@ -322,6 +324,13 @@ class MainWindow(QMainWindow):
         for page in self._pages:
             page.set_backend_available(available)
 
+    def _on_stale_changed(self, domains: tuple[str, ...]) -> None:
+        if domains:
+            self.statusBar().showMessage(
+                "Stale data: " + ", ".join(domains),
+                5000,
+            )
+
     # Misc
 
     def _about(self) -> None:
@@ -332,7 +341,7 @@ class MainWindow(QMainWindow):
             f"<p>Version {__version__}</p>"
             f"<p>D-Bus service and Qt6 GUI for managing "
             f"Honor MagicBook laptops on Linux.</p>"
-            f"<p>Licensed under the LGPL-3.0-or-later.</p>",
+            f"<p>Licensed under the GPL-3.0-or-later.</p>",
         )
 
     def restore_from_tray(self) -> None:

@@ -37,12 +37,18 @@ class VendorCollectionCaps:
     output_report_bytes: int = 0
 
     @property
-    def writable(self) -> bool:
+    def input_compatible(self) -> bool:
+        """Return whether this collection carries the confirmed input report."""
         return (
             self.found
             and self.report_id == TOUCHPAD_REPORT_ID
             and self.input_report_bytes == TOUCHPAD_REPORT_BYTES
-            and self.output_report_bytes == TOUCHPAD_REPORT_BYTES
+        )
+
+    @property
+    def writable(self) -> bool:
+        return (
+            self.input_compatible and self.output_report_bytes == TOUCHPAD_REPORT_BYTES
         )
 
 
@@ -105,11 +111,13 @@ class TouchpadFirmwareError(OSError):
         device_path: str = "",
         reports_applied: int = 0,
         total_reports: int = 0,
+        completed_settings: tuple[TouchpadApplyResult, ...] = (),
     ) -> None:
         super().__init__(message)
         self.device_path = device_path
         self.reports_applied = reports_applied
         self.total_reports = total_reports
+        self.completed_settings = completed_settings
 
 
 def _unsigned_item_value(payload: bytes) -> int:
@@ -247,6 +255,29 @@ def _hid_identity(entry: pathlib.Path) -> tuple[int, int] | None:
         return int(fields[1], 16), int(fields[2], 16)
     except ValueError:
         return None
+
+
+def discover_touchpad_input(
+    *,
+    sysfs_root: pathlib.Path = pathlib.Path("/sys/class/hidraw"),
+    dev_root: pathlib.Path = pathlib.Path("/dev"),
+) -> pathlib.Path | None:
+    """Find the descriptor-verified Honor vendor input collection."""
+    if not sysfs_root.is_dir():
+        return None
+    for entry in sorted(sysfs_root.glob("hidraw*")):
+        if _hid_identity(entry) != (TOUCHPAD_VENDOR_ID, TOUCHPAD_PRODUCT_ID):
+            continue
+        try:
+            caps = parse_vendor_collection_descriptor(
+                (entry / "device/report_descriptor").read_bytes()
+            )
+        except (OSError, ValueError):
+            continue
+        device = dev_root / entry.name
+        if caps.input_compatible and device.exists():
+            return device
+    return None
 
 
 def probe_touchpad_firmware(
@@ -395,12 +426,22 @@ class TouchpadFirmwareTransport:
             raise TouchpadFirmwareError(probe.error or "touchpad is unavailable")
         flags = os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC
         try:
-            return os.open(probe.device_path, flags), probe.device_path
+            fd = os.open(probe.device_path, flags)
         except OSError as exc:
             raise TouchpadFirmwareError(
                 f"cannot open {probe.device_path}: {exc}",
                 device_path=probe.device_path,
             ) from exc
+        # A hidraw number can be reused across hotplug.  Re-run the complete
+        # identity/descriptor/DMI probe after opening and reject any change.
+        confirmed = self.probe()
+        if not confirmed.available or confirmed.device_path != probe.device_path:
+            os.close(fd)
+            raise TouchpadFirmwareError(
+                "touchpad identity changed while opening the firmware endpoint",
+                device_path=probe.device_path,
+            )
+        return fd, probe.device_path
 
     def _write_report(self, fd: int, report: bytes) -> None:
         if len(report) != TOUCHPAD_REPORT_BYTES or report[0] != TOUCHPAD_REPORT_ID:
@@ -508,6 +549,7 @@ class TouchpadFirmwareTransport:
                 device_path=device_path,
                 reports_applied=reports_applied,
                 total_reports=total_reports,
+                completed_settings=tuple(completed),
             ) from exc
         finally:
             os.close(fd)

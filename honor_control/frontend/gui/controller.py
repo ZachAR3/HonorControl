@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -58,6 +59,9 @@ class GuiWorker(QThread):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: SdbusClient | None = None
         self._stop_event: asyncio.Event | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._stop_requested = threading.Event()
+        self._main_task: asyncio.Task[None] | None = None
 
     @property
     def client(self) -> SdbusClient | None:
@@ -68,7 +72,10 @@ class GuiWorker(QThread):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._main())
+            self._main_task = self._loop.create_task(self._main())
+            self._loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:  # noqa: BLE001
             log.error("worker crashed: %s", exc)
             self.error.emit(str(exc))
@@ -78,12 +85,17 @@ class GuiWorker(QThread):
     async def _main(self) -> None:
         """Connect, refresh, and retry with bounded backoff until stopped."""
         self._stop_event = asyncio.Event()
+        if self._stop_requested.is_set():
+            self._stop_event.set()
         backoff = 1.0
         while not self._stop_event.is_set():
             self._client = SdbusClient(bus_kind=self._bus_kind, timeout=self._timeout)
             try:
                 await self._client.connect()
-                self._client.on_state_changed(self.snapshot_ready.emit)
+                client = self._client
+                self._client.on_state_changed(
+                    lambda snap, owner=client: self._emit_snapshot(owner, snap)
+                )
                 self.connection_changed.emit(True)
                 self.snapshot_ready.emit(await self._client.get_snapshot())
                 backoff = 1.0
@@ -100,7 +112,9 @@ class GuiWorker(QThread):
                 self.connection_changed.emit(False)
                 self.error.emit(exc.message)
             finally:
+                await self._cancel_tasks()
                 await self._client.close()
+                self._client = None
             if not self._stop_event.is_set():
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
@@ -109,9 +123,35 @@ class GuiWorker(QThread):
 
     def stop(self) -> None:
         """Signal the worker to stop and wait."""
+        self._stop_requested.set()
         if self._stop_event is not None and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._stop_event.set)
-        self.wait(round((self._timeout + 1) * 1000))
+
+            def request_stop() -> None:
+                assert self._stop_event is not None
+                self._stop_event.set()
+                if self._main_task is not None:
+                    self._main_task.cancel()
+
+            self._loop.call_soon_threadsafe(request_stop)
+        if not self.wait(2_000):
+            log.warning("GUI worker did not stop within 2 seconds")
+
+    def _emit_snapshot(self, owner: SdbusClient, snap: SystemSnapshot) -> None:
+        if owner is self._client and owner.connected:
+            self.snapshot_ready.emit(snap)
+
+    def _spawn(self, awaitable: Any) -> None:
+        """Track one worker-owned task through completion."""
+        task = asyncio.create_task(awaitable)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _cancel_tasks(self) -> None:
+        tasks = tuple(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def submit_call(self, operation_id: str, method: str, *args) -> bool:
         """Submit an async call to the worker loop; return False if unavailable."""
@@ -140,6 +180,9 @@ class GuiWorker(QThread):
                     )
                 result = await getattr(client, method)(*args)
                 self.operation_result.emit(operation_id, result)
+            except asyncio.CancelledError:
+                self.operation_result.emit(operation_id, None)
+                raise
             except ClientError as exc:
                 self.error.emit(exc.message)
                 self.operation_result.emit(operation_id, None)
@@ -148,16 +191,14 @@ class GuiWorker(QThread):
                 self.error.emit(str(exc))
                 self.operation_result.emit(operation_id, None)
 
-        asyncio.ensure_future(_execute(), loop=self._loop)
+        self._spawn(_execute())
 
     def request_snapshot(self) -> None:
         """Request a fresh snapshot from the service."""
         if self._loop is None or self._loop.is_closed() or not self._loop.is_running():
             return
 
-        self._loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(self._fetch_and_emit(), loop=self._loop)
-        )
+        self._loop.call_soon_threadsafe(self._fetch_and_emit)
 
     def _fetch_and_emit(self) -> Any:
         """Fetch a snapshot and emit it (runs on worker loop)."""
@@ -168,12 +209,15 @@ class GuiWorker(QThread):
         async def _do() -> None:
             try:
                 snap = await client.get_snapshot()
-                self.snapshot_ready.emit(snap)
+                if client is self._client and client.connected:
+                    self.snapshot_ready.emit(snap)
             except ClientError as exc:
-                self.connection_changed.emit(False)
-                self.error.emit(exc.message)
+                if client is self._client:
+                    self.connection_changed.emit(False)
+                    self.error.emit(exc.message)
 
-        return asyncio.ensure_future(_do(), loop=self._loop)
+        self._spawn(_do())
+        return None
 
 
 class GuiController(QObject):

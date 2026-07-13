@@ -15,7 +15,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from honor_control.core.models import POWER_PROFILES, PowerProfileEntry, SystemSnapshot
+from honor_control.core.models import (
+    POWER_PL1_MAX_UW,
+    POWER_PL1_MIN_UW,
+    POWER_PL2_MAX_UW,
+    POWER_PROFILES,
+    PowerProfileEntry,
+    SystemSnapshot,
+)
 from honor_control.frontend.gui.pages import PageBase
 from honor_control.frontend.gui.widgets import Card, InfoRow
 
@@ -66,11 +73,17 @@ class PowerPage(PageBase):
         self.profile_label = QLineEdit()
         self.profile_description = QLineEdit()
         self.pl1 = QDoubleSpinBox()
-        self.pl1.setRange(3.0, 100.0)
+        self.pl1.setRange(
+            POWER_PL1_MIN_UW / 1_000_000,
+            POWER_PL1_MAX_UW / 1_000_000,
+        )
         self.pl1.setDecimals(1)
         self.pl1.setSuffix(" W")
         self.pl2 = QDoubleSpinBox()
-        self.pl2.setRange(3.0, 150.0)
+        self.pl2.setRange(
+            POWER_PL1_MIN_UW / 1_000_000,
+            POWER_PL2_MAX_UW / 1_000_000,
+        )
         self.pl2.setDecimals(1)
         self.pl2.setSuffix(" W")
         self.governor = QComboBox()

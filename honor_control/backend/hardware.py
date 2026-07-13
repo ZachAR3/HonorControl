@@ -34,6 +34,9 @@ from honor_control.backend.touchpad_firmware import (
 )
 from honor_control.core.errors import CapabilityStatus, DomainError, DomainException
 from honor_control.core.models import (
+    POWER_PL1_MAX_UW,
+    POWER_PL1_MIN_UW,
+    POWER_PL2_MAX_UW,
     BatterySnapshot,
     BatteryStatusKind,
     Capability,
@@ -156,9 +159,9 @@ def _normalize_power_definition(definition: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Governor, EPP, and PPD profile must be strings")
 
     normalized = {key: definition[key] for key in _POWER_DEFINITION_FIELDS}
-    if not 3_000_000 <= normalized["pl1_uw"] <= 100_000_000:
+    if not POWER_PL1_MIN_UW <= normalized["pl1_uw"] <= POWER_PL1_MAX_UW:
         raise ValueError("PL1 is outside the supported range")
-    if not normalized["pl1_uw"] <= normalized["pl2_uw"] <= 150_000_000:
+    if not normalized["pl1_uw"] <= normalized["pl2_uw"] <= POWER_PL2_MAX_UW:
         raise ValueError("PL2 is outside the supported range")
     if normalized["governor"] not in {"powersave", "performance"}:
         raise ValueError("Governor is unsupported")
@@ -511,7 +514,9 @@ class FakeHardware:
                 value=normalized[setting],
                 device_path="/dev/hidraw0",
                 reports=encode_touchpad_setting(setting, normalized[setting]),
-                reports_applied=len(encode_touchpad_setting(setting, normalized[setting])),
+                reports_applied=len(
+                    encode_touchpad_setting(setting, normalized[setting])
+                ),
                 clock_synchronized=True,
             )
             for setting in TouchpadSetting
@@ -587,15 +592,17 @@ class FakeHardware:
 
 def _discover_power_supply(
     root: pathlib.Path = pathlib.Path("/sys/class/power_supply"),
-) -> tuple[pathlib.Path | None, pathlib.Path | None]:
+) -> tuple[pathlib.Path | None, pathlib.Path | None, bool]:
     """Discover battery and AC adapter paths.
 
-    Returns ``(battery_path, ac_path)``.  ``None`` when not found.
+    Returns ``(battery_path, ac_path, multiple_batteries)``.  Battery writes
+    are disabled when more than one battery is present because applying a
+    threshold to an arbitrary first device has undefined system semantics.
     Does not assume BAT0/ADP1.
     """
     if not root.exists():
-        return None, None
-    battery: pathlib.Path | None = None
+        return None, None, False
+    batteries: list[pathlib.Path] = []
     ac: pathlib.Path | None = None
     for entry in sorted(root.iterdir()):
         if not entry.is_dir():
@@ -607,11 +614,13 @@ def _discover_power_supply(
             ptype = type_file.read_text(encoding="utf-8").strip().lower()
         except OSError:
             continue
-        if ptype == "battery" and battery is None:
-            battery = entry
+        if ptype == "battery":
+            batteries.append(entry)
         elif ptype == "mains" and ac is None:
             ac = entry
-    return battery, ac
+    multiple_batteries = len(batteries) > 1
+    battery = batteries[0] if len(batteries) == 1 else None
+    return battery, ac, multiple_batteries
 
 
 def _discover_temperature_inputs(
@@ -665,9 +674,23 @@ class HonorToolsAdapter:
         self._honor_ok = self._try_import()
         self._platform: Any = None
         self._platform_detected = False
-        self._battery_path, self._ac_path = _discover_power_supply(
-            self._root / "sys/class/power_supply"
+        (
+            self._battery_path,
+            self._ac_path,
+            self._multiple_batteries,
+        ) = _discover_power_supply(self._root / "sys/class/power_supply")
+        self._temperature_inputs = _discover_temperature_inputs(
+            self._root / "sys/class/hwmon"
         )
+        self._fan_inputs = _discover_fan_inputs(self._root / "sys/class/hwmon")
+
+    def _refresh_discovery(self) -> None:
+        """Refresh hotpluggable sysfs paths before capability/read operations."""
+        (
+            self._battery_path,
+            self._ac_path,
+            self._multiple_batteries,
+        ) = _discover_power_supply(self._root / "sys/class/power_supply")
         self._temperature_inputs = _discover_temperature_inputs(
             self._root / "sys/class/hwmon"
         )
@@ -799,11 +822,19 @@ class HonorToolsAdapter:
             except Exception:  # noqa: BLE001
                 pass
         plat = self._require_platform_or_none()
+        vendor = self._read_text("/sys/class/dmi/id/sys_vendor")
+        product = self._read_text("/sys/class/dmi/id/product_name")
         if plat is None:
-            return PlatformInfo(cpu_model=cpu_model, matched=False, confidence="none")
+            return PlatformInfo(
+                vendor=vendor,
+                product=product,
+                cpu_model=cpu_model,
+                matched=False,
+                confidence="none",
+            )
         return PlatformInfo(
-            vendor=self._read_text("/sys/class/dmi/id/sys_vendor"),
-            product=self._read_text("/sys/class/dmi/id/product_name"),
+            vendor=vendor,
+            product=product,
             model=getattr(plat, "name", "") or "",
             cpu_model=cpu_model,
             matched=True,
@@ -811,6 +842,13 @@ class HonorToolsAdapter:
         )
 
     def get_battery_capability(self) -> Capability:
+        self._refresh_discovery()
+        if self._multiple_batteries:
+            return Capability(
+                status=CapabilityStatus.UNSUPPORTED,
+                reason_code="multiple_batteries_unsupported",
+                message="Battery threshold writes are disabled with multiple batteries",
+            )
         if self._battery_path is None:
             return Capability(
                 status=CapabilityStatus.UNAVAILABLE,
@@ -828,6 +866,18 @@ class HonorToolsAdapter:
                 reason_code="charge_control_threshold_missing",
                 message="Both battery charge-control threshold files are required",
                 resources=tuple(missing),
+            )
+        inaccessible = [
+            str(path)
+            for path in (end_file, start_file)
+            if not self._path_is_readable_and_writable(path)
+        ]
+        if inaccessible:
+            return Capability(
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="charge_control_threshold_inaccessible",
+                message="Battery threshold controls are not readable and writable",
+                resources=tuple(inaccessible),
             )
         return Capability(
             status=CapabilityStatus.SUPPORTED,
@@ -863,12 +913,17 @@ class HonorToolsAdapter:
     @staticmethod
     def _run_powerprofilesctl(*args: str) -> subprocess.CompletedProcess[str] | None:
         try:
+            executable = shutil.which("powerprofilesctl")
+            if executable is None:
+                return None
             return subprocess.run(
-                ["powerprofilesctl", *args],
+                [executable, *args],
                 text=True,
                 capture_output=True,
                 check=False,
                 timeout=3,
+                cwd="/",
+                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"},
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -957,6 +1012,7 @@ class HonorToolsAdapter:
         )
 
     def get_fan_capability(self) -> Capability:
+        self._refresh_discovery()
         plat = self._require_platform_or_none()
         if plat is None:
             return Capability(
@@ -972,10 +1028,17 @@ class HonorToolsAdapter:
                 reason_code="acpi_call_missing",
                 message=f"{acpi_path} not found",
             )
+        if not os.access(rooted_acpi_path, os.R_OK | os.W_OK):
+            return Capability(
+                status=CapabilityStatus.UNAVAILABLE,
+                reason_code="acpi_call_inaccessible",
+                message=f"{acpi_path} is not readable and writable",
+                resources=(acpi_path,),
+            )
         temperatures = [
             value
             for value in (self._read_int(path) for path in self._temperature_inputs)
-            if value is not None and value > 0
+            if value is not None and 1_000 <= value <= 150_000
         ]
         if not temperatures:
             return Capability(
@@ -1033,6 +1096,7 @@ class HonorToolsAdapter:
     # -- Battery --
 
     def read_battery(self) -> BatterySnapshot:
+        self._refresh_discovery()
         cap = self.get_battery_capability()
         if not cap.writable or self._battery_path is None:
             return BatterySnapshot(available=False)
@@ -1148,6 +1212,7 @@ class HonorToolsAdapter:
         }
 
     def read_power(self) -> PowerSnapshot:
+        self._refresh_discovery()
         if self._require_platform_or_none() is None:
             return PowerSnapshot(
                 available=False,
@@ -1191,6 +1256,7 @@ class HonorToolsAdapter:
         self._require_platform()
         if definition is None:
             return {"error": "A complete power profile definition is required"}
+        previous: dict[str, Any] | None = None
         try:
             normalized = _normalize_power_definition(definition)
             capability = self.get_power_capability()
@@ -1199,6 +1265,7 @@ class HonorToolsAdapter:
                     "error": capability.message or "Power control is unavailable",
                     "reason_code": capability.reason_code,
                 }
+            previous = self._read_power_status()
 
             # intel_pstate rejects EPP changes while the performance governor
             # is active.  Move every policy to powersave before asking PPD to
@@ -1213,6 +1280,7 @@ class HonorToolsAdapter:
             ppd_write_ok = self._set_ppd_profile(normalized["ppd_profile"])
             if not ppd_write_ok:
                 observed = self._read_power_status()
+                rollback = self._restore_power_status(previous)
                 return {
                     "profile": profile,
                     "writes": {"governor_pre": governor_pre, "ppd": False},
@@ -1223,6 +1291,7 @@ class HonorToolsAdapter:
                     "ppd_ok": False,
                     "rapl_ok": False,
                     "misc_ok": False,
+                    "rollback": rollback,
                 }
 
             # Let PPD finish its profile transition before applying the
@@ -1269,7 +1338,7 @@ class HonorToolsAdapter:
                 "governor": governor_writes,
                 "misc": misc_writes,
             }
-            return {
+            result = {
                 "profile": profile,
                 "writes": writes,
                 "observed": observed,
@@ -1281,8 +1350,94 @@ class HonorToolsAdapter:
                 "rapl_ok": _all_true(rapl_writes) and verified["rapl_ok"],
                 "misc_ok": _all_true(misc_writes) and verified["misc_ok"],
             }
+            if not all(result[key] is True for key in _POWER_CHECK_KEYS):
+                result["rollback"] = self._restore_power_status(previous)
+            return result
         except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
+            result: dict[str, Any] = {"error": str(exc)}
+            if previous is not None:
+                result["rollback"] = self._restore_power_status(previous)
+            return result
+
+    def _restore_power_status(self, previous: dict[str, Any]) -> dict[str, Any]:
+        """Best-effort restoration of a complete pre-transaction snapshot."""
+        writes: dict[str, Any] = {}
+        try:
+            cpu_dirs = {cpu.name[3:]: cpu for cpu in self._power_cpu_dirs()}
+            # EPP can reject writes under the performance governor.  Put every
+            # policy in powersave first, restore PPD, then restore each policy.
+            writes["governor_pre"] = {
+                index: self._write_text_verified(
+                    cpu / "cpufreq/scaling_governor", "powersave"
+                )
+                for index, cpu in cpu_dirs.items()
+            }
+            ppd_profile = previous.get("ppd_profile")
+            writes["ppd"] = bool(ppd_profile) and self._set_ppd_profile(
+                str(ppd_profile)
+            )
+            if writes["ppd"]:
+                time.sleep(PPD_SETTLE_SECONDS)
+
+            rapl_previous = previous.get("rapl", {})
+            writes["rapl"] = {}
+            for tree in self._rapl_trees():
+                values = rapl_previous.get(tree.name, {})
+                writes["rapl"][tree.name] = {
+                    filename: (
+                        isinstance(values.get(filename), int)
+                        and self._write_text_verified(tree / filename, values[filename])
+                    )
+                    for filename in _RAPL_LIMIT_FILES
+                }
+
+            writes["governors"] = {
+                index: (
+                    index in cpu_dirs
+                    and bool(value)
+                    and self._write_text_verified(
+                        cpu_dirs[index] / "cpufreq/scaling_governor", value
+                    )
+                )
+                for index, value in previous.get("governors", {}).items()
+            }
+            writes["epp"] = {
+                index: (
+                    index in cpu_dirs
+                    and bool(value)
+                    and self._write_text_verified(
+                        cpu_dirs[index] / "cpufreq/energy_performance_preference",
+                        value,
+                    )
+                )
+                for index, value in previous.get("epp", {}).items()
+            }
+            writes["misc"] = {
+                "no_turbo": (
+                    isinstance(previous.get("no_turbo"), int)
+                    and self._write_text_verified(
+                        self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo"),
+                        previous["no_turbo"],
+                    )
+                ),
+                "max_perf_pct": (
+                    isinstance(previous.get("max_perf_pct"), int)
+                    and self._write_text_verified(
+                        self._rooted(f"{_INTEL_PSTATE_ROOT}/max_perf_pct"),
+                        previous["max_perf_pct"],
+                    )
+                ),
+            }
+            observed = self._read_power_status()
+            return {
+                "attempted": True,
+                "ok": observed == previous,
+                "writes": writes,
+                "observed": observed,
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.exception("power rollback failed")
+            return {"attempted": True, "ok": False, "writes": writes, "error": str(exc)}
 
     @staticmethod
     def _write_text_verified(path: pathlib.Path, value: str | int) -> bool:
@@ -1315,6 +1470,7 @@ class HonorToolsAdapter:
     # -- Fan --
 
     def read_fan(self) -> FanSnapshot:
+        self._refresh_discovery()
         plat = self._require_platform_or_none()
         if plat is None:
             return FanSnapshot(available=False)
@@ -1323,7 +1479,7 @@ class HonorToolsAdapter:
 
             state = read_state(plat)
             temp = state.get("temp")
-            if not isinstance(temp, int) or temp <= 0:
+            if not isinstance(temp, int) or not 1_000 <= temp <= 150_000:
                 return FanSnapshot(
                     available=False,
                     last_error="CPU temperature sensor returned no data",
@@ -1347,36 +1503,42 @@ class HonorToolsAdapter:
     def set_fan_auto(self) -> bool:
         self._require_honor()
         plat = self._require_platform()
-        try:
-            from honor.fan import set_auto
-
-            return bool(set_auto(plat))
-        except Exception as exc:  # noqa: BLE001
-            log.error("fan set_auto failed: %s", exc)
-            return False
+        return self._verified_acpi_call(plat, str(plat.fan_auto_cmd))
 
     def set_fan_manual(self, speed: int) -> bool:
         self._require_honor()
         plat = self._require_platform()
-        try:
-            from honor.fan import set_manual
-
-            return bool(set_manual(plat))
-        except Exception as exc:  # noqa: BLE001
-            log.error("fan set_manual failed: %s", exc)
-            return False
+        return self._verified_acpi_call(plat, str(plat.fan_manual_cmd))
 
     def set_fan_speed(self, speed: int) -> bool:
         self._require_honor()
         plat = self._require_platform()
-        try:
-            from honor.fan import set_speed
+        if (
+            isinstance(speed, bool)
+            or not isinstance(speed, int)
+            or not 0 <= speed <= 100
+        ):
+            return False
+        commands = tuple(getattr(plat, "fan_speed_cmds", ()))
+        results = [
+            self._verified_acpi_call(plat, str(template).format(speed=speed))
+            for template in commands
+        ]
+        return bool(results) and all(results)
 
-            result = set_speed(speed, plat)
-            cmds = result.get("cmds", []) if isinstance(result, dict) else []
-            return all(c.get("ok") for c in cmds) if cmds else bool(result)
-        except Exception as exc:  # noqa: BLE001
-            log.error("fan set_speed failed: %s", exc)
+    def _verified_acpi_call(self, plat: Any, command: str) -> bool:
+        """Execute one allowlisted platform command and require a zero result."""
+        path = self._rooted(str(getattr(plat, "acpi_call_path", "/proc/acpi/call")))
+        try:
+            with path.open("r+", encoding="utf-8") as stream:
+                stream.write(command + "\n")
+                stream.flush()
+                response = stream.read().strip()
+            # acpi_call represents successful integer ACPI results as zero.
+            # Empty output and textual Error/AE_* responses fail closed.
+            return bool(response) and int(response, 0) == 0
+        except (OSError, ValueError) as exc:
+            log.error("verified ACPI fan call failed: %s", exc)
             return False
 
     def read_fan_temp(self) -> int | None:

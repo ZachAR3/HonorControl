@@ -132,7 +132,7 @@ KEY_CODES: dict[str, int] = {
 
 def gesture_keys_from_report(report: bytes) -> tuple[str, str] | None:
     """Return ``(specific, fallback)`` mapping keys for a vendor report."""
-    if len(report) < 3 or report[0] != GESTURE_REPORT_ID:
+    if len(report) != 9 or report[0] != GESTURE_REPORT_ID:
         return None
     gesture_type = report[1]
     return f"{gesture_type}:{report[2]}", str(gesture_type)

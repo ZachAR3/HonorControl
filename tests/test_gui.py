@@ -62,6 +62,24 @@ class TestGuiState:
         state.set_snapshot(snap2)
         assert len(received) == 2
 
+    def test_older_snapshot_is_rejected_until_reconnect(self, qapp) -> None:
+        state = GuiState()
+        received: list[SystemSnapshot] = []
+        state.snapshot_changed.connect(received.append)
+        state.set_connected(True)
+        newer = SystemSnapshot(sequence=8)
+        older = SystemSnapshot(sequence=3)
+
+        state.set_snapshot(newer)
+        state.set_snapshot(older)
+        assert state.snapshot == newer
+
+        state.set_connected(False)
+        state.set_connected(True)
+        state.set_snapshot(older)
+        assert state.snapshot == older
+        assert received == [newer, older]
+
     def test_connection_changed_emits(self, qapp) -> None:
         state = GuiState()
         received: list[bool] = []
@@ -323,9 +341,7 @@ class TestIntegratedTray:
 
         monkeypatch.setattr(GuiController, "start", lambda _self: None)
         monkeypatch.setattr(GuiController, "stop", lambda _self: None)
-        monkeypatch.setattr(
-            HonorTray, "available", property(lambda _self: True)
-        )
+        monkeypatch.setattr(HonorTray, "available", property(lambda _self: True))
         window = MainWindow(bus_kind="session")
         window._close_to_tray = True  # noqa: SLF001
         window.show()

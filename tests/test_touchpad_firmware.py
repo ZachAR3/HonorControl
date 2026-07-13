@@ -8,6 +8,7 @@ import pathlib
 import pytest
 
 from honor_control.backend.touchpad_firmware import (
+    TouchpadFirmwareError,
     TouchpadFirmwareTransport,
     parse_vendor_collection_descriptor,
     probe_touchpad_firmware,
@@ -73,7 +74,10 @@ def test_every_public_setting_has_an_exact_golden_vector() -> None:
     }
     assert set(expected) == set(TOUCHPAD_SETTING_SPECS)
     for setting, vectors in expected.items():
-        assert tuple(report.hex() for report in encode_touchpad_setting(setting, 1)) == vectors
+        assert (
+            tuple(report.hex() for report in encode_touchpad_setting(setting, 1))
+            == vectors
+        )
 
 
 def test_value_names_and_legacy_aliases_are_bounded() -> None:
@@ -120,7 +124,9 @@ def test_descriptor_parser_verifies_report_id_and_both_directions() -> None:
     assert caps.output_report_bytes == 9
     assert caps.writable is True
 
-    wrong_size = VENDOR_DESCRIPTOR.replace(bytes.fromhex("95 08"), bytes.fromhex("95 07"))
+    wrong_size = VENDOR_DESCRIPTOR.replace(
+        bytes.fromhex("95 08"), bytes.fromhex("95 07")
+    )
     assert parse_vendor_collection_descriptor(wrong_size).writable is False
 
     not_application = VENDOR_DESCRIPTOR.replace(
@@ -175,9 +181,7 @@ def test_apply_three_finger_drag_is_one_handshake_plus_two_reports(
     assert result.applied is True
     assert result.reports_applied == 2
     assert (dev / "hidraw7").read_bytes() == bytes.fromhex(
-        "0e0005040302010000"
-        "0e0501000000000000"
-        "0e1101000000000000"
+        "0e00050403020100000e05010000000000000e1101000000000000"
     )
 
 
@@ -218,8 +222,7 @@ def test_batch_validates_then_uses_stable_order_and_one_handshake(
 def test_profile_loader_rejects_raw_or_unknown_fields(tmp_path: pathlib.Path) -> None:
     valid = tmp_path / "valid.toml"
     valid.write_text(
-        "[settings]\nshock = 'high'\nedge_volume = false\n"
-        "[master]\nenabled = true\n",
+        "[settings]\nshock = 'high'\nedge_volume = false\n[master]\nenabled = true\n",
         encoding="utf-8",
     )
     settings, master = _load_profile(valid)
@@ -248,9 +251,7 @@ def test_apply_profile_cli_writes_hid_and_verifies_master(
     monkeypatch.setattr(os, "O_CLOEXEC", getattr(os, "O_CLOEXEC", 0), raising=False)
     sysfs, dev = _fake_device(tmp_path)
     wmi_root = tmp_path / "sys/bus/wmi/devices"
-    attribute = wmi_root / (
-        "ABBC0F5B-8EA1-11D1-A000-C90629100000-0/touchpad_enabled"
-    )
+    attribute = wmi_root / ("ABBC0F5B-8EA1-11D1-A000-C90629100000-0/touchpad_enabled")
     attribute.parent.mkdir(parents=True)
     attribute.write_text("0\n", encoding="ascii")
     profile = tmp_path / "profile.toml"
@@ -275,4 +276,40 @@ def test_apply_profile_cli_writes_hid_and_verifies_master(
 
     assert result == 0
     assert attribute.read_text(encoding="ascii") == "1\n"
-    assert "\"reports_applied\": 3" in capsys.readouterr().out
+    assert '"reports_applied": 3' in capsys.readouterr().out
+
+
+def test_apply_profile_restores_master_when_hid_write_fails(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysfs, dev = _fake_device(tmp_path)
+    wmi_root = tmp_path / "sys/bus/wmi/devices"
+    attribute = wmi_root / ("ABBC0F5B-8EA1-11D1-A000-C90629100000-0/touchpad_enabled")
+    attribute.parent.mkdir(parents=True)
+    attribute.write_text("0\n", encoding="ascii")
+    profile = tmp_path / "profile.toml"
+    profile.write_text(
+        "[settings]\nsensitivity = 'high'\n[master]\nenabled = true\n",
+        encoding="utf-8",
+    )
+
+    def fail_apply(*_args, **_kwargs):
+        raise TouchpadFirmwareError("write failed")
+
+    monkeypatch.setattr(TouchpadFirmwareTransport, "apply_settings", fail_apply)
+    result = touchpadctl_main(
+        [
+            "--sysfs-root",
+            str(sysfs),
+            "--dev-root",
+            str(dev),
+            "--wmi-root",
+            str(wmi_root),
+            "apply",
+            str(profile),
+        ]
+    )
+
+    assert result == 1
+    assert attribute.read_text(encoding="ascii").strip() == "0"

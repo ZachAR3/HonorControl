@@ -6,6 +6,8 @@ across the contract, authorizer, and domain modules.
 
 from __future__ import annotations
 
+import pytest
+
 from honor_control.backend.dbus.authorizer import (
     ACTION_CONFIGURE_POWER,
     ACTION_EXPORT_DEBUG,
@@ -19,7 +21,14 @@ from honor_control.backend.dbus.authorizer import (
     METHOD_ACTIONS,
     UNPRIVILEGED_METHODS,
 )
+from honor_control.core.errors import DomainException
 from honor_control.core.models import CHARGE_PRESETS
+from honor_control.core.validation import (
+    validate_curve_points,
+    validate_manual_speed,
+    validate_manual_ttl,
+    validate_thresholds,
+)
 
 
 class TestPolkitActions:
@@ -69,3 +78,17 @@ class TestChargePresets:
             assert 40 <= end <= 100
             assert 40 <= start <= 100
             assert start <= end
+
+
+@pytest.mark.parametrize(
+    ("call", "args"),
+    [
+        (validate_thresholds, (True, False)),
+        (validate_manual_speed, (True,)),
+        (validate_manual_ttl, (True,)),
+        (validate_curve_points, ([(40_000, False), (95_000, 100)],)),
+    ],
+)
+def test_boolean_values_are_not_accepted_as_integers(call, args) -> None:
+    with pytest.raises(DomainException):
+        call(*args)

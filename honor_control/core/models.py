@@ -309,6 +309,9 @@ POWER_PROFILES: tuple[PowerProfileEntry, ...] = (
     ),
 )
 POWER_PROFILE_NAMES = frozenset(entry.name for entry in POWER_PROFILES)
+POWER_PL1_MIN_UW = 3_000_000
+POWER_PL1_MAX_UW = max(entry.pl1_uw for entry in POWER_PROFILES)
+POWER_PL2_MAX_UW = max(entry.pl2_uw for entry in POWER_PROFILES)
 
 
 @dataclass(frozen=True)

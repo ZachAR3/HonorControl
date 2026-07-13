@@ -32,6 +32,7 @@ class GuiState(QObject):
         self._snapshot: SystemSnapshot | None = None
         self._connected: bool = False
         self._pending_ops: set[str] = set()
+        self._allow_sequence_reset = True
 
     @property
     def snapshot(self) -> SystemSnapshot | None:
@@ -53,7 +54,10 @@ class GuiState(QObject):
     def set_snapshot(self, snap: SystemSnapshot) -> None:
         """Update the snapshot and emit change signals."""
         old_seq = self._snapshot.sequence if self._snapshot else -1
+        if not self._allow_sequence_reset and snap.sequence < old_seq:
+            return
         self._snapshot = snap
+        self._allow_sequence_reset = False
         if snap.sequence != old_seq:
             self.snapshot_changed.emit(snap)
             self.stale_changed.emit(snap.stale_domains)
@@ -62,6 +66,8 @@ class GuiState(QObject):
         """Update connection status and emit if changed."""
         if connected != self._connected:
             self._connected = connected
+            if not connected:
+                self._allow_sequence_reset = True
             self.connection_changed.emit(connected)
 
     def mark_pending(self, operation_id: str) -> None:

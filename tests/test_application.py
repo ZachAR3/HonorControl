@@ -15,8 +15,13 @@ from honor_control.backend.gesture_runtime import GestureProbe, GestureRuntimeSt
 from honor_control.backend.hardware import FakeHardware
 from honor_control.backend.snapshot_store import SnapshotStore
 from honor_control.backend.supervisor import RuntimeSupervisor
+from honor_control.backend.touchpad_firmware import (
+    TouchpadApplyResult,
+    TouchpadFirmwareError,
+)
 from honor_control.core.errors import DomainException
 from honor_control.core.models import FanMode, OperationStatus
+from honor_control.core.touchpad import TouchpadSetting
 
 
 def _make_service(tmp_path=None) -> ApplicationService:
@@ -104,6 +109,11 @@ class TestApplicationServiceReads:
         assert snap.battery.available is True
         assert snap.platform.matched is True
 
+    def test_startup_requests_stock_fan_control(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        assert any(name == "set_fan_auto" for name, _args, _kw in svc._hw.call_log)  # noqa: SLF001
+
 
 class TestBatteryMutation:
     """Verify battery threshold and mode mutations."""
@@ -135,6 +145,23 @@ class TestBatteryMutation:
         with pytest.raises(DomainException):
             asyncio.run(svc.set_battery_mode("custom"))
 
+    def test_applied_thresholds_report_persistence_failure(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        async def fail_update(_mutator):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(svc.config_store, "update", fail_update)
+        result = asyncio.run(svc.set_battery_thresholds(80, 75))
+
+        assert result.status == OperationStatus.PARTIAL
+        assert result.applied is True
+        assert result.persisted is False
+        assert result.code == "battery_applied_not_persisted"
+
 
 class TestTouchpadFirmwareMutation:
     """Verify typed touchpad writes and desired-state persistence."""
@@ -144,9 +171,7 @@ class TestTouchpadFirmwareMutation:
         asyncio.run(svc.initialize())
 
         result = asyncio.run(
-            svc.apply_touchpad_settings(
-                {"edge_volume": 0, "three_finger_drag": 1}
-            )
+            svc.apply_touchpad_settings({"edge_volume": 0, "three_finger_drag": 1})
         )
 
         assert result.status == OperationStatus.SUCCESS
@@ -189,6 +214,38 @@ class TestTouchpadFirmwareMutation:
 
         assert 20 in support["supported_bits"]
         assert support["known"]["20"] == "three_finger_drag"
+
+    def test_partial_profile_persists_only_completed_settings(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        completed = TouchpadApplyResult(
+            setting=TouchpadSetting.SENSITIVITY,
+            value=1,
+            device_path="/dev/hidraw7",
+            reports=(b"\x0e" + b"\0" * 8,),
+            reports_applied=1,
+            clock_synchronized=True,
+        )
+
+        def fail_apply(_settings):
+            raise TouchpadFirmwareError(
+                "second setting failed",
+                device_path="/dev/hidraw7",
+                reports_applied=1,
+                total_reports=2,
+                completed_settings=(completed,),
+            )
+
+        monkeypatch.setattr(svc._hw, "apply_touchpad_settings", fail_apply)  # noqa: SLF001
+        result = asyncio.run(
+            svc.apply_touchpad_settings({"sensitivity": 1, "edge_volume": 1})
+        )
+
+        assert result.status == OperationStatus.PARTIAL
+        assert result.persisted is True
+        assert svc.config_store.state.touchpad.settings == {"sensitivity": 1}
 
 
 class TestPowerMutation:
@@ -574,6 +631,33 @@ class TestFanMutation:
         assert result.status == OperationStatus.SUCCESS
         assert result.applied is True
         assert result.persisted is False  # manual is never persisted
+
+    def test_manual_mode_failure_never_writes_speed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        hardware = svc._hw  # noqa: SLF001
+        hardware.call_log.clear()
+
+        def reject_manual(speed: int) -> bool:
+            hardware._log("set_fan_manual", speed)  # noqa: SLF001
+            return False
+
+        monkeypatch.setattr(hardware, "set_fan_manual", reject_manual)
+        result = asyncio.run(svc.set_fan_manual(50, 300))
+        names = [name for name, _args, _kwargs in hardware.call_log]
+
+        assert result.status == OperationStatus.FAILED
+        assert "set_fan_speed" not in names
+        assert "set_fan_auto" in names
+
+    def test_manual_speed_rejects_unsafe_hot_target(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        svc._hw._fan_temp = 96_000  # noqa: SLF001
+        with pytest.raises(DomainException):
+            asyncio.run(svc.set_fan_manual(80, 300))
 
     def test_set_manual_speed_out_of_range(self, tmp_path) -> None:
         svc = _make_service(tmp_path)

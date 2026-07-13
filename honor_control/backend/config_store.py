@@ -24,12 +24,19 @@ import os
 import pathlib
 import re
 import shutil
+import tempfile
+import threading
 import tomllib
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from honor_control.core.errors import DomainError, DomainException
-from honor_control.core.models import POWER_PROFILES
+from honor_control.core.models import (
+    POWER_PL1_MAX_UW,
+    POWER_PL1_MIN_UW,
+    POWER_PL2_MAX_UW,
+    POWER_PROFILES,
+)
 from honor_control.core.touchpad import parse_touchpad_setting, parse_touchpad_value
 from honor_control.core.validation import (
     parse_curve,
@@ -372,6 +379,7 @@ class ConfigStore:
     ) -> None:
         self._state_path = pathlib.Path(state_path)
         self._lock = asyncio.Lock()
+        self._io_lock = threading.RLock()
         self._state: ServiceState = default_state()
         self._valid = True
         self._last_error = ""
@@ -419,6 +427,16 @@ class ConfigStore:
             log.error("state load failed: %s", exc)
             self._valid = False
             self._last_error = str(exc)
+            # A fresh process has no in-memory last-known-good state.  Recover
+            # the bounded backup if it is valid, but retain degraded health so
+            # operators can see that the primary file needs attention.
+            backup = self._state_path.with_suffix(".toml.bak")
+            if backup.exists():
+                try:
+                    self._state = _state_from_dict(self._read_toml(backup))
+                    log.warning("recovered state from %s", backup)
+                except Exception as backup_exc:  # noqa: BLE001
+                    log.error("state backup load failed: %s", backup_exc)
         return self._state
 
     def reload(self) -> ServiceState:
@@ -433,27 +451,28 @@ class ConfigStore:
         validated before saving.  On failure the old state is retained.
         """
         async with self._lock:
-            new_state = mutator(self._state)
-            if not isinstance(new_state, ServiceState):
-                raise DomainException(
-                    DomainError.INTERNAL,
-                    "Mutator did not return a ServiceState",
-                )
-            _validate_state(new_state)
-            try:
-                self._save_atomic(new_state)
-            except DomainException:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                self._valid = False
-                self._last_error = str(exc)
-                raise DomainException(
-                    DomainError.INTERNAL,
-                    "Failed to persist service state",
-                    detail=str(exc),
-                ) from exc
-            self._state = new_state
-            return self._state
+            with self._io_lock:
+                new_state = mutator(self._state)
+                if not isinstance(new_state, ServiceState):
+                    raise DomainException(
+                        DomainError.INTERNAL,
+                        "Mutator did not return a ServiceState",
+                    )
+                _validate_state(new_state)
+                try:
+                    self._save_atomic(new_state)
+                except DomainException:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self._valid = False
+                    self._last_error = str(exc)
+                    raise DomainException(
+                        DomainError.INTERNAL,
+                        "Failed to persist service state",
+                        detail=str(exc),
+                    ) from exc
+                self._state = new_state
+                return self._state
 
     def _save_atomic(self, state: ServiceState) -> None:
         """Write state atomically: temp + fsync + rename + dir fsync."""
@@ -463,22 +482,31 @@ class ConfigStore:
         if self._state_path.exists():
             bak = self._state_path.with_suffix(".toml.bak")
             try:
+                # Never replace the recovery copy with a corrupt primary.
+                _state_from_dict(self._read_toml(self._state_path))
                 shutil.copy2(self._state_path, bak)
-            except OSError:
-                pass  # non-fatal
-        tmp = self._state_path.with_suffix(".toml.tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("state backup was not updated: %s", exc)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self._state_path.name}.",
+            suffix=".tmp",
+            dir=self._state_path.parent,
+        )
+        tmp = pathlib.Path(tmp_name)
         try:
             # The service unit uses a restrictive umask; enforce the documented
             # state-file mode after creation rather than inheriting 0600.
             os.fchmod(fd, 0o640)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1  # ownership transferred to the file object
                 fh.write(_toml_dump(data))
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(str(tmp), str(self._state_path))
             self._fsync_dir(self._state_path.parent)
         except Exception:
+            if fd >= 0:
+                os.close(fd)
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
@@ -512,20 +540,21 @@ class ConfigStore:
 
     def import_state_dict(self, data: dict[str, Any]) -> ServiceState:
         """Validate and adopt a state dict (used by the import command)."""
-        state = _state_from_dict(data)
-        _validate_state(state)
-        try:
-            self._save_atomic(state)
-        except Exception as exc:  # noqa: BLE001
-            self._valid = False
-            self._last_error = str(exc)
-            raise DomainException(
-                DomainError.INTERNAL,
-                "Failed to import service state",
-                detail=str(exc),
-            ) from exc
-        self._state = state
-        return state
+        with self._io_lock:
+            state = _state_from_dict(data)
+            _validate_state(state)
+            try:
+                self._save_atomic(state)
+            except Exception as exc:  # noqa: BLE001
+                self._valid = False
+                self._last_error = str(exc)
+                raise DomainException(
+                    DomainError.INTERNAL,
+                    "Failed to import service state",
+                    detail=str(exc),
+                ) from exc
+            self._state = state
+            return state
 
 
 def _validate_state(state: ServiceState) -> None:
@@ -562,11 +591,11 @@ def _validate_state(state: ServiceState) -> None:
                 DomainError.INVALID_ARGUMENT,
                 f"Description is too long for profile '{name}'",
             )
-        if not 3_000_000 <= profile.pl1_uw <= 100_000_000:
+        if not POWER_PL1_MIN_UW <= profile.pl1_uw <= POWER_PL1_MAX_UW:
             raise DomainException(
                 DomainError.INVALID_ARGUMENT, f"PL1 out of range for profile '{name}'"
             )
-        if not profile.pl1_uw <= profile.pl2_uw <= 150_000_000:
+        if not profile.pl1_uw <= profile.pl2_uw <= POWER_PL2_MAX_UW:
             raise DomainException(
                 DomainError.INVALID_ARGUMENT, f"PL2 out of range for profile '{name}'"
             )

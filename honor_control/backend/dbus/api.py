@@ -13,6 +13,7 @@ sequence and changed domains.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from typing import Any
@@ -28,7 +29,7 @@ from sdbus import (
 from honor_control.backend.dbus.authorizer import (
     Authorizer,
     CallerSubject,
-    FakeAuthorizer,
+    PolkitAuthorizer,
 )
 from honor_control.backend.dbus.codec import (
     operation_result_to_vardict,
@@ -119,9 +120,21 @@ async def _capture_caller() -> CallerSubject | None:
             "/org/freedesktop/DBus",
             bus=sdbus.get_default_bus(),
         )
-        pid = int(await daemon.GetConnectionUnixProcessID(sender))
-        uid = int(await daemon.GetConnectionUnixUser(sender))
-        stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        pid = int(
+            await asyncio.wait_for(
+                daemon.GetConnectionUnixProcessID(sender), timeout=2.0
+            )
+        )
+        uid = int(
+            await asyncio.wait_for(daemon.GetConnectionUnixUser(sender), timeout=2.0)
+        )
+        stat = await asyncio.wait_for(
+            asyncio.to_thread(
+                pathlib.Path(f"/proc/{pid}/stat").read_text,
+                encoding="utf-8",
+            ),
+            timeout=2.0,
+        )
         start_time = int(stat.rsplit(")", 1)[1].split()[19])
         if pid <= 0 or uid < 0 or start_time <= 0:
             return None
@@ -145,7 +158,9 @@ class ControlInterface(DbusInterfaceCommonAsync, interface_name=IFACE_ROOT):
     ) -> None:
         super().__init__()
         self._app: Any = app
-        self._authorizer: Authorizer = authorizer or FakeAuthorizer()
+        # A transport object constructed without explicit wiring must still
+        # fail closed.  Tests that need permissive behavior inject FakeAuthorizer.
+        self._authorizer: Authorizer = authorizer or PolkitAuthorizer()
 
     def wire(self, app: Any, authorizer: Authorizer) -> None:
         """Wire the application service and authorizer (called by service.py)."""

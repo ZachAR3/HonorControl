@@ -21,7 +21,7 @@ from typing import Any
 from honor_control.client.errors import ClientError, classify_dbus_error
 from honor_control.client.protocol import ControlClient
 from honor_control.client.proxy import ControlProxy
-from honor_control.contract import API_VERSION, BUS_NAME, OBJECT_PATH
+from honor_control.contract import API_VERSION, BUS_NAME, OBJECT_PATH, SCHEMA_VERSION
 from honor_control.core.errors import CapabilityStatus, TransportError
 from honor_control.core.models import (
     BatterySnapshot,
@@ -67,7 +67,6 @@ class SdbusClient(ControlClient):
         self._proxy: Any = None
         self._connected = False
         self._subscribers: list[Callable[[SystemSnapshot], Any]] = []
-        self._recovery_task: asyncio.Task | None = None
         self._signal_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
 
@@ -95,6 +94,13 @@ class SdbusClient(ControlClient):
                     f"API version mismatch: client={API_VERSION},"
                     f" server={server_version}",
                 )
+            server_schema = await self._call_method("GetSchemaVersion")
+            if server_schema != SCHEMA_VERSION:
+                raise ClientError(
+                    TransportError.API_MISMATCH,
+                    f"Snapshot schema mismatch: client={SCHEMA_VERSION},"
+                    f" server={server_schema}",
+                )
             self._connected = True
             self._signal_task = asyncio.create_task(
                 self._listen_for_changes(), name="honor-control-signals"
@@ -114,9 +120,6 @@ class SdbusClient(ControlClient):
     async def close(self) -> None:
         """Close the bus and cancel background tasks."""
         self._connected = False
-        if self._recovery_task is not None:
-            self._recovery_task.cancel()
-            self._recovery_task = None
         for task in (self._signal_task, self._refresh_task):
             if task is not None:
                 task.cancel()
@@ -276,9 +279,7 @@ class SdbusClient(ControlClient):
             await self._call_method("ApplyTouchpadSettings", settings)
         )
 
-    async def set_touchpad_setting(
-        self, setting: str, value: int
-    ) -> OperationResult:
+    async def set_touchpad_setting(self, setting: str, value: int) -> OperationResult:
         return _decode_result(
             await self._call_method("SetTouchpadSetting", setting, value)
         )
@@ -304,7 +305,7 @@ class SdbusClient(ControlClient):
 
     async def get_recent_logs(self, lines: int) -> list[str]:
         result = await self._call_method("GetRecentLogs", lines)
-        return [str(x) for x in result] if result else []
+        return [_str(item) for item in _list(result)]
 
     # -- Subscriptions --
 
@@ -459,9 +460,7 @@ class FakeClient:
     ) -> OperationResult:
         return await self._app.apply_touchpad_settings(settings)
 
-    async def set_touchpad_setting(
-        self, setting: str, value: int
-    ) -> OperationResult:
+    async def set_touchpad_setting(self, setting: str, value: int) -> OperationResult:
         return await self._app.set_touchpad_setting(setting, value)
 
     async def query_touchpad_support(self) -> dict[str, Any]:
@@ -526,9 +525,9 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
         for item in (_dict(x) for x in _list(gestures.get("mappings")))
     )
     return SystemSnapshot(
-        api_version=int(decoded.get("api_version", 1)),
-        schema_version=int(decoded.get("schema_version", 1)),
-        sequence=int(decoded.get("sequence", 0)),
+        api_version=_int(decoded.get("api_version"), 1) or 1,
+        schema_version=_int(decoded.get("schema_version"), 1) or 1,
+        sequence=_int(decoded.get("sequence"), 0) or 0,
         observed_at=_datetime(decoded.get("observed_at")),
         service=ServiceHealth(
             version=_str(service.get("version")),
@@ -630,9 +629,7 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
             ),
             firmware_settings={
                 str(name): int(value)
-                for name, value in _dict(
-                    gestures.get("firmware_settings")
-                ).items()
+                for name, value in _dict(gestures.get("firmware_settings")).items()
             },
             last_error=_str(gestures.get("last_error")),
         ),
@@ -649,15 +646,27 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
 
 
 def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ClientError(TransportError.INTERNAL, "Expected a dictionary on D-Bus")
+    return value
 
 
 def _list(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, (list, tuple)) else []
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ClientError(TransportError.INTERNAL, "Expected an array on D-Bus")
+    return list(value)
 
 
 def _str(value: Any, default: str = "") -> str:
-    return default if value is None else str(value)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ClientError(TransportError.INTERNAL, "Expected a string on D-Bus")
+    return value
 
 
 def _str_tuple(value: Any) -> tuple[str, ...]:
@@ -667,25 +676,32 @@ def _str_tuple(value: Any) -> tuple[str, ...]:
 def _int(value: Any, default: int | None = None) -> int | None:
     if value in (None, ""):
         return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ClientError(TransportError.INTERNAL, "Expected an integer on D-Bus")
+    return value
 
 
 def _bool(value: Any) -> bool:
-    return value is True or value == 1
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ClientError(TransportError.INTERNAL, "Expected a boolean on D-Bus")
+    return value
 
 
 def _optional_bool(value: Any) -> bool | None:
-    return None if value in (None, "") else _bool(value)
+    return None if value is None else _bool(value)
 
 
 def _enum(enum_type, value: Any, default):
-    try:
-        return enum_type(str(value))
-    except (TypeError, ValueError):
+    if value is None:
         return default
+    try:
+        return enum_type(_str(value))
+    except (TypeError, ValueError):
+        raise ClientError(
+            TransportError.INTERNAL, "Invalid enum value on D-Bus"
+        ) from None
 
 
 def _optional_enum(enum_type, value: Any):
@@ -701,9 +717,11 @@ def _optional_datetime(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     try:
-        return datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
+        return datetime.fromisoformat(_str(value))
+    except ValueError as exc:
+        raise ClientError(
+            TransportError.INTERNAL, "Invalid timestamp on D-Bus"
+        ) from exc
 
 
 def _decode_result(data: dict[str, Any]) -> OperationResult:
@@ -712,22 +730,22 @@ def _decode_result(data: dict[str, Any]) -> OperationResult:
         raise ClientError(TransportError.INTERNAL, "Result is not a dict")
     # Unwrap variant tuples if present.
     decoded = {k: _from_variant(v) for k, v in data.items()} if data else {}
-    status_str = str(decoded.get("status", "failed"))
+    status_str = _str(decoded.get("status"), "failed")
     try:
         status = OperationStatus(status_str)
-    except ValueError:
-        status = OperationStatus.FAILED
+    except ValueError as exc:
+        raise ClientError(TransportError.INTERNAL, "Invalid operation status") from exc
     details = decoded.get("details", {})
     if not isinstance(details, dict):
         details = {}
     return OperationResult(
         status=status,
-        code=str(decoded.get("code", "")),
-        message=str(decoded.get("message", "")),
-        changed=bool(decoded.get("changed", False)),
-        persisted=bool(decoded.get("persisted", False)),
-        applied=bool(decoded.get("applied", False)),
-        sequence=int(decoded.get("sequence", 0)),
+        code=_str(decoded.get("code")),
+        message=_str(decoded.get("message")),
+        changed=_bool(decoded.get("changed")),
+        persisted=_bool(decoded.get("persisted")),
+        applied=_bool(decoded.get("applied")),
+        sequence=_int(decoded.get("sequence"), 0) or 0,
         details=details,
     )
 

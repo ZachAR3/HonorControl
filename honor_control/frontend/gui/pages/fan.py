@@ -200,17 +200,16 @@ class FanPage(PageBase):
             if fan.available
             else "Unavailable"
         )
-        self.mode_row.set_value(str(fan.mode))
+        self.mode_row.set_value(
+            f"{fan.mode} — {fan.last_error}" if fan.last_error else str(fan.mode)
+        )
         saved = fan.curves.get(self.profile_combo.currentText(), "")
         current = format_curve(list(self.curve_graph.points))
         if fan.mode == FanMode.CURVE and saved == current:
             self._curve_dirty = False
             self._mode_dirty = False
-        elif (
-            (fan.mode == FanMode.STOCK and self.rb_auto.isChecked())
-            or (
-                fan.mode == FanMode.MANUAL_OVERRIDE and self.rb_manual.isChecked()
-            )
+        elif (fan.mode == FanMode.STOCK and self.rb_auto.isChecked()) or (
+            fan.mode == FanMode.MANUAL_OVERRIDE and self.rb_manual.isChecked()
         ):
             self._mode_dirty = False
         if not self._mode_dirty:

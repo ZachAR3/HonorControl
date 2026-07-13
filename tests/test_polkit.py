@@ -14,6 +14,7 @@ from honor_control.backend.dbus.authorizer import (
     ACTION_SET_GESTURES,
     ACTION_SET_GPU_IRQ,
     ACTION_SET_POWER_PROFILE,
+    ACTION_SET_TOUCHPAD_FIRMWARE,
     ACTION_VIEW_LOGS,
     METHOD_ACTIONS,
     UNPRIVILEGED_METHODS,
@@ -27,6 +28,7 @@ KNOWN_ACTIONS = frozenset(
         ACTION_SET_POWER_PROFILE,
         ACTION_SET_FAN_CURVE,
         ACTION_SET_GESTURES,
+        ACTION_SET_TOUCHPAD_FIRMWARE,
         ACTION_SET_GPU_IRQ,
         ACTION_RELOAD_CONFIG,
         ACTION_EXPORT_DEBUG,
@@ -78,7 +80,8 @@ class TestPolkitConsistency:
         tree = ET.parse(POLKIT_PATH)
         root = tree.getroot()
         action = next(
-            item for item in root.findall("action")
+            item
+            for item in root.findall("action")
             if item.get("id") == ACTION_CONFIGURE_POWER
         )
         defaults = action.find("defaults")
@@ -108,6 +111,18 @@ class TestPolkitConsistency:
                 allow_active = defaults.find("allow_active")
                 assert allow_active is not None
                 assert allow_active.text == "auth_admin"
+
+    def test_touchpad_firmware_is_admin_auth(self) -> None:
+        tree = ET.parse(POLKIT_PATH)
+        root = tree.getroot()
+        action = next(
+            item
+            for item in root.findall("action")
+            if item.get("id") == ACTION_SET_TOUCHPAD_FIRMWARE
+        )
+        assert action.find("defaults").findtext("allow_active") == "auth_admin"
+        assert METHOD_ACTIONS["ApplyTouchpadSettings"] == ACTION_SET_TOUCHPAD_FIRMWARE
+        assert METHOD_ACTIONS["SetTouchpadSetting"] == ACTION_SET_TOUCHPAD_FIRMWARE
 
     def test_reload_config_is_admin_auth(self) -> None:
         """Config reload must require admin authentication."""

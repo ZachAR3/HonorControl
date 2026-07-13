@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from honor_control.backend.touchpad_firmware import discover_touchpad_input
 from honor_control.core.gestures import (
     DEFAULT_GESTURE_MAPPINGS,
     KEY_CODES,
@@ -78,26 +79,10 @@ def discover_touchpad(
     vendor_id: int = TOUCHPAD_VENDOR_ID,
     product_id: int = TOUCHPAD_PRODUCT_ID,
 ) -> pathlib.Path | None:
-    """Find the matching hidraw node from sysfs HID identity metadata."""
-    if not sysfs_root.is_dir():
+    """Find the exact descriptor-verified vendor input collection."""
+    if (vendor_id, product_id) != (TOUCHPAD_VENDOR_ID, TOUCHPAD_PRODUCT_ID):
         return None
-    for entry in sorted(sysfs_root.glob("hidraw*")):
-        try:
-            lines = (entry / "device/uevent").read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        hid_id = next((line[7:] for line in lines if line.startswith("HID_ID=")), "")
-        fields = hid_id.split(":")
-        if len(fields) != 3:
-            continue
-        try:
-            vendor = int(fields[1], 16)
-            product = int(fields[2], 16)
-        except ValueError:
-            continue
-        if vendor == vendor_id and product == product_id:
-            return dev_root / entry.name
-    return None
+    return discover_touchpad_input(sysfs_root=sysfs_root, dev_root=dev_root)
 
 
 def probe_gesture_environment(
@@ -219,6 +204,8 @@ class GestureRuntime:
         self._hid_fd: int | None = None
         self._uinput_fd: int | None = None
         self._session_done: asyncio.Future[None] | None = None
+        self._last_report: bytes | None = None
+        self._last_report_at = 0.0
 
     @property
     def status(self) -> GestureRuntimeStatus:
@@ -322,6 +309,13 @@ class GestureRuntime:
             if not report:
                 self._fail_session(OSError(errno.ENODEV, "touchpad disconnected"))
                 return
+            if len(report) != 9:
+                continue
+            now = time.monotonic()
+            if report == self._last_report and now - self._last_report_at < 0.25:
+                continue
+            self._last_report = report
+            self._last_report_at = now
             keys = gesture_keys_from_report(report)
             if keys is None:
                 continue
@@ -387,6 +381,8 @@ class GestureRuntime:
         self._hid_fd = None
         self._uinput_fd = None
         self._session_done = None
+        self._last_report = None
+        self._last_report_at = 0.0
         self._status = replace(
             self._status,
             running=False,

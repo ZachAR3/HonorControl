@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction, QActionGroup, QIcon
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from honor_control import __version__
 from honor_control.core.models import POWER_PROFILES, SystemSnapshot
@@ -113,9 +113,7 @@ class HonorTray:
         ):
             action = QAction(label, self.touchpad_menu, checkable=True)
             action.toggled.connect(
-                lambda enabled, name=setting: self._set_touchpad_setting(
-                    name, enabled
-                )
+                lambda enabled, name=setting: self._set_touchpad_setting(name, enabled)
             )
             self.touchpad_menu.addAction(action)
             self.touchpad_actions[setting] = action
@@ -209,6 +207,21 @@ class HonorTray:
         self.controller.call("gestures:daemon", "set_daemon_enabled", enabled)
 
     def _set_touchpad_setting(self, setting: str, enabled: bool) -> None:
+        answer = QMessageBox.warning(
+            None,
+            "Change touchpad firmware setting",
+            "This writes to touchpad firmware without setting readback or rollback. "
+            "Continue?",
+            QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Apply:
+            action = self.touchpad_actions.get(setting)
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(not enabled)
+                action.blockSignals(False)
+            return
         self.controller.call(
             f"touchpad:{setting}", "set_touchpad_setting", setting, int(enabled)
         )

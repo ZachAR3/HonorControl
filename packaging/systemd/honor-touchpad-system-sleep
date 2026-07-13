@@ -1,7 +1,29 @@
 #!/bin/sh
-# Re-run the typed profile transaction after the HID controller resumes.
+# Return the EC to firmware fan control before suspend, then restart the
+# service and re-run the typed touchpad profile after device resume.
 
-if [ "$1" = "post" ] && \
-   systemctl is-enabled --quiet honor-touchpad-restore.service; then
-    systemctl --no-block restart honor-touchpad-restore.service
+ACTIVE_MARKER=/run/honor-control-was-active
+
+if [ "$1" = "pre" ]; then
+    rm -f "$ACTIVE_MARKER"
+    if systemctl is-active --quiet honor-control.service; then
+        if systemctl stop honor-control.service; then
+            : > "$ACTIVE_MARKER"
+        else
+            # ExecStopPost should already have attempted this.  Retry the
+            # narrow standalone restoration path before suspend proceeds.
+            /usr/bin/honor-control-service --restore-fan-auto || true
+        fi
+    fi
+    exit 0
+fi
+
+if [ "$1" = "post" ]; then
+    if [ -f "$ACTIVE_MARKER" ]; then
+        rm -f "$ACTIVE_MARKER"
+        systemctl --no-block start honor-control.service
+    fi
+    if systemctl is-enabled --quiet honor-touchpad-restore.service; then
+        systemctl --no-block restart honor-touchpad-restore.service
+    fi
 fi

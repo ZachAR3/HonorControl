@@ -34,6 +34,7 @@ ACTION_SET_POWER_PROFILE = "org.honorlinux.control.set-power-profile"
 ACTION_CONFIGURE_POWER = "org.honorlinux.control.configure-power"
 ACTION_SET_FAN_CURVE = "org.honorlinux.control.set-fan-curve"
 ACTION_SET_GESTURES = "org.honorlinux.control.set-gestures"
+ACTION_SET_TOUCHPAD_FIRMWARE = "org.honorlinux.control.set-touchpad-firmware"
 ACTION_SET_GPU_IRQ = "org.honorlinux.control.set-gpu-irq"
 ACTION_RELOAD_CONFIG = "org.honorlinux.control.reload-config"
 ACTION_EXPORT_DEBUG = "org.honorlinux.control.export-debug"
@@ -55,9 +56,9 @@ METHOD_ACTIONS: dict[str, str] = {
     "SetEnabled": ACTION_SET_GESTURES,
     "SetDaemonEnabled": ACTION_SET_GESTURES,
     "SetAllEnabled": ACTION_SET_GESTURES,
-    "ApplyTouchpadSettings": ACTION_SET_GESTURES,
-    "SetTouchpadSetting": ACTION_SET_GESTURES,
-    "QueryTouchpadSupport": ACTION_SET_GESTURES,
+    "ApplyTouchpadSettings": ACTION_SET_TOUCHPAD_FIRMWARE,
+    "SetTouchpadSetting": ACTION_SET_TOUCHPAD_FIRMWARE,
+    "QueryTouchpadSupport": ACTION_SET_TOUCHPAD_FIRMWARE,
     "ProbeTouchpadFirmware": ACTION_SET_GESTURES,
     "SetMitigationEnabled": ACTION_SET_GPU_IRQ,
     "Reload": ACTION_RELOAD_CONFIG,
@@ -162,7 +163,7 @@ class PolkitAuthorizer:
             log.error("polkit check failed: %s", exc)
             raise DomainException(
                 DomainError.NOT_AUTHORIZED,
-                f"Authorization check failed: {exc}",
+                "Authorization service is unavailable",
             ) from exc
 
 

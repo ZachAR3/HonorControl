@@ -10,6 +10,19 @@ Type=oneshot
 ExecStart=/usr/bin/honor-touchpadctl apply --wait 10 /etc/honor-touchpad.toml
 RemainAfterExit=yes
 TimeoutStartSec=20
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

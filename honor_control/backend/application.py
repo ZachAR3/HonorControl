@@ -143,6 +143,7 @@ class ApplicationService:
         self._start_time = time.time()
         self._mutation_lock = asyncio.Lock()
         self._manual_ttl_seconds = 0
+        self._fan_fail_safe_error = ""
         self._last_auto_script_status = "Not run"
         self._supervisor.register(
             "manual_fan_ttl", self._manual_fan_expiry, self._restore_fan_auto
@@ -176,6 +177,7 @@ class ApplicationService:
         """Load config, publish observed state, and reconcile user intent."""
         self._config.load()
         await self._refresh_all()
+        await self._initialize_fan_safety()
         await self._reconcile_power_profile()
 
     async def start_background(self) -> None:
@@ -195,7 +197,10 @@ class ApplicationService:
     async def shutdown(self) -> None:
         """Stop all controllers, shut down the command queue."""
         await self._supervisor.stop_all()
-        self._queue.shutdown(wait=False)
+        # Let the serialized worker drain its stop marker when possible.  The
+        # worker is a daemon and the join is bounded, so a wedged firmware call
+        # still cannot prevent process shutdown.
+        self._queue.shutdown(wait=True, timeout=2.0)
 
     # -- Reads --
 
@@ -264,21 +269,32 @@ class ApplicationService:
         readback_ok = bool(result.get("readback_ok", False))
         if end_ok and start_ok and readback_ok:
             # Persist desired state.
-            await self._config.update(
-                lambda s: ServiceState(
-                    schema_version=s.schema_version,
-                    battery=BatteryState(
-                        end_threshold=end,
-                        start_threshold=start,
-                        mode=str(derive_charge_mode(end, start)),
-                    ),
-                    power=s.power,
-                    fan=s.fan,
-                    gestures=s.gestures,
-                    touchpad=s.touchpad,
-                    gpu=s.gpu,
+            try:
+                await self._config.update(
+                    lambda s: ServiceState(
+                        schema_version=s.schema_version,
+                        battery=BatteryState(
+                            end_threshold=end,
+                            start_threshold=start,
+                            mode=str(derive_charge_mode(end, start)),
+                        ),
+                        power=s.power,
+                        fan=s.fan,
+                        gestures=s.gestures,
+                        touchpad=s.touchpad,
+                        gpu=s.gpu,
+                    )
                 )
-            )
+            except Exception as exc:  # noqa: BLE001
+                await self._refresh_battery()
+                return OperationResult.partial(
+                    code="battery_applied_not_persisted",
+                    message="Battery thresholds changed but could not be saved",
+                    persisted=False,
+                    applied=True,
+                    sequence=self._snapshots.sequence,
+                    details={**result, "persistence_error": str(exc)},
+                )
             await self._refresh_battery()
             return OperationResult.success(
                 message=f"Thresholds set to {end}%/{start}%",
@@ -290,19 +306,28 @@ class ApplicationService:
             )
         # Partial or failed: attempt rollback to old pair.
         if end_ok or start_ok:
+            rollback: dict[str, Any] | None = None
             if old.observed_end is not None and old.observed_start is not None:
-                await self._queue.run(
-                    "battery_rollback",
-                    self._hw.write_battery_thresholds,
-                    old.observed_end,
-                    old.observed_start,
-                )
+                try:
+                    rollback = await self._queue.run(
+                        "battery_rollback",
+                        self._hw.write_battery_thresholds,
+                        old.observed_end,
+                        old.observed_start,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    rollback = {"error": str(exc), "readback_ok": False}
+            await self._refresh_battery()
+            rollback_ok = bool(rollback and rollback.get("readback_ok"))
             return OperationResult.partial(
                 code="battery_partial_write",
-                message=f"Partial write: end_ok={end_ok}, start_ok={start_ok}",
+                message=(
+                    f"Partial write: end_ok={end_ok}, start_ok={start_ok}; "
+                    f"rollback={'verified' if rollback_ok else 'not verified'}"
+                ),
                 applied=False,
                 sequence=self._snapshots.sequence,
-                details=result,
+                details={**result, "rollback": rollback or {}},
             )
         return OperationResult.failed(
             code="battery_write_failed",
@@ -474,7 +499,7 @@ class ApplicationService:
             message=f"Auto-switch {'enabled' if enabled else 'disabled'}",
             changed=True,
             persisted=True,
-            applied=True,
+            applied=False,
             sequence=self._snapshots.sequence,
         )
 
@@ -632,7 +657,7 @@ class ApplicationService:
             message="Automatic switching configuration saved",
             changed=True,
             persisted=True,
-            applied=True,
+            applied=False,
             sequence=self._snapshots.sequence,
         )
 
@@ -641,7 +666,6 @@ class ApplicationService:
     @_serialized_mutation
     async def set_fan_stock_auto(self) -> OperationResult:
         """Restore the EC's stock auto fan mode."""
-        await self._supervisor.stop("manual_fan_ttl")
         cap = await self._queue.run("fan_cap", self._hw.get_fan_capability)
         if not cap.writable:
             return OperationResult.unavailable(
@@ -651,6 +675,11 @@ class ApplicationService:
             )
         ok = await self._queue.run("fan_auto", self._hw.set_fan_auto)
         if ok:
+            self._fan_fail_safe_error = ""
+            await self._supervisor.stop("manual_fan_ttl")
+            # The explicit request above was verified; a redundant TTL cleanup
+            # attempt cannot invalidate that successful transition.
+            self._fan_fail_safe_error = ""
             await self._config.update(
                 lambda s: replace(
                     s,
@@ -717,7 +746,11 @@ class ApplicationService:
     @_serialized_mutation
     async def set_fan_manual(self, speed: int, ttl_seconds: int) -> OperationResult:
         """Set a fixed fan speed with a required TTL."""
-        from honor_control.core.validation import MANUAL_TTL_DEFAULT_SECONDS
+        from honor_control.core.validation import (
+            MANUAL_EMERGENCY_MIN_SPEED,
+            MANUAL_EMERGENCY_TEMP_MC,
+            MANUAL_TTL_DEFAULT_SECONDS,
+        )
 
         validated_speed = validate_manual_speed(speed)
         validated_ttl = validate_manual_ttl(ttl_seconds or MANUAL_TTL_DEFAULT_SECONDS)
@@ -728,14 +761,38 @@ class ApplicationService:
                 message=cap.message or "Fan control unavailable",
                 sequence=self._snapshots.sequence,
             )
+        temp = await self._queue.run("fan_manual_temp", self._hw.read_fan_temp)
+        if temp is None or not 1_000 <= temp <= 150_000:
+            return OperationResult.failed(
+                code="fan_temperature_unavailable",
+                message="Manual fan control requires a plausible live temperature",
+                sequence=self._snapshots.sequence,
+            )
+        if temp >= 95_000 and validated_speed < 100:
+            raise DomainException(
+                DomainError.INVALID_ARGUMENT,
+                "Manual fan speed must be 100% at or above 95°C",
+            )
+        if (
+            temp >= MANUAL_EMERGENCY_TEMP_MC
+            and validated_speed < MANUAL_EMERGENCY_MIN_SPEED
+        ):
+            raise DomainException(
+                DomainError.INVALID_ARGUMENT,
+                f"Manual fan speed must be at least {MANUAL_EMERGENCY_MIN_SPEED}% "
+                f"at or above {MANUAL_EMERGENCY_TEMP_MC // 1000}°C",
+            )
         await self._supervisor.stop("manual_fan_ttl")
         manual_ok = await self._queue.run(
             "fan_manual", self._hw.set_fan_manual, validated_speed
         )
-        speed_ok = await self._queue.run(
-            "fan_speed", self._hw.set_fan_speed, validated_speed
-        )
+        speed_ok = False
+        if manual_ok:
+            speed_ok = await self._queue.run(
+                "fan_speed", self._hw.set_fan_speed, validated_speed
+            )
         if manual_ok and speed_ok:
+            self._fan_fail_safe_error = ""
             await self._refresh_fan()
             await self._snapshots.update(
                 "fan",
@@ -757,10 +814,38 @@ class ApplicationService:
                 details={"ttl_seconds": validated_ttl},
             )
         # Safety: restore stock auto on failure.
-        await self._queue.run("fan_auto_safety", self._hw.set_fan_auto)
+        try:
+            restored = bool(
+                await self._queue.run("fan_auto_safety", self._hw.set_fan_auto)
+            )
+        except Exception:  # noqa: BLE001
+            restored = False
+        await self._refresh_fan()
+        if not restored:
+            self._fan_fail_safe_error = (
+                "Manual fan apply and stock-auto restoration failed"
+            )
+            await self._snapshots.update(
+                "fan",
+                replace(
+                    self._snapshots.snapshot.fan,
+                    mode=FanMode.FAILED_SAFE,
+                    target_speed=None,
+                    last_error=self._fan_fail_safe_error,
+                ),
+            )
+            return OperationResult.partial(
+                code="fan_manual_restore_failed",
+                message=(
+                    "Manual fan control failed and stock-auto restoration could not "
+                    "be verified"
+                ),
+                applied=False,
+                sequence=self._snapshots.sequence,
+            )
         return OperationResult.failed(
             code="fan_manual_failed",
-            message="Failed to set manual fan speed; restored stock auto",
+            message="Failed to set manual fan speed; stock auto was restored",
             sequence=self._snapshots.sequence,
         )
 
@@ -950,9 +1035,7 @@ class ApplicationService:
                     raise ValueError("touchpad setting names must be strings")
                 canonical = parse_touchpad_setting(name)
                 if canonical.value in normalized:
-                    raise ValueError(
-                        f"duplicate touchpad setting {canonical.value!r}"
-                    )
+                    raise ValueError(f"duplicate touchpad setting {canonical.value!r}")
                 normalized[canonical.value] = parse_touchpad_value(canonical, value)
         except ValueError as exc:
             raise DomainException(DomainError.INVALID_ARGUMENT, str(exc)) from exc
@@ -971,17 +1054,39 @@ class ApplicationService:
                 "touchpad_apply", self._hw.apply_touchpad_settings, normalized
             )
         except TouchpadFirmwareError as exc:
+            completed = {
+                item.setting.value: item.value for item in exc.completed_settings
+            }
             details = {
                 "device_path": exc.device_path,
                 "reports_applied": exc.reports_applied,
                 "total_reports": exc.total_reports,
+                "completed_settings": completed,
                 "readback": "unavailable",
             }
             if exc.reports_applied:
+                persisted = False
+                if completed:
+                    try:
+                        await self._config.update(
+                            lambda state: replace(
+                                state,
+                                touchpad=TouchpadState(
+                                    settings={
+                                        **state.touchpad.settings,
+                                        **completed,
+                                    }
+                                ),
+                            )
+                        )
+                        persisted = True
+                    except Exception as persist_exc:  # noqa: BLE001
+                        details["persistence_error"] = str(persist_exc)
+                await self._refresh_gestures()
                 return OperationResult.partial(
                     code="touchpad_partial_apply",
                     message=str(exc),
-                    persisted=False,
+                    persisted=persisted,
                     applied=False,
                     sequence=self._snapshots.sequence,
                     details=details,
@@ -1038,9 +1143,7 @@ class ApplicationService:
     @_serialized_mutation
     async def set_touchpad_setting(self, setting: str, value: int) -> OperationResult:
         """Apply and persist one typed firmware setting."""
-        return await self.apply_touchpad_settings.__wrapped__(
-            self, {setting: value}
-        )
+        return await self.apply_touchpad_settings.__wrapped__(self, {setting: value})
 
     @_serialized_mutation
     async def query_touchpad_support(self) -> dict[str, Any]:
@@ -1368,17 +1471,22 @@ class ApplicationService:
             manual_active = self._supervisor.get_health("manual_fan_ttl").running
             fan = replace(
                 fan,
-                mode=FanMode.MANUAL_OVERRIDE
-                if manual_active
-                else FanMode.CURVE
-                if desired.mode == "curve"
-                else fan.mode,
+                mode=(
+                    FanMode.FAILED_SAFE
+                    if self._fan_fail_safe_error
+                    else FanMode.MANUAL_OVERRIDE
+                    if manual_active
+                    else FanMode.CURVE
+                    if desired.mode == "curve"
+                    else fan.mode
+                ),
                 desired_mode=FanMode(desired.mode),
                 curves=dict(desired.curves),
                 target_speed=current.target_speed
                 if manual_active or desired.mode == "curve"
                 else fan.target_speed,
                 manual_expires_at=current.manual_expires_at if manual_active else None,
+                last_error=self._fan_fail_safe_error or fan.last_error,
             )
             await self._snapshots.update("fan", fan)
         except Exception as exc:  # noqa: BLE001
@@ -1730,8 +1838,10 @@ class ApplicationService:
                     from honor_control.core.validation import parse_curve
 
                     temp = await self._queue.run("fan_temp", self._hw.read_fan_temp)
-                    if temp is None:
-                        raise RuntimeError("fan temperature unavailable")
+                    if temp is None or not 1_000 <= temp <= 150_000:
+                        raise RuntimeError(
+                            f"fan temperature unavailable or implausible: {temp!r}"
+                        )
                     points = parse_curve(curve)
                     speed = 100 if temp >= 95000 else _curve_speed(points, temp)
                     if (
@@ -1750,6 +1860,7 @@ class ApplicationService:
                             raise RuntimeError("EC rejected fan curve speed")
                         last_speed = speed
                 failures = 0
+                self._fan_fail_safe_error = ""
                 await self._snapshots.update(
                     "fan",
                     replace(
@@ -1778,12 +1889,70 @@ class ApplicationService:
                                 ),
                             )
                         )
+                        self._fan_fail_safe_error = (
+                            "Fan curve disabled after repeated failures; "
+                            "stock-auto restoration was requested"
+                        )
+                        await self._snapshots.update(
+                            "fan",
+                            replace(
+                                self._snapshots.snapshot.fan,
+                                mode=FanMode.FAILED_SAFE,
+                                desired_mode=FanMode.STOCK,
+                                target_speed=None,
+                                manual_expires_at=None,
+                                last_error=self._fan_fail_safe_error,
+                            ),
+                        )
                     raise RuntimeError(
                         "fan curve disabled after repeated failures"
                     ) from exc
 
     async def _manual_fan_expiry(self) -> None:
-        await asyncio.sleep(self._manual_ttl_seconds)
+        from honor_control.core.validation import (
+            MANUAL_EMERGENCY_MIN_SPEED,
+            MANUAL_EMERGENCY_TEMP_MC,
+        )
+
+        deadline = asyncio.get_running_loop().time() + self._manual_ttl_seconds
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(2.0, remaining))
+            async with self._mutation_lock:
+                temp = await self._queue.run(
+                    "fan_manual_watchdog_temp", self._hw.read_fan_temp
+                )
+                if temp is None or not 1_000 <= temp <= 150_000:
+                    await self._restore_fan_auto()
+                    return
+                target = self._snapshots.snapshot.fan.target_speed or 0
+                emergency_target = (
+                    100
+                    if temp >= 95_000
+                    else MANUAL_EMERGENCY_MIN_SPEED
+                    if temp >= MANUAL_EMERGENCY_TEMP_MC
+                    else 0
+                )
+                if emergency_target > target:
+                    ok = await self._queue.run(
+                        "fan_manual_watchdog_speed",
+                        self._hw.set_fan_speed,
+                        emergency_target,
+                    )
+                    if not ok:
+                        await self._restore_fan_auto()
+                        return
+                    await self._snapshots.update(
+                        "fan",
+                        replace(
+                            self._snapshots.snapshot.fan,
+                            temp_mc=temp,
+                            target_speed=emergency_target,
+                            last_error="Manual speed raised by thermal watchdog",
+                        ),
+                    )
         async with self._mutation_lock:
             await self._restore_fan_auto()
             await self._snapshots.update(
@@ -1798,10 +1967,30 @@ class ApplicationService:
 
     async def _restore_fan_auto(self) -> None:
         try:
-            await self._queue.run("fan_auto_cleanup", self._hw.set_fan_auto)
+            restored = await self._queue.run("fan_auto_cleanup", self._hw.set_fan_auto)
+            if not restored:
+                raise RuntimeError("EC did not confirm stock-auto request")
             await self._refresh_fan()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("failed to restore stock fan mode")
+            self._fan_fail_safe_error = f"Stock-auto restoration failed: {exc}"
+            await self._snapshots.update(
+                "fan",
+                replace(
+                    self._snapshots.snapshot.fan,
+                    mode=FanMode.FAILED_SAFE,
+                    target_speed=None,
+                    manual_expires_at=None,
+                    last_error=self._fan_fail_safe_error,
+                ),
+            )
+
+    async def _initialize_fan_safety(self) -> None:
+        """Request firmware-owned fan control on startup when writes are verified."""
+        cap = self._snapshots.snapshot.capabilities.get("fan")
+        if cap is None or not cap.writable:
+            return
+        await self._restore_fan_auto()
 
 
 def _curve_speed(points, temp_mc: int) -> int:

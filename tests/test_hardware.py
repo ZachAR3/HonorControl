@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -354,9 +355,9 @@ class TestHonorToolsAdapterFilesystem:
         def set_ppd(profile: str) -> bool:
             governors_seen_by_ppd.append(
                 tuple(
-                    (cpu / "cpufreq/scaling_governor").read_text(
-                        encoding="utf-8"
-                    ).strip()
+                    (cpu / "cpufreq/scaling_governor")
+                    .read_text(encoding="utf-8")
+                    .strip()
                     for cpu in adapter._power_cpu_dirs()  # noqa: SLF001
                 )
             )
@@ -386,9 +387,11 @@ class TestHonorToolsAdapterFilesystem:
 
         def reject_epp_in_performance_governor(path, value):
             if path.name == "energy_performance_preference":
-                governor = path.parent.joinpath("scaling_governor").read_text(
-                    encoding="utf-8"
-                ).strip()
+                governor = (
+                    path.parent.joinpath("scaling_governor")
+                    .read_text(encoding="utf-8")
+                    .strip()
+                )
                 if governor == "performance":
                     return False
             return original_write(path, value)
@@ -433,6 +436,39 @@ class TestHonorToolsAdapterFilesystem:
         result = adapter.apply_power_profile("silent", definition)
         assert result["epp_ok"] is False
         assert result["rapl_ok"] is True
+        assert result["rollback"]["ok"] is True
+        assert (
+            tmp_path / "sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"
+        ).read_text(encoding="utf-8") == "25000000"
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [("0x0\n", True), ("Error: AE_NOT_FOUND\n", False), ("", False)],
+    )
+    def test_acpi_fan_call_requires_zero_result(
+        self, tmp_path, monkeypatch, response, expected
+    ) -> None:
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+
+        class AcpiStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def write(self, _value):
+                return None
+
+            def flush(self):
+                return None
+
+            def read(self):
+                return response
+
+        monkeypatch.setattr("pathlib.Path.open", lambda *_args, **_kwargs: AcpiStream())
+        platform = SimpleNamespace(acpi_call_path="/proc/acpi/call")
+        assert adapter._verified_acpi_call(platform, "COMMAND") is expected  # noqa: SLF001
 
     def test_ppd_failure_aborts_profile_power_writes(
         self, tmp_path, monkeypatch

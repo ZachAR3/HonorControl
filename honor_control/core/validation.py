@@ -31,7 +31,12 @@ def validate_thresholds(end: int, start: int) -> tuple[int, int]:
 
     Rules: ``40 <= start <= end <= 100`` and ``start <= end - MIN_HYSTERESIS``.
     """
-    if not isinstance(end, int) or not isinstance(start, int):
+    if (
+        isinstance(end, bool)
+        or isinstance(start, bool)
+        or not isinstance(end, int)
+        or not isinstance(start, int)
+    ):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
             "Thresholds must be integers",
@@ -142,6 +147,16 @@ def validate_curve_points(points: list[tuple[int, int]]) -> list[FanCurvePoint]:
         )
     validated: list[FanCurvePoint] = []
     for temp_mc, speed in points:
+        if (
+            isinstance(temp_mc, bool)
+            or isinstance(speed, bool)
+            or not isinstance(temp_mc, int)
+            or not isinstance(speed, int)
+        ):
+            raise DomainException(
+                DomainError.INVALID_ARGUMENT,
+                "Fan curve temperatures and speeds must be integers",
+            )
         if not (FAN_TEMP_MIN_MC <= temp_mc <= FAN_TEMP_MAX_MC):
             raise DomainException(
                 DomainError.INVALID_ARGUMENT,
@@ -232,7 +247,7 @@ def validate_fan_mode(mode: str) -> FanMode:
 
 def validate_manual_speed(speed: int) -> int:
     """Validate a manual fan speed (0-100)."""
-    if not isinstance(speed, int):
+    if isinstance(speed, bool) or not isinstance(speed, int):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
             "Fan speed must be an integer",
@@ -247,7 +262,7 @@ def validate_manual_speed(speed: int) -> int:
 
 def validate_manual_ttl(ttl_seconds: int) -> int:
     """Validate a manual-override TTL (1-MAX seconds)."""
-    if not isinstance(ttl_seconds, int):
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
             "TTL must be an integer",

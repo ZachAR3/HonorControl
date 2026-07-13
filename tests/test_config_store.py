@@ -88,6 +88,28 @@ class TestConfigStoreLoad:
         asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "travel")))
         assert tmp_state_path.with_suffix(".toml.bak").exists()
 
+    def test_fresh_process_recovers_valid_backup(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+        asyncio.run(store.update(lambda s: _set_battery(s, 70, 65, "home")))
+        asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "travel")))
+        tmp_state_path.write_text("invalid = {{{", encoding="utf-8")
+
+        recovered = ConfigStore(state_path=tmp_state_path)
+        state = recovered.load()
+
+        assert state.battery.end_threshold == 70
+        assert recovered.valid is False
+        assert recovered.last_error
+
+        asyncio.run(recovered.update(lambda s: _set_battery(s, 90, 85, "home")))
+        backup_state = ConfigStore(
+            state_path=tmp_state_path.with_suffix(".toml.bak")
+        ).load()
+        assert backup_state.battery.end_threshold == 70
+
 
 class TestConfigStoreUpdate:
     """Verify atomic update and concurrent access."""

@@ -16,7 +16,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -121,6 +121,8 @@ class ToggleSwitch(QWidget):
         self._knob_pos = 26.0 if checked else 2.0
         self.setFixedSize(46, 24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("On/off switch")
         self._knob = QPropertyAnimation(self, b"knob_pos")
         self._knob.setDuration(140)
         self._knob.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -164,6 +166,16 @@ class ToggleSwitch(QWidget):
             self._animate_to(26.0 if self._checked else 2.0)
             self.toggled.emit(self._checked)
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt API
+        """Support standard keyboard activation."""
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._checked = not self._checked
+            self._animate_to(26.0 if self._checked else 2.0)
+            self.toggled.emit(self._checked)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt API
         """Draw the pill track and the circular knob."""

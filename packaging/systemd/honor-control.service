@@ -3,9 +3,12 @@ Description=Honor Control D-Bus backend service
 Documentation=https://github.com/HonorLinux/honor-control
 After=dbus.service
 Wants=polkit.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=dbus
+User=root
 BusName=org.honorlinux.Control1
 ExecStart=/usr/bin/honor-control-service
 ExecStopPost=-/usr/bin/honor-control-service --restore-fan-auto

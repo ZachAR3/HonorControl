@@ -112,9 +112,7 @@ def _load_profile(
             raise ValueError("[master] must be a TOML table")
         unknown_master = sorted(set(raw_master) - {"enabled"})
         if unknown_master:
-            raise ValueError(
-                f"unknown [master] key(s): {', '.join(unknown_master)}"
-            )
+            raise ValueError(f"unknown [master] key(s): {', '.join(unknown_master)}")
         if "enabled" not in raw_master or not isinstance(raw_master["enabled"], bool):
             raise ValueError("[master].enabled must be true or false")
         master = raw_master["enabled"]
@@ -274,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
                 "setting": setting.value,
                 "value": value,
                 "reports": [
-                    report.hex(" ") for report in encode_touchpad_setting(setting, value)
+                    report.hex(" ")
+                    for report in encode_touchpad_setting(setting, value)
                 ],
             }
             _emit(payload, as_json=args.json)
@@ -311,32 +310,45 @@ def main(argv: list[str] | None = None) -> int:
 
             attribute = _master_attribute(args.wmi_root)
             master_observed: bool | None = None
+            previous_master: bool | None = None
+            if master is not None:
+                if attribute is None:
+                    raise RuntimeError(
+                        "profile requests [master], but honor-touchpad-wmi is not bound"
+                    )
+                previous_master = _read_master(attribute)
             # Enabling first makes the HID endpoint available on firmware that
             # removes it while globally disabled.  Disabling is deliberately
             # last so every requested HID setting is sent before the endpoint
             # can disappear.
-            if master is True:
-                if attribute is None:
-                    raise RuntimeError(
-                        "profile requests [master], but honor-touchpad-wmi is not bound"
-                    )
-                master_observed = _set_master(attribute, True)
-
             batch = None
-            if settings:
-                if args.wait:
-                    transport.wait_until_available(args.wait)
-                batch = transport.apply_settings(
-                    settings,
-                    synchronize_clock=not args.no_clock_sync,
-                )
+            try:
+                if master is True:
+                    assert attribute is not None
+                    master_observed = _set_master(attribute, True)
 
-            if master is False:
-                if attribute is None:
-                    raise RuntimeError(
-                        "profile requests [master], but honor-touchpad-wmi is not bound"
+                if settings:
+                    if args.wait:
+                        transport.wait_until_available(args.wait)
+                    batch = transport.apply_settings(
+                        settings,
+                        synchronize_clock=not args.no_clock_sync,
                     )
-                master_observed = _set_master(attribute, False)
+
+                if master is False:
+                    assert attribute is not None
+                    master_observed = _set_master(attribute, False)
+            except Exception as exc:
+                if attribute is not None and previous_master is not None:
+                    try:
+                        if _read_master(attribute) != previous_master:
+                            _set_master(attribute, previous_master)
+                    except Exception as rollback_exc:
+                        raise RuntimeError(
+                            f"profile failed ({exc}); master rollback also failed: "
+                            f"{rollback_exc}"
+                        ) from exc
+                raise
 
             payload = _encoded_profile_payload(settings, master)
             payload.update(

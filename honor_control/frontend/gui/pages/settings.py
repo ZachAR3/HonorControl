@@ -57,7 +57,7 @@ class SettingsPage(PageBase):
             f"<p><b>Honor Control</b> v{__version__}</p>"
             "<p>A D-Bus service and Qt6 GUI for managing Honor MagicBook "
             "laptops on Linux.</p>"
-            "<p>Licensed under the LGPL-3.0-or-later.</p>"
+            "<p>Licensed under the GPL-3.0-or-later.</p>"
         )
         about_text.setWordWrap(True)
         about.layout.addWidget(about_text)
