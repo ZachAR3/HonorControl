@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -238,7 +240,7 @@ class TestHonorToolsAdapterFilesystem:
         )
         assert HonorToolsAdapter(root_path=tmp_path).detect_platform().matched is False
 
-    def test_verified_art14_identity_matches(self, tmp_path) -> None:
+    def test_verified_art14_identity_matches(self, tmp_path, monkeypatch) -> None:
         dmi = tmp_path / "sys/class/dmi/id"
         cpu = tmp_path / "sys/devices/system/cpu/cpu0"
         dmi.mkdir(parents=True)
@@ -248,7 +250,15 @@ class TestHonorToolsAdapterFilesystem:
         (cpu / "model_name").write_text(
             "Intel(R) Core(TM) Ultra 5 125H", encoding="utf-8"
         )
-        assert HonorToolsAdapter(root_path=tmp_path).detect_platform().matched is True
+        honor_module = types.ModuleType("honor")
+        honor_module.__path__ = []  # type: ignore[attr-defined]
+        platform_module = types.ModuleType("honor.platform")
+        platform_module.detect = lambda: SimpleNamespace(name="MRA-XXX")  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "honor", honor_module)
+        monkeypatch.setitem(sys.modules, "honor.platform", platform_module)
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+        adapter._honor_ok = True  # noqa: SLF001
+        assert adapter.detect_platform().matched is True
 
     def test_discovers_and_reads_non_bat0(self, tmp_path) -> None:
         supplies = tmp_path / "sys/class/power_supply"

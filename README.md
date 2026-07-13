@@ -100,6 +100,11 @@ sudo bash scripts/install-local.sh
 sudo systemctl enable --now honor-control.service
 ```
 
+`honor-tools` 0.1.0 is not published on PyPI. The installer therefore requires
+its source tree at `../honor-tools` (the standard HonorTools workspace layout),
+or a wheel supplied with `--wheelhouse DIR`. It fails before changing system
+files when neither source is available.
+
 The installer removes the stock `honor-tools` power-supply udev hook because
 it directly rewrites CPU EPP after calling `powerprofilesctl`, which conflicts
 with KDE's power-profiles-daemon slider. Honor Control owns AC/battery

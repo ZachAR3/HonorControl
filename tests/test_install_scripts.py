@@ -22,6 +22,8 @@ def test_install_scripts_parse_with_bash() -> None:
 def test_installer_has_transaction_and_offline_mode() -> None:
     source = INSTALL.read_text(encoding="utf-8")
     assert "--wheelhouse" in source
+    assert '"honor-tools==0.1.0"' in source
+    assert "not published on the package index" in source
     assert "rollback_managed" in source
     assert "assert_replaceable" in source
     assert "refusing to replace unrelated" in source

@@ -176,6 +176,13 @@ if [[ -n "$WHEELHOUSE" && ! -d "$WHEELHOUSE" ]]; then
     echo "error: wheelhouse directory does not exist: $WHEELHOUSE" >&2
     exit 2
 fi
+HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" 2>/dev/null && pwd || true)"
+if [[ ( -z "$HONOR_TOOLS_ROOT" || \
+        ! -f "$HONOR_TOOLS_ROOT/pyproject.toml" ) && -z "$WHEELHOUSE" ]]; then
+    echo "error: honor-tools 0.1.0 is not published on the package index" >&2
+    echo "Place its source at $ROOT/../honor-tools or provide it in --wheelhouse." >&2
+    exit 2
+fi
 for script in honor-control-service honorctl honor-control-gui honor-control-tray; do
     destination="/usr/bin/$script"
     if [[ -e "$destination" || -L "$destination" ]]; then
@@ -212,7 +219,6 @@ PIP="$VENV_DIR/bin/pip"
 PY="$VENV_DIR/bin/python"
 
 echo "==> [2/7] Installing Python dependencies"
-HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" 2>/dev/null && pwd || true)"
 PIP_ARGS=(--quiet)
 if [[ -n "$WHEELHOUSE" ]]; then
     PIP_ARGS+=(--no-index --find-links "$WHEELHOUSE")
@@ -227,6 +233,8 @@ if [[ -n "$HONOR_TOOLS_ROOT" && -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]]; then
     find "$STAGE/honor-tools/honor" -type d -name __pycache__ -prune \
         -exec rm -rf {} +
     "$PIP" install "${PIP_ARGS[@]}" "$STAGE/honor-tools"
+else
+    "$PIP" install "${PIP_ARGS[@]}" "honor-tools==0.1.0"
 fi
 "$PIP" install "${PIP_ARGS[@]}" "$STAGE/source[gui]"
 

@@ -21,12 +21,12 @@ classifiers = [
     "Topic :: System :: Hardware",
 ]
 
-# Core/service: sdbus + honor-tools.
+# Core/service transport.  honor-tools is installed separately by the system
+# installer because version 0.1.0 is not published on the Python package index.
 # GUI/tray: PySide6 (optional).
 # dbus-python is removed — all clients use sdbus.
 dependencies = [
     "sdbus==0.14.2",
-    "honor-tools==0.1.0",
 ]
 
 [project.optional-dependencies]
