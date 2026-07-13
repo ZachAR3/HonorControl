@@ -1529,7 +1529,11 @@ class HonorToolsAdapter:
             with path.open("r+", encoding="utf-8") as stream:
                 stream.write(command + "\n")
                 stream.flush()
-                response = stream.read().strip()
+                # acpi_call exposes its procfs result as a NUL-terminated
+                # string on some kernel/module versions (for example
+                # ``"0x0\0"``).  NUL is not whitespace to ``str.strip()``, so
+                # remove the procfs padding as well before parsing the result.
+                response = stream.read().strip("\x00 \t\r\n")
             # acpi_call represents successful integer ACPI results as zero.
             # Empty output and textual Error/AE_* responses fail closed.
             return bool(response) and int(response, 0) == 0

@@ -453,7 +453,13 @@ class TestHonorToolsAdapterFilesystem:
 
     @pytest.mark.parametrize(
         ("response", "expected"),
-        [("0x0\n", True), ("Error: AE_NOT_FOUND\n", False), ("", False)],
+        [
+            ("0x0\n", True),
+            ("0x0\x00", True),
+            ("0x0\x00\n", True),
+            ("Error: AE_NOT_FOUND\n", False),
+            ("", False),
+        ],
     )
     def test_acpi_fan_call_requires_zero_result(
         self, tmp_path, monkeypatch, response, expected
