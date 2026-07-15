@@ -26,8 +26,8 @@
 - **Active local user** (no password): battery thresholds/mode, power
   profile, gesture mappings, debug bundle export.
 - **Admin authentication** (password required): fan mode/curve/manual,
-  power-profile definitions/automatic hooks, GPU mitigation, config reload,
-  restricted logs.
+  power-profile definitions/automatic hooks, touchpad firmware writes/support
+  queries, GPU mitigation, config reload, restricted logs.
 - Polkit failure/missing caller **fails closed**. No "active local user"
   fallback for admin-tier actions.
 - Internal controller calls use explicit internal application methods
@@ -59,14 +59,16 @@
 - Debug bundles are bounded, schema-versioned JSON.
 - Usernames, home paths, environment variables, and secrets are
   redacted.
-- The bundle is returned as a string/bytes to the unprivileged caller,
-  which writes the destination file. Root never creates a file in
-  `/tmp` (no `PrivateTmp` namespace issue).
+- The bundle is returned as a structured `a{sv}` dictionary to the unprivileged
+  caller, which serializes and writes the destination file. Root never creates
+  a file in `/tmp` (no `PrivateTmp` namespace issue).
 
 ## Recovery
 
-- A corrupt state file leaves the last-known-good state active and marks
-  service health degraded.
+- On initial process load, a corrupt primary may recover the one validated
+  backup while service health remains degraded.
+- During a running reload, a corrupt primary leaves the newer in-memory
+  last-known-good state active; it never replaces it with the older backup.
 - The service retains last-known-good data on refresh failure and marks
   the domain stale.
 - A historical recovered error clears from active health.

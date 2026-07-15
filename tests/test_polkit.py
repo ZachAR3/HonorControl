@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
+import sys
+import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import pytest
 
 from honor_control.backend.dbus.authorizer import (
     ACTION_CONFIGURE_POWER,
@@ -18,7 +24,11 @@ from honor_control.backend.dbus.authorizer import (
     ACTION_VIEW_LOGS,
     METHOD_ACTIONS,
     UNPRIVILEGED_METHODS,
+    CallerSubject,
+    PolkitAuthorityInterface,
+    PolkitAuthorizer,
 )
+from honor_control.core.errors import DomainError, DomainException
 
 #: All known action IDs defined in the code.
 KNOWN_ACTIONS = frozenset(
@@ -75,6 +85,129 @@ class TestPolkitConsistency:
                 allow_active = defaults.find("allow_active")
                 assert allow_active is not None
                 assert allow_active.text == "auth_admin"
+
+
+class TestPolkitFailClosedBehavior:
+    """Exercise repository-owned authorization failure semantics in isolation."""
+
+    @staticmethod
+    def _caller() -> CallerSubject:
+        return CallerSubject(sender=":1.42", pid=1234, uid=1000, start_time=5678)
+
+    def test_privileged_method_rejects_missing_caller(self) -> None:
+        with pytest.raises(DomainException) as exc_info:
+            asyncio.run(PolkitAuthorizer().check("SetManual", None))
+        assert exc_info.value.code == DomainError.NOT_AUTHORIZED
+
+    def test_unmapped_method_is_denied_before_polkit(self) -> None:
+        with pytest.raises(DomainException) as exc_info:
+            asyncio.run(PolkitAuthorizer().check("UnknownMutation", self._caller()))
+        assert exc_info.value.code == DomainError.NOT_AUTHORIZED
+        assert "No action mapping" in exc_info.value.message
+
+    def test_polkit_denial_is_not_authorized(self, monkeypatch) -> None:
+        calls: list[str] = []
+
+        class Authority:
+            async def CheckAuthorization(
+                self, _subject, action_id, _details, _flags, _cancellation_id
+            ):
+                calls.append(action_id)
+                return False, False, {}
+
+        self._install_authority(monkeypatch, Authority())
+        with pytest.raises(DomainException) as exc_info:
+            asyncio.run(PolkitAuthorizer().check("SetManual", self._caller()))
+
+        assert exc_info.value.code == DomainError.NOT_AUTHORIZED
+        assert calls == [ACTION_SET_FAN_CURVE]
+
+    def test_polkit_exception_fails_closed(self, monkeypatch) -> None:
+        class Authority:
+            async def CheckAuthorization(self, *_args):
+                raise OSError("polkit unavailable")
+
+        self._install_authority(monkeypatch, Authority())
+        with pytest.raises(DomainException) as exc_info:
+            asyncio.run(PolkitAuthorizer().check("SetManual", self._caller()))
+        assert exc_info.value.code == DomainError.NOT_AUTHORIZED
+        assert "unavailable" in exc_info.value.message
+
+    def test_polkit_timeout_fails_closed(self, monkeypatch) -> None:
+        class Authority:
+            async def CheckAuthorization(self, *_args):
+                await asyncio.sleep(0.05)
+                return True, False, {}
+
+        self._install_authority(monkeypatch, Authority())
+        with pytest.raises(DomainException) as exc_info:
+            asyncio.run(
+                PolkitAuthorizer(timeout=0.001).check("SetManual", self._caller())
+            )
+        assert exc_info.value.code == DomainError.NOT_AUTHORIZED
+
+    def test_api_denial_happens_before_application_invocation(self) -> None:
+        script = textwrap.dedent(
+            """
+            import asyncio
+            import honor_control.backend.dbus.api as api
+            from honor_control.backend.dbus.api import ControlInterface, NotAuthorizedError
+            from honor_control.backend.dbus.authorizer import CallerSubject
+            from honor_control.core.errors import DomainError, DomainException
+
+            class DenyingAuthorizer:
+                async def check(self, _method, _caller):
+                    raise DomainException(DomainError.NOT_AUTHORIZED, "denied")
+
+            class App:
+                called = False
+
+                async def set_fan_manual(self, _speed, _ttl):
+                    self.called = True
+                    raise AssertionError("application must not be invoked")
+
+            async def capture():
+                return CallerSubject(
+                    sender=":1.42", pid=1234, uid=1000, start_time=5678
+                )
+
+            async def main():
+                app = App()
+                interface = ControlInterface(app=app, authorizer=DenyingAuthorizer())
+                api._capture_caller = capture
+                method = ControlInterface.__dict__["SetManual"].original_method
+                try:
+                    await method(interface, 50, 300)
+                except NotAuthorizedError:
+                    pass
+                else:
+                    raise AssertionError("denial was not mapped")
+                assert app.called is False
+
+            asyncio.run(main())
+            """
+        )
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _install_authority(monkeypatch, authority) -> None:
+        import sdbus
+
+        monkeypatch.setattr(sdbus, "get_default_bus", lambda: object())
+        monkeypatch.setattr(
+            PolkitAuthorityInterface,
+            "new_proxy",
+            staticmethod(lambda *_args, **_kwargs: authority),
+        )
+
+
+class TestPolkitPolicyLevels:
+    """Verify the intended active-user and administrator policy tiers."""
 
     def test_power_configuration_is_admin_auth(self) -> None:
         tree = ET.parse(POLKIT_PATH)

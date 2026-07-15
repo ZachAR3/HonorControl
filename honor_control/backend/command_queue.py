@@ -29,11 +29,18 @@ DEFAULT_TIMEOUT = 10.0
 class CommandTimeoutError(DomainException):
     """Raised when a hardware command exceeds its deadline."""
 
-    def __init__(self, name: str, timeout: float) -> None:
+    def __init__(
+        self,
+        name: str,
+        timeout: float,
+        *,
+        recovery_future: asyncio.Future[Any] | None = None,
+    ) -> None:
         super().__init__(
             DomainError.TIMEOUT,
             f"Hardware command '{name}' timed out after {timeout}s",
         )
+        self.recovery_future = recovery_future
 
 
 @dataclass(frozen=True)
@@ -65,14 +72,28 @@ class HardwareCommandQueue:
         )
         self._thread.start()
 
+    @property
+    def pending_timeout_completion(self) -> asyncio.Future[Any] | None:
+        """Return the command whose late completion currently poisons the queue."""
+        return self._timed_out_future
+
     async def run(
         self,
         name: str,
         func: Callable[..., T],
         *args: Any,
         timeout: float = DEFAULT_TIMEOUT,
+        timeout_recovery: tuple[
+            str, Callable[..., Any], tuple[Any, ...]
+        ] | None = None,
     ) -> T:
-        """Execute one call or fail while a previously timed-out call runs."""
+        """Execute one call or fail while a previously timed-out call runs.
+
+        A safety-critical caller may provide ``timeout_recovery``.  If the
+        non-cancellable call times out, that command is queued while this
+        queue lock is still held and therefore becomes the worker's next
+        item.  The queue remains poisoned until the recovery itself finishes.
+        """
         if timeout <= 0:
             raise ValueError("Hardware command timeout must be positive")
         async with self._lock:
@@ -110,17 +131,55 @@ class HardwareCommandQueue:
                 )
                 return result
             except TimeoutError:
-                self._timed_out_future = future
-                raise CommandTimeoutError(name, timeout) from None
+                future.add_done_callback(self._consume_abandoned_completion)
+                recovery_future = self._queue_timeout_recovery(
+                    loop, timeout_recovery
+                )
+                self._timed_out_future = recovery_future or future
+                raise CommandTimeoutError(
+                    name,
+                    timeout,
+                    recovery_future=recovery_future,
+                ) from None
             except asyncio.CancelledError:
                 if not future.done():
-                    self._timed_out_future = future
+                    future.add_done_callback(self._consume_abandoned_completion)
+                    self._timed_out_future = (
+                        self._queue_timeout_recovery(loop, timeout_recovery) or future
+                    )
                 raise
             except Exception:
                 log.exception("hw-queue: %s failed", name)
                 raise
             finally:
                 self._running.pop(name, None)
+
+    def _queue_timeout_recovery(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        recovery: tuple[str, Callable[..., Any], tuple[Any, ...]] | None,
+    ) -> asyncio.Future[Any] | None:
+        """Reserve one recovery item directly behind a timed-out command."""
+        if recovery is None:
+            return None
+        recovery_name, recovery_func, recovery_args = recovery
+        future: asyncio.Future[Any] = loop.create_future()
+        self._requests.put_nowait(
+            _WorkItem(loop, future, recovery_func, recovery_args)
+        )
+        log.warning(
+            "hw-queue: reserved recovery %s after timed-out command",
+            recovery_name,
+        )
+        return future
+
+    @staticmethod
+    def _consume_abandoned_completion(future: asyncio.Future[Any]) -> None:
+        """Retrieve a late completion so an exception is not leaked as noise."""
+        try:
+            future.result()
+        except (asyncio.CancelledError, BaseException):
+            pass
 
     @staticmethod
     async def _wait_for_completion(future: asyncio.Future[T], timeout: float) -> T:

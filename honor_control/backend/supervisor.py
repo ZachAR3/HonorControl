@@ -4,8 +4,9 @@ Owns all task creation/cancellation on the event-loop thread.
 ``start()``/``stop()`` are awaited, idempotent state transitions:
 ``stopped → starting → running → stopping/failed``.
 
-Task exceptions are captured into controller health.  Safety cleanup
-runs in ``finally`` with a bounded timeout.
+Task exceptions are captured into controller health. Explicit ``stop()``
+requests run registered safety cleanup with a bounded timeout; controllers
+whose abnormal exit requires immediate restoration own that exception path.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ class RuntimeSupervisor:
     performs safety cleanup).  The supervisor ensures:
       * ``start()``/``stop()`` are idempotent state transitions.
       * Task exceptions are captured into controller health.
-      * Safety cleanup runs in ``finally`` with a bounded timeout.
+      * Explicit stop runs registered safety cleanup with a bounded timeout.
     """
 
     def __init__(self) -> None:

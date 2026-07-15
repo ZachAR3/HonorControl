@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from honor_control.backend.dbus.codec import (
@@ -14,6 +16,7 @@ from honor_control.backend.dbus.codec import (
 from honor_control.client.errors import ClientError, classify_dbus_error
 from honor_control.client.sdbus_client import (
     FakeClient,
+    SdbusClient,
     _decode_result,
     _decode_snapshot,
 )
@@ -226,6 +229,66 @@ class TestFakeClient:
         client = FakeClient(app)
         snap = asyncio_run(client.get_snapshot())
         assert snap.sequence > 0
+
+
+class TestSdbusClientSubscriptions:
+    """Verify sequence-aware coalescing and transport state handling."""
+
+    def test_signal_during_callback_fetches_the_newer_sequence(
+        self, monkeypatch
+    ) -> None:
+        client = SdbusClient()
+
+        async def scenario() -> None:
+            snapshots = iter((SystemSnapshot(sequence=1), SystemSnapshot(sequence=2)))
+            callback_started = asyncio.Event()
+            release_callback = asyncio.Event()
+            delivered: list[int] = []
+
+            async def get_snapshot() -> SystemSnapshot:
+                return next(snapshots)
+
+            async def subscriber(snapshot: SystemSnapshot) -> None:
+                delivered.append(snapshot.sequence)
+                if snapshot.sequence == 1:
+                    callback_started.set()
+                    await release_callback.wait()
+
+            monkeypatch.setattr(client, "get_snapshot", get_snapshot)
+            client.on_state_changed(subscriber)
+            client._connected = True  # noqa: SLF001
+            client._queue_snapshot_refresh(1)  # noqa: SLF001
+            await callback_started.wait()
+            client._queue_snapshot_refresh(2)  # noqa: SLF001
+            release_callback.set()
+            refresh = client._refresh_task  # noqa: SLF001
+            assert refresh is not None
+            await refresh
+
+            assert delivered == [1, 2]
+            await client.close()
+
+        asyncio.run(scenario())
+
+    def test_notification_timeout_does_not_mark_transport_offline(
+        self, monkeypatch
+    ) -> None:
+        client = SdbusClient()
+
+        async def scenario() -> None:
+            async def timeout() -> SystemSnapshot:
+                raise ClientError(TransportError.TIMEOUT, "snapshot timed out")
+
+            monkeypatch.setattr(client, "get_snapshot", timeout)
+            client._connected = True  # noqa: SLF001
+            client._pending_sequence = 1  # noqa: SLF001
+
+            await client._notify_snapshot()  # noqa: SLF001
+
+            assert client.connected is True
+            await client.close()
+
+        asyncio.run(scenario())
 
 
 def asyncio_run(coro):

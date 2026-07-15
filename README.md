@@ -49,10 +49,11 @@ GUI / Tray                    CLI
                       │
                       ▼
                ApplicationService
+   use cases + state transitions + lifecycle policy
         ┌─────────────┼────────────────────┐
         ▼             ▼                    ▼
-   feature services  SnapshotStore    RuntimeSupervisor
-  battery/power/...   sequence+events   fan/gesture/power/GPU
+    ConfigStore   SnapshotStore      RuntimeSupervisor
+ atomic desired   sequence+events   refresh/fan/power/gesture
         └─────────────┼────────────────────┘
                       ▼
          serialized HardwareCommandQueue
@@ -179,8 +180,8 @@ or tray menu to exit. This behavior can be disabled on the Settings page.
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
-pytest
+# Run non-hardware tests
+pytest -m "not hardware"
 
 # Run lint
 ruff check honor_control tests

@@ -26,6 +26,7 @@ from honor_control import __version__
 from honor_control.client.errors import ClientError
 from honor_control.client.sdbus_client import SdbusClient
 from honor_control.core.errors import DomainError, DomainException, TransportError
+from honor_control.core.models import OperationStatus
 from honor_control.core.touchpad import (
     TOUCHPAD_SETTING_SPECS,
     TouchpadSetting,
@@ -225,7 +226,7 @@ async def cmd_power_auto_switch(args: argparse.Namespace, client) -> int:
         enabled = args.enabled == "on"
         result = await client.set_auto_switch(enabled)
         _emit(args, result.to_dict(), f"Auto-switch: {result.message}")
-        return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
+        return EXIT_OK if result.persisted else EXIT_OPERATION_FAILED
     snap = await client.get_snapshot()
     _emit(
         args,
@@ -425,7 +426,11 @@ async def cmd_diag_logs(args: argparse.Namespace, client) -> int:
 async def cmd_reload(args: argparse.Namespace, client) -> int:
     result = await client.reload()
     _emit(args, result.to_dict(), f"Reload: {result.message}")
-    return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
+    return (
+        EXIT_OK
+        if result.status == OperationStatus.SUCCESS
+        else EXIT_OPERATION_FAILED
+    )
 
 
 async def cmd_version(args: argparse.Namespace, client) -> int:

@@ -10,7 +10,7 @@ import pytest
 
 from honor_control.backend.application import ApplicationService
 from honor_control.backend.command_queue import HardwareCommandQueue
-from honor_control.backend.config_store import ConfigStore
+from honor_control.backend.config_store import ConfigStore, FanState, PowerState
 from honor_control.backend.gesture_runtime import GestureProbe, GestureRuntimeStatus
 from honor_control.backend.hardware import FakeHardware
 from honor_control.backend.snapshot_store import SnapshotStore
@@ -624,6 +624,29 @@ class TestFanMutation:
 
         asyncio.run(scenario())
 
+    def test_failed_safe_state_suppresses_further_curve_writes(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.start_background()
+            await svc.set_fan_curve("default", "40000:0,95000:100")
+            await asyncio.sleep(2.1)
+            await svc._publish_fan_failed_safe("restore failed")  # noqa: SLF001
+            svc._hw.call_log.clear()  # noqa: SLF001
+
+            await asyncio.sleep(2.1)
+
+            writes = {
+                name
+                for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+                if name in {"set_fan_manual", "set_fan_speed"}
+            }
+            assert writes == set()
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
     def test_set_manual_speed(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
@@ -651,6 +674,131 @@ class TestFanMutation:
         assert result.status == OperationStatus.FAILED
         assert "set_fan_speed" not in names
         assert "set_fan_auto" in names
+
+    def test_manual_speed_exception_restores_stock_auto(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            svc._hw.call_log.clear()  # noqa: SLF001
+            svc._hw.fail_next("set_fan_speed")  # noqa: SLF001
+
+            result = await svc.set_fan_manual(50, 300)
+
+            assert result.status == OperationStatus.FAILED
+            assert svc._hw._fan_mode == FanMode.STOCK  # noqa: SLF001
+            names = [
+                name for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+            ]
+            assert names.index("set_fan_speed") < names.index("set_fan_auto")
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_manual_watchdog_exception_restores_stock_auto(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            hardware = svc._hw  # noqa: SLF001
+            hardware.set_fan_manual(50)
+            hardware.set_fan_speed(50)
+            hardware.fail_next("read_fan_temp")
+            svc._manual_ttl_seconds = 0.01  # noqa: SLF001
+
+            with pytest.raises(DomainException):
+                await svc._manual_fan_expiry()  # noqa: SLF001
+
+            assert hardware._fan_mode == FanMode.STOCK  # noqa: SLF001
+            assert (await svc.get_snapshot()).fan.mode == FanMode.STOCK
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_manual_timeout_queues_stock_auto_before_later_work(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import time
+
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            hardware = svc._hw  # noqa: SLF001
+            original_speed = hardware.set_fan_speed
+            original_run = svc.queue.run
+
+            def slow_speed(speed: int) -> bool:
+                time.sleep(0.08)
+                return original_speed(speed)
+
+            async def short_fan_timeout(
+                name,
+                func,
+                *args,
+                timeout=10.0,
+                timeout_recovery=None,
+            ):
+                if name == "fan_manual_speed":
+                    timeout = 0.01
+                return await original_run(
+                    name,
+                    func,
+                    *args,
+                    timeout=timeout,
+                    timeout_recovery=timeout_recovery,
+                )
+
+            monkeypatch.setattr(hardware, "set_fan_speed", slow_speed)
+            monkeypatch.setattr(svc.queue, "run", short_fan_timeout)
+
+            result = await svc.set_fan_manual(50, 300)
+
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "fan_manual_restore_pending"
+            with pytest.raises(DomainException) as busy:
+                await svc.set_auto_switch(True)
+            assert str(busy.value.code) == "busy"
+            recovery = svc._fan_restore_task  # noqa: SLF001
+            assert recovery is not None
+            assert await asyncio.wait_for(asyncio.shield(recovery), timeout=1)
+            assert hardware._fan_mode == FanMode.STOCK  # noqa: SLF001
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_manual_apply_and_restore_failure_publish_failed_safe(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            hardware = svc._hw  # noqa: SLF001
+
+            def fail_speed(speed: int) -> bool:
+                hardware._log("set_fan_speed", speed)  # noqa: SLF001
+                raise RuntimeError("speed write failed")
+
+            def reject_auto() -> bool:
+                hardware._log("set_fan_auto")  # noqa: SLF001
+                return False
+
+            monkeypatch.setattr(hardware, "set_fan_speed", fail_speed)
+            monkeypatch.setattr(hardware, "set_fan_auto", reject_auto)
+
+            result = await svc.set_fan_manual(50, 300)
+
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "fan_manual_restore_failed"
+            assert (await svc.get_snapshot()).fan.mode == FanMode.FAILED_SAFE
+            await svc.shutdown()
+
+        asyncio.run(scenario())
 
     def test_manual_speed_rejects_unsafe_hot_target(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
@@ -798,3 +946,133 @@ class TestReload:
         asyncio.run(svc.initialize())
         result = asyncio.run(svc.reload())
         assert result.status == OperationStatus.SUCCESS
+        assert result.applied is False
+
+    def test_reload_curve_to_stock_restores_hardware(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.start_background()
+            await svc.set_fan_curve("default", "40000:20,95000:100")
+            await asyncio.sleep(2.1)
+            assert svc._hw._fan_mode == FanMode.MANUAL_OVERRIDE  # noqa: SLF001
+
+            writer = ConfigStore(state_path=svc.config_store.state_path)
+            writer.load()
+            await writer.update(
+                lambda state: replace(
+                    state,
+                    fan=FanState(mode="stock", curves=state.fan.curves),
+                )
+            )
+
+            result = await svc.reload()
+
+            assert result.status == OperationStatus.SUCCESS
+            assert result.applied is True
+            assert svc.config_store.state.fan.mode == "stock"
+            assert svc._hw._fan_mode == FanMode.STOCK  # noqa: SLF001
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_reload_stock_to_curve_starts_controller_without_false_apply(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.start_background()
+            writer = ConfigStore(state_path=svc.config_store.state_path)
+            writer.load()
+            await writer.update(
+                lambda state: replace(
+                    state,
+                    fan=FanState(
+                        mode="curve",
+                        curves={"default": "40000:20,95000:100"},
+                    ),
+                )
+            )
+
+            result = await svc.reload()
+
+            assert result.status == OperationStatus.SUCCESS
+            assert result.applied is False
+            await asyncio.sleep(2.1)
+            assert svc._hw._fan_mode == FanMode.MANUAL_OVERRIDE  # noqa: SLF001
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_reload_reconciles_changed_power_profile(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.start_background()
+            writer = ConfigStore(state_path=svc.config_store.state_path)
+            writer.load()
+            await writer.update(
+                lambda state: replace(
+                    state,
+                    power=PowerState(
+                        profile="performance",
+                        auto_switch=state.power.auto_switch,
+                        profiles=state.power.profiles,
+                    ),
+                )
+            )
+
+            result = await svc.reload()
+
+            assert result.status == OperationStatus.SUCCESS
+            assert result.applied is True
+            assert svc._hw._power_profile == "performance"  # noqa: SLF001
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+
+class TestLifecycle:
+    """Verify mutation admission and teardown ordering."""
+
+    def test_shutdown_drains_manual_transition_then_restores_stock(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import threading
+
+        svc = _make_service(tmp_path)
+        entered = threading.Event()
+        release = threading.Event()
+
+        async def scenario() -> None:
+            await svc.initialize()
+            hardware = svc._hw  # noqa: SLF001
+            original_speed = hardware.set_fan_speed
+
+            def blocked_speed(speed: int) -> bool:
+                entered.set()
+                assert release.wait(timeout=2)
+                return original_speed(speed)
+
+            monkeypatch.setattr(hardware, "set_fan_speed", blocked_speed)
+            mutation = asyncio.create_task(svc.set_fan_manual(50, 300))
+            assert await asyncio.to_thread(entered.wait, 1)
+            shutdown = asyncio.create_task(svc.shutdown())
+            await asyncio.sleep(0)
+            assert not shutdown.done()
+            release.set()
+
+            result = await mutation
+            await shutdown
+
+            assert result.applied is True
+            assert hardware._fan_mode == FanMode.STOCK  # noqa: SLF001
+            with pytest.raises(DomainException) as closing:
+                await svc.set_auto_switch(True)
+            assert str(closing.value.code) == "unavailable"
+
+        asyncio.run(scenario())

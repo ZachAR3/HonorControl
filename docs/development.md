@@ -22,8 +22,8 @@ hardware writes.
 ## Test commands
 
 ```bash
-# Run all tests
-pytest
+# Run all non-hardware tests
+pytest -m "not hardware"
 
 # Run a specific test layer
 pytest tests/test_core.py          # domain validation
@@ -48,7 +48,7 @@ Run before committing:
 ```bash
 ruff check honor_control tests
 python -m compileall honor_control
-pytest -q
+pytest -q -m "not hardware"
 QT_QPA_PLATFORM=offscreen python -c "from honor_control.frontend.gui.app import main; print('GUI OK')"
 ```
 

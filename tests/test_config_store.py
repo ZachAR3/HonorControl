@@ -110,6 +110,24 @@ class TestConfigStoreLoad:
         ).load()
         assert backup_state.battery.end_threshold == 70
 
+    def test_running_reload_keeps_newer_live_state_instead_of_backup(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+        asyncio.run(store.update(lambda s: _set_battery(s, 70, 65, "home")))
+        asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "travel")))
+        tmp_state_path.write_text("invalid = {{{", encoding="utf-8")
+
+        state = store.reload()
+
+        assert state.battery.end_threshold == 80
+        assert store.valid is False
+        assert store.last_error
+
+        recovered = ConfigStore(state_path=tmp_state_path).load()
+        assert recovered.battery.end_threshold == 70
+
 
 class TestConfigStoreUpdate:
     """Verify atomic update and concurrent access."""

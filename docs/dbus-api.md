@@ -48,10 +48,15 @@ Object path: `/org/honorlinux/Control1`
 | `SetEnabled` | `(s id, b enabled) -> a{sv}` | Enable/disable gesture |
 | `SetAllEnabled` | `(b enabled) -> a{sv}` | Batch enable/disable |
 | `SetDaemonEnabled` | `(b enabled) -> a{sv}` | Toggle gesture daemon |
+| `ProbeTouchpadFirmware` | `() -> a{sv}` | Check DMI, HID descriptor, and device access |
+
+#### Touchpad firmware (admin auth)
+
+| Method | Signature | Description |
+|---|---|---|
 | `ApplyTouchpadSettings` | `(a{si} settings) -> a{sv}` | Apply a validated settings profile |
 | `SetTouchpadSetting` | `(s setting, i value) -> a{sv}` | Apply one typed firmware setting |
 | `QueryTouchpadSupport` | `() -> a{sv}` | Query support bitmap with exclusive reader access |
-| `ProbeTouchpadFirmware` | `() -> a{sv}` | Check DMI, HID descriptor, and device access |
 
 #### GPU (admin auth)
 
@@ -94,6 +99,7 @@ Object path: `/org/honorlinux/Control1`
 | `org.honorlinux.control.set-power-profile` | active local user |
 | `org.honorlinux.control.configure-power` | admin auth |
 | `org.honorlinux.control.set-gestures` | active local user |
+| `org.honorlinux.control.set-touchpad-firmware` | admin auth |
 | `org.honorlinux.control.export-debug` | active local user |
 | `org.honorlinux.control.view-logs` | admin auth |
 | `org.honorlinux.control.set-fan-curve` | admin auth |

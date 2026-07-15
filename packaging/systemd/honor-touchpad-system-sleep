@@ -19,11 +19,24 @@ if [ "$1" = "pre" ]; then
 fi
 
 if [ "$1" = "post" ]; then
+    restart_control=false
+    restore_touchpad=false
     if [ -f "$ACTIVE_MARKER" ]; then
         rm -f "$ACTIVE_MARKER"
-        systemctl --no-block start honor-control.service
+        restart_control=true
     fi
     if systemctl is-enabled --quiet honor-touchpad-restore.service; then
+        restore_touchpad=true
+    fi
+
+    if $restart_control && $restore_touchpad; then
+        # One transaction lets Before=honor-control.service serialize the
+        # standalone HID restore ahead of service-owned hardware startup.
+        systemctl --no-block restart \
+            honor-touchpad-restore.service honor-control.service
+    elif $restart_control; then
+        systemctl --no-block start honor-control.service
+    elif $restore_touchpad; then
         systemctl --no-block restart honor-touchpad-restore.service
     fi
 fi

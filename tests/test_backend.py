@@ -118,6 +118,42 @@ class TestCommandQueue:
         asyncio.run(scenario())
         q.shutdown()
 
+    def test_timeout_recovery_is_the_next_command_and_extends_poison(self) -> None:
+        q = HardwareCommandQueue()
+
+        async def scenario() -> None:
+            import time
+
+            calls: list[str] = []
+
+            def slow() -> None:
+                time.sleep(0.08)
+                calls.append("slow")
+
+            def recover() -> bool:
+                calls.append("recover")
+                return True
+
+            with pytest.raises(CommandTimeoutError) as exc_info:
+                await q.run(
+                    "slow",
+                    slow,
+                    timeout=0.01,
+                    timeout_recovery=("recover", recover, ()),
+                )
+            recovery = exc_info.value.recovery_future
+            assert recovery is not None
+            with pytest.raises(DomainException) as busy:
+                await q.run("must-wait-for-recovery", lambda: calls.append("unsafe"))
+            assert busy.value.code == DomainError.BUSY
+
+            assert await asyncio.wait_for(asyncio.shield(recovery), timeout=1) is True
+            assert await q.run("after-recovery", lambda: calls.append("after")) is None
+            assert calls == ["slow", "recover", "after"]
+
+        asyncio.run(scenario())
+        q.shutdown()
+
 
 class TestSupervisor:
     """Verify controller lifecycle and health."""

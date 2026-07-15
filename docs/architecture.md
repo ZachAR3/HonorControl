@@ -42,10 +42,11 @@ GUI / Tray                    CLI
                       │
                       ▼
                ApplicationService
+   use cases + state transitions + lifecycle policy
         ┌─────────────┼────────────────────┐
         ▼             ▼                    ▼
-   feature services  SnapshotStore    RuntimeSupervisor
-  battery/power/...   sequence+events   fan/gesture/power/GPU
+    ConfigStore   SnapshotStore      RuntimeSupervisor
+ atomic desired   sequence+events   refresh/fan/power/gesture
         └─────────────┼────────────────────┘
                       ▼
          serialized HardwareCommandQueue
@@ -79,6 +80,8 @@ before the next write can succeed (otherwise EBUSY). The
 - Global async mutation lock: no interleaving at the application level.
 - Per-command timeout: callers return promptly; the queue rejects new work as
   busy until the non-cancellable timed-out call has really completed.
+- Safety-critical fan calls reserve stock-auto restoration as the next worker
+  item on timeout; later work remains blocked until that recovery completes.
 - Correlation ID: every operation is auditable.
 
 ## Source layout
@@ -88,7 +91,9 @@ honor_control/
 ├── contract.py                  # bus constants, API/schema versions, wire keys
 ├── core/
 │   ├── errors.py                # stable domain/transport error codes
+│   ├── gestures.py              # gesture definitions and decoding
 │   ├── models.py                # frozen DTOs, enums, OperationResult
+│   ├── touchpad.py              # typed firmware protocol constants/encoding
 │   └── validation.py            # thresholds, profiles, curves, gestures
 ├── backend/
 │   ├── service.py               # argument parsing, composition, signal shutdown
@@ -99,6 +104,7 @@ honor_control/
 │   ├── supervisor.py            # controller lifecycle and health
 │   ├── command_queue.py         # serialized hardware command queue
 │   ├── gesture_runtime.py       # hidraw reader + uinput virtual keyboard
+│   ├── touchpad_firmware.py     # exact-gated HID firmware transport
 │   └── dbus/
 │       ├── api.py               # exported interfaces only
 │       ├── codec.py             # DTO ↔ D-Bus conversion
@@ -107,7 +113,9 @@ honor_control/
 │   ├── protocol.py              # client interface used by CLI/frontends
 │   ├── sdbus_client.py          # async transport and signal subscription
 │   └── errors.py                # transport-to-domain error mapping
-├── cli/honorctl.py
+├── cli/
+│   ├── honorctl.py              # unprivileged typed D-Bus CLI
+│   └── touchpadctl.py           # standalone exact-gated firmware CLI
 └── frontend/
     ├── gui/
     │   ├── controller.py        # worker loop, commands, refresh/reconnect

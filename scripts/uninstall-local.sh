@@ -3,8 +3,8 @@
 #
 # Stops the service, removes symlinks, system packaging files, and the
 # dedicated venv.  It does NOT remove /var/lib/honor-control (state data)
-# unless --purge is passed, and does not restore honor-tools' legacy power
-# udev hook, which conflicts with PPD.
+# unless --purge is passed.  If the installer backed up honor-tools' legacy
+# power udev hook, uninstall restores it only when its original path is free.
 #
 # Usage:
 #   sudo bash scripts/uninstall-local.sh             # keep state

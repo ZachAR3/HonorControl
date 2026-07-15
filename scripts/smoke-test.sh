@@ -64,7 +64,7 @@ check "cli import" \
 echo
 echo "=== unit tests ==="
 check "pytest" \
-    "$PYTEST" "$ROOT/tests" -q
+    "$PYTEST" "$ROOT/tests" -q -m "not hardware"
 
 echo
 echo "=== Summary ==="

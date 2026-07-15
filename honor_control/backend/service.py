@@ -121,8 +121,10 @@ async def _serve(use_session_bus: bool = False, state_path: str | None = None) -
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(sig)
         unsubscribe()
-        await app.shutdown()
+        # Stop accepting new D-Bus calls before application cleanup waits for
+        # any in-flight serialized mutation to finish.
         bus.close()
+        await app.shutdown()
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

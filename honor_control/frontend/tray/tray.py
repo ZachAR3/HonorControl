@@ -64,14 +64,14 @@ class HonorTray:
         self.controller.error.connect(self._notify)
         self.controller.operation_completed.connect(self._on_operation)
         self._set_online(False)
-        if self._owns_controller:
-            self.controller.start()
 
         self._timer = QTimer()
         self._timer.setInterval(TRAY_REFRESH_MS)
         self._timer.timeout.connect(self.refresh)
-        self._timer.start()
-        self.refresh()
+        if self._owns_controller:
+            self.controller.start()
+            self._timer.start()
+            self.refresh()
 
     def _build_menu(self) -> None:
         self.menu = QMenu("Honor Control")
@@ -234,7 +234,8 @@ class HonorTray:
             self.touchpad_menu.setEnabled(False)
 
     def _on_operation(self, _operation: str, result: object) -> None:
-        self.controller.refresh()
+        if self._owns_controller:
+            self.controller.refresh()
         if result is not None and getattr(result, "message", ""):
             self._notify(str(result.message))
 

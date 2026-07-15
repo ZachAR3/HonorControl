@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,10 @@ from honor_control.cli.honorctl import (
     EXIT_UNAVAILABLE,
     EXIT_USAGE,
     build_parser,
+    cmd_power_auto_switch,
+    cmd_reload,
 )
+from honor_control.core.models import OperationResult
 
 CLI_PATH = Path(__file__).parent.parent / "honor_control" / "cli" / "honorctl.py"
 
@@ -155,3 +159,47 @@ class TestCliSafety:
         assert args.on_ac == "performance"
         assert args.on_battery == "silent"
         assert args.ac_script == "/usr/local/bin/ac-hook"
+
+    def test_auto_switch_toggle_succeeds_when_configuration_is_persisted(
+        self, capsys
+    ) -> None:
+        class StubClient:
+            async def set_auto_switch(self, enabled: bool) -> OperationResult:
+                assert enabled is True
+                return OperationResult.success(
+                    message="enabled",
+                    persisted=True,
+                    applied=False,
+                )
+
+        args = build_parser().parse_args(["power", "auto-switch", "on"])
+        code = asyncio.run(cmd_power_auto_switch(args, StubClient()))
+
+        assert code == EXIT_OK
+        assert "enabled" in capsys.readouterr().out
+
+    def test_auto_switch_toggle_fails_when_persistence_fails(self, capsys) -> None:
+        class StubClient:
+            async def set_auto_switch(self, _enabled: bool) -> OperationResult:
+                return OperationResult.failed(code="save_failed", message="disk full")
+
+        args = build_parser().parse_args(["power", "auto-switch", "off"])
+        code = asyncio.run(cmd_power_auto_switch(args, StubClient()))
+
+        assert code == EXIT_OPERATION_FAILED
+        assert "disk full" in capsys.readouterr().out
+
+    def test_reload_success_does_not_require_hardware_apply(self, capsys) -> None:
+        class StubClient:
+            async def reload(self) -> OperationResult:
+                return OperationResult.success(
+                    message="unchanged",
+                    changed=False,
+                    applied=False,
+                )
+
+        args = build_parser().parse_args(["reload"])
+        code = asyncio.run(cmd_reload(args, StubClient()))
+
+        assert code == EXIT_OK
+        assert "unchanged" in capsys.readouterr().out

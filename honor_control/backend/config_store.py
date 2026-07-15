@@ -383,6 +383,7 @@ class ConfigStore:
         self._state: ServiceState = default_state()
         self._valid = True
         self._last_error = ""
+        self._has_loaded = False
 
     @property
     def state(self) -> ServiceState:
@@ -411,6 +412,20 @@ class ConfigStore:
         leaves the last-known-good state active and marks the store
         degraded.
         """
+        return self._load(allow_backup=not self._has_loaded)
+
+    def reload(self) -> ServiceState:
+        """Reload the primary state file without replacing the live LKG.
+
+        Backup recovery is a startup-only fallback.  Once the process has a
+        validated in-memory state, a malformed primary file must leave that
+        newer state active rather than silently replacing it with the older
+        bounded backup.
+        """
+        return self._load(allow_backup=False)
+
+    def _load(self, *, allow_backup: bool) -> ServiceState:
+        """Load one candidate, optionally using the startup backup."""
         try:
             if not self._state_path.exists():
                 log.info("state file %s missing; using defaults", self._state_path)
@@ -427,21 +442,19 @@ class ConfigStore:
             log.error("state load failed: %s", exc)
             self._valid = False
             self._last_error = str(exc)
-            # A fresh process has no in-memory last-known-good state.  Recover
-            # the bounded backup if it is valid, but retain degraded health so
-            # operators can see that the primary file needs attention.
+            # A fresh process has no in-memory last-known-good state. Recover
+            # the bounded backup only during initial load, while retaining
+            # degraded health so the primary still requires attention.
             backup = self._state_path.with_suffix(".toml.bak")
-            if backup.exists():
+            if allow_backup and backup.exists():
                 try:
                     self._state = _state_from_dict(self._read_toml(backup))
                     log.warning("recovered state from %s", backup)
                 except Exception as backup_exc:  # noqa: BLE001
                     log.error("state backup load failed: %s", backup_exc)
+        finally:
+            self._has_loaded = True
         return self._state
-
-    def reload(self) -> ServiceState:
-        """Reload state from disk (same as :meth:`load`)."""
-        return self.load()
 
     async def update(self, mutator) -> ServiceState:
         """Apply ``mutator(current_state) -> new_state`` atomically.
@@ -472,6 +485,7 @@ class ConfigStore:
                         detail=str(exc),
                     ) from exc
                 self._state = new_state
+                self._has_loaded = True
                 return self._state
 
     def _save_atomic(self, state: ServiceState) -> None:

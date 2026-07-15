@@ -1,3 +1,7 @@
 #!/bin/sh
-export PYTHONPATH=/usr/lib/honor-touchpad${PYTHONPATH:+:$PYTHONPATH}
-exec python3 -m honor_control.cli.touchpadctl "$@"
+exec /usr/bin/python3 -I -c '
+import sys
+sys.path.insert(0, "/usr/lib/honor-touchpad")
+from honor_control.cli.touchpadctl import main
+raise SystemExit(main())
+' "$@"

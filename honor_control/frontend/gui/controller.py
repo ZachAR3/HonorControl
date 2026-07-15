@@ -213,7 +213,8 @@ class GuiWorker(QThread):
                     self.snapshot_ready.emit(snap)
             except ClientError as exc:
                 if client is self._client:
-                    self.connection_changed.emit(False)
+                    if not client.connected:
+                        self.connection_changed.emit(False)
                     self.error.emit(exc.message)
 
         self._spawn(_do())

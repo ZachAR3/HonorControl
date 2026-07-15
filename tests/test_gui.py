@@ -6,6 +6,7 @@ from typed snapshots and that the state store emits only on change.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import replace
 
@@ -113,6 +114,48 @@ class TestGuiController:
         assert GUI_DBUS_TIMEOUT_SECONDS == 15.0
         assert worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
         assert controller._worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
+
+    def test_poll_timeout_preserves_online_state_and_later_snapshot(
+        self, qapp
+    ) -> None:
+        from honor_control.client.errors import ClientError
+        from honor_control.core.errors import TransportError
+        from honor_control.frontend.gui.controller import GuiWorker
+
+        class TransientClient:
+            connected = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_snapshot(self) -> SystemSnapshot:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ClientError(TransportError.TIMEOUT, "temporary timeout")
+                return SystemSnapshot(sequence=7)
+
+        worker = GuiWorker()
+        client = TransientClient()
+        worker._client = client  # type: ignore[assignment]  # noqa: SLF001
+        connection_events: list[bool] = []
+        errors: list[str] = []
+        snapshots: list[SystemSnapshot] = []
+        worker.connection_changed.connect(connection_events.append)
+        worker.error.connect(errors.append)
+        worker.snapshot_ready.connect(snapshots.append)
+
+        async def scenario() -> None:
+            worker._fetch_and_emit()  # noqa: SLF001
+            await asyncio.gather(*tuple(worker._tasks))  # noqa: SLF001
+            worker._fetch_and_emit()  # noqa: SLF001
+            await asyncio.gather(*tuple(worker._tasks))  # noqa: SLF001
+
+        asyncio.run(scenario())
+
+        assert client.connected is True
+        assert connection_events == []
+        assert errors == ["temporary timeout"]
+        assert [snapshot.sequence for snapshot in snapshots] == [7]
 
 
 class TestGuiPageConstruction:
@@ -301,6 +344,23 @@ class TestGuiPageConstruction:
 
 
 class TestIntegratedTray:
+    def test_shared_controller_owns_no_duplicate_refresh_loop(
+        self, qapp, monkeypatch
+    ) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.tray.tray import HonorTray
+
+        controller = GuiController()
+        refreshes: list[bool] = []
+        monkeypatch.setattr(controller, "refresh", lambda: refreshes.append(True))
+
+        tray = HonorTray(controller=controller)
+        tray._on_operation("test", None)  # noqa: SLF001
+
+        assert tray._timer.isActive() is False  # noqa: SLF001
+        assert refreshes == []
+        tray.shutdown()
+
     def test_left_click_uses_existing_window_callback(self, qapp) -> None:
         from PySide6.QtWidgets import QSystemTrayIcon
 

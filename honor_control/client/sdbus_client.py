@@ -46,6 +46,7 @@ log = logging.getLogger("honor_control.client.sdbus_client")
 
 #: Default per-call timeout (seconds).
 DEFAULT_TIMEOUT = 10.0
+MAX_COALESCED_REFRESHES = 4
 
 
 class SdbusClient(ControlClient):
@@ -69,6 +70,7 @@ class SdbusClient(ControlClient):
         self._subscribers: list[Callable[[SystemSnapshot], Any]] = []
         self._signal_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
+        self._pending_sequence: int | None = None
 
     @property
     def connected(self) -> bool:
@@ -120,6 +122,7 @@ class SdbusClient(ControlClient):
     async def close(self) -> None:
         """Close the bus and cancel background tasks."""
         self._connected = False
+        self._pending_sequence = None
         for task in (self._signal_task, self._refresh_task):
             if task is not None:
                 task.cancel()
@@ -314,33 +317,63 @@ class SdbusClient(ControlClient):
         self._subscribers.append(callback)
 
     async def _listen_for_changes(self) -> None:
-        """Coalesce service signals into snapshot refreshes."""
+        """Coalesce service signals without discarding the newest sequence."""
         assert self._proxy is not None
         try:
-            async for _sequence, _domains in self._proxy.StateChanged.catch():
-                if self._refresh_task is None or self._refresh_task.done():
-                    self._refresh_task = asyncio.create_task(self._notify_snapshot())
+            async for sequence, _domains in self._proxy.StateChanged.catch():
+                self._queue_snapshot_refresh(int(sequence))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             self._connected = False
             log.warning("state signal listener stopped: %s", exc)
 
+    def _queue_snapshot_refresh(self, sequence: int) -> None:
+        """Retain the highest signalled sequence and start one fetch task."""
+        if self._pending_sequence is None or sequence > self._pending_sequence:
+            self._pending_sequence = sequence
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(
+                self._notify_snapshot(),
+                name="honor-control-snapshot-refresh",
+            )
+
     async def _notify_snapshot(self) -> None:
+        required_sequence = 0
         try:
-            await asyncio.sleep(0)
-            snapshot = await self.get_snapshot()
-            for callback in tuple(self._subscribers):
-                try:
-                    result = callback(snapshot)
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:  # noqa: BLE001
-                    log.exception("state subscriber failed")
+            for _attempt in range(MAX_COALESCED_REFRESHES):
+                pending = self._pending_sequence
+                if pending is None:
+                    return
+                required_sequence = pending
+                self._pending_sequence = None
+                await asyncio.sleep(0)
+                snapshot = await self.get_snapshot()
+                for callback in tuple(self._subscribers):
+                    try:
+                        result = callback(snapshot)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:  # noqa: BLE001
+                        log.exception("state subscriber failed")
+
+                newest = self._pending_sequence
+                required_sequence = max(required_sequence, newest or 0)
+                if snapshot.sequence >= required_sequence:
+                    self._pending_sequence = None
+                    return
+                self._pending_sequence = required_sequence
+            log.warning(
+                "snapshot did not cover pending sequence %d after %d refreshes",
+                required_sequence,
+                MAX_COALESCED_REFRESHES,
+            )
+            self._pending_sequence = None
         except asyncio.CancelledError:
             raise
         except ClientError as exc:
-            self._connected = False
+            if exc.code == TransportError.SERVICE_UNAVAILABLE:
+                self._connected = False
             log.warning("snapshot notification failed: %s", exc.message)
 
 

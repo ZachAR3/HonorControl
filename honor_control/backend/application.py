@@ -23,12 +23,16 @@ import shlex
 import signal
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
 from honor_control import __version__
-from honor_control.backend.command_queue import HardwareCommandQueue
+from honor_control.backend.command_queue import (
+    CommandTimeoutError,
+    HardwareCommandQueue,
+)
 from honor_control.backend.config_store import (
     BatteryState,
     ConfigStore,
@@ -86,6 +90,7 @@ from honor_control.core.validation import (
 log = logging.getLogger("honor_control.backend.application")
 
 FAN_SPEED_WRITE_HYSTERESIS = 3
+FAN_RECOVERY_WAIT_SECONDS = 10.0
 AUTO_SWITCH_POLL_SECONDS = 2.0
 AUTO_SWITCH_MAX_RETRY_SECONDS = 60.0
 
@@ -96,6 +101,16 @@ def _serialized_mutation(method):
     @functools.wraps(method)
     async def wrapped(self, *args, **kwargs):
         async with self._mutation_lock:
+            if self._closing:
+                raise DomainException(
+                    DomainError.UNAVAILABLE,
+                    "Service is shutting down",
+                )
+            if self._fan_restore_pending:
+                raise DomainException(
+                    DomainError.BUSY,
+                    "Stock fan restoration is still pending",
+                )
             return await method(self, *args, **kwargs)
 
     return wrapped
@@ -142,8 +157,12 @@ class ApplicationService:
         self._gesture_runtime = gesture_runtime
         self._start_time = time.time()
         self._mutation_lock = asyncio.Lock()
+        self._closing = False
+        self._shutdown_complete = False
         self._manual_ttl_seconds = 0
         self._fan_fail_safe_error = ""
+        self._fan_restore_pending = False
+        self._fan_restore_task: asyncio.Task[bool] | None = None
         self._last_auto_script_status = "Not run"
         self._supervisor.register(
             "manual_fan_ttl", self._manual_fan_expiry, self._restore_fan_auto
@@ -195,12 +214,32 @@ class ApplicationService:
         await self._refresh_service_health()
 
     async def shutdown(self) -> None:
-        """Stop all controllers, shut down the command queue."""
-        await self._supervisor.stop_all()
-        # Let the serialized worker drain its stop marker when possible.  The
-        # worker is a daemon and the join is bounded, so a wedged firmware call
-        # still cannot prevent process shutdown.
-        self._queue.shutdown(wait=True, timeout=2.0)
+        """Close mutation admission, drain one use case, then clean up."""
+        if self._shutdown_complete:
+            return
+        self._closing = True
+        async with self._mutation_lock:
+            if self._shutdown_complete:
+                return
+            await self._supervisor.stop_all()
+            fan_cap = self._snapshots.snapshot.capabilities.get("fan")
+            if (
+                fan_cap is not None
+                and fan_cap.writable
+                and not self._fan_restore_pending
+            ):
+                await self._restore_fan_auto()
+            recovery = self._fan_restore_task
+            if recovery is not None and not recovery.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(recovery), timeout=2.0)
+                except TimeoutError:
+                    log.warning("fan restoration is still pending during shutdown")
+            # Let the serialized worker drain its stop marker when possible.
+            # The worker is a daemon and the join is bounded, so a wedged
+            # firmware call still cannot prevent process shutdown.
+            self._queue.shutdown(wait=True, timeout=2.0)
+            self._shutdown_complete = True
 
     # -- Reads --
 
@@ -222,8 +261,10 @@ class ApplicationService:
 
     @_serialized_mutation
     async def reload(self) -> OperationResult:
-        """Reload config and reconcile controllers transactionally."""
+        """Reload config and reconcile only supported runtime transitions."""
+        config_loaded = False
         try:
+            previous = self._config.state
             self._config.reload()
             if not self._config.valid:
                 return OperationResult.failed(
@@ -231,16 +272,88 @@ class ApplicationService:
                     message=self._config.last_error or "Configuration is invalid",
                     sequence=self._snapshots.sequence,
                 )
-            await self._reconcile_gesture_runtime()
+            current = self._config.state
+            config_loaded = True
+            changed = current != previous
+            applied = False
+            failures: list[str] = []
+            details: dict[str, Any] = {}
+
+            if previous.fan.mode != current.fan.mode:
+                if current.fan.mode == "stock":
+                    await self._supervisor.stop("manual_fan_ttl")
+                    await self._supervisor.stop("fan_curve")
+                    restored = await self._restore_fan_auto()
+                    details["fan"] = "stock_restored" if restored else "restore_failed"
+                    if restored:
+                        applied = True
+                    else:
+                        failures.append("fan stock-auto restoration failed")
+                elif current.fan.mode == "curve":
+                    started = await self._supervisor.start("fan_curve")
+                    details["fan"] = (
+                        "curve_controller_started" if started else "controller_start_failed"
+                    )
+                    if not started:
+                        failures.append("fan curve controller did not start")
+
+            gesture_changed = previous.gestures != current.gestures
+            if gesture_changed:
+                await self._reconcile_gesture_runtime()
+                if self._gesture_runtime is not None:
+                    expected = current.gestures.daemon_enabled
+                    running = self._gesture_runtime.status.running
+                    details["gestures"] = "running" if running else "stopped"
+                    if running == expected:
+                        applied = True
+                    else:
+                        failures.append("gesture runtime did not reach desired state")
+
+            if previous.power != current.power:
+                await self._refresh_power()
+                target = self._power_reconcile_target()
+                power_result = await self._reconcile_power_profile(target)
+                if power_result is None:
+                    details["power"] = (
+                        "already_applied"
+                        if self._snapshots.snapshot.power.applied_profile == target
+                        else "not_writable"
+                    )
+                else:
+                    details["power"] = power_result.to_dict()
+                    if power_result.applied:
+                        applied = True
+                    else:
+                        failures.append(power_result.message)
+
             await self._refresh_all()
+            if failures:
+                return OperationResult.partial(
+                    code="reload_reconcile_failed",
+                    message="Config loaded, but runtime reconciliation was incomplete",
+                    persisted=False,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details={**details, "failures": failures},
+                )
             return OperationResult.success(
                 message="Config reloaded",
-                changed=True,
+                changed=changed,
                 persisted=False,
-                applied=True,
+                applied=applied,
                 sequence=self._snapshots.sequence,
+                details=details,
             )
         except Exception as exc:  # noqa: BLE001
+            if config_loaded:
+                return OperationResult.partial(
+                    code="reload_reconcile_failed",
+                    message="Config loaded, but runtime reconciliation failed",
+                    persisted=False,
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                    details={"error": str(exc)},
+                )
             return OperationResult.failed(
                 code="reload_failed",
                 message=str(exc),
@@ -783,15 +896,19 @@ class ApplicationService:
                 f"at or above {MANUAL_EMERGENCY_TEMP_MC // 1000}°C",
             )
         await self._supervisor.stop("manual_fan_ttl")
-        manual_ok = await self._queue.run(
-            "fan_manual", self._hw.set_fan_manual, validated_speed
-        )
-        speed_ok = False
-        if manual_ok:
-            speed_ok = await self._queue.run(
-                "fan_speed", self._hw.set_fan_speed, validated_speed
+        failure = ""
+        try:
+            applied = await self._apply_manual_fan_speed(
+                validated_speed,
+                command_prefix="fan_manual",
             )
-        if manual_ok and speed_ok:
+        except CommandTimeoutError as exc:
+            failure = str(exc)
+            applied = False
+        except Exception as exc:  # noqa: BLE001
+            failure = str(exc)
+            applied = False
+        if applied:
             self._fan_fail_safe_error = ""
             await self._refresh_fan()
             await self._snapshots.update(
@@ -804,7 +921,17 @@ class ApplicationService:
                 ),
             )
             self._manual_ttl_seconds = validated_ttl
-            await self._supervisor.start("manual_fan_ttl")
+            if not await self._supervisor.start("manual_fan_ttl"):
+                restored = await self._restore_fan_auto()
+                return OperationResult.partial(
+                    code="fan_manual_watchdog_failed",
+                    message=(
+                        "Manual fan speed was set but its safety watchdog could not "
+                        f"start; stock auto was {'restored' if restored else 'not restored'}"
+                    ),
+                    applied=False,
+                    sequence=self._snapshots.sequence,
+                )
             return OperationResult.success(
                 message=f"Fan speed set to {validated_speed}% for {validated_ttl}s",
                 changed=True,
@@ -813,27 +940,18 @@ class ApplicationService:
                 sequence=self._snapshots.sequence,
                 details={"ttl_seconds": validated_ttl},
             )
-        # Safety: restore stock auto on failure.
-        try:
-            restored = bool(
-                await self._queue.run("fan_auto_safety", self._hw.set_fan_auto)
-            )
-        except Exception:  # noqa: BLE001
-            restored = False
-        await self._refresh_fan()
-        if not restored:
-            self._fan_fail_safe_error = (
-                "Manual fan apply and stock-auto restoration failed"
-            )
-            await self._snapshots.update(
-                "fan",
-                replace(
-                    self._snapshots.snapshot.fan,
-                    mode=FanMode.FAILED_SAFE,
-                    target_speed=None,
-                    last_error=self._fan_fail_safe_error,
+        if self._fan_restore_pending:
+            return OperationResult.partial(
+                code="fan_manual_restore_pending",
+                message=(
+                    "Manual fan control timed out; stock-auto restoration is queued "
+                    "as the next hardware command"
                 ),
+                applied=False,
+                sequence=self._snapshots.sequence,
+                details={"error": failure},
             )
+        if self._fan_fail_safe_error:
             return OperationResult.partial(
                 code="fan_manual_restore_failed",
                 message=(
@@ -842,12 +960,81 @@ class ApplicationService:
                 ),
                 applied=False,
                 sequence=self._snapshots.sequence,
+                details={"error": failure},
             )
         return OperationResult.failed(
             code="fan_manual_failed",
-            message="Failed to set manual fan speed; stock auto was restored",
+            message=(
+                "Failed to set manual fan speed; stock auto was restored"
+                + (f": {failure}" if failure else "")
+            ),
             sequence=self._snapshots.sequence,
         )
+
+    async def _apply_manual_fan_speed(
+        self,
+        speed: int,
+        *,
+        command_prefix: str,
+    ) -> bool:
+        """Enter EC manual mode and write a speed with exception-safe cleanup."""
+        try:
+            manual_ok = await self._run_fan_command(
+                command_prefix,
+                self._hw.set_fan_manual,
+                speed,
+                recovery_context=f"{command_prefix} mode request",
+            )
+            if not manual_ok:
+                await self._restore_fan_auto()
+                return False
+            speed_ok = await self._run_fan_command(
+                f"{command_prefix}_speed",
+                self._hw.set_fan_speed,
+                speed,
+                recovery_context=f"{command_prefix} speed request",
+            )
+            if not speed_ok:
+                await self._restore_fan_auto()
+                return False
+            return True
+        except CommandTimeoutError:
+            raise
+        except asyncio.CancelledError:
+            if not self._fan_restore_pending:
+                await asyncio.shield(self._restore_fan_auto())
+            raise
+        except Exception:
+            await self._restore_fan_auto()
+            raise
+
+    async def _run_fan_command(
+        self,
+        name: str,
+        func: Callable[..., Any],
+        *args: Any,
+        recovery_context: str,
+    ) -> Any:
+        """Run one fan call with stock-auto reserved after timeout/cancellation."""
+        try:
+            return await self._queue.run(
+                name,
+                func,
+                *args,
+                timeout_recovery=(f"{name}_auto_recovery", self._hw.set_fan_auto, ()),
+            )
+        except CommandTimeoutError as exc:
+            self._track_fan_timeout_recovery(
+                exc.recovery_future,
+                context=f"{recovery_context} timed out",
+            )
+            raise
+        except asyncio.CancelledError:
+            self._track_fan_timeout_recovery(
+                self._queue.pending_timeout_completion,
+                context=f"{recovery_context} was cancelled",
+            )
+            raise
 
     # -- Gestures --
 
@@ -1308,7 +1495,18 @@ class ApplicationService:
 
     # -- Refresh helpers --
 
-    async def _reconcile_power_profile(self) -> None:
+    def _power_reconcile_target(self) -> str:
+        """Return the profile currently selected by manual/automatic policy."""
+        power = self._config.state.power
+        ac_online = self._snapshots.snapshot.power.ac_online
+        if power.auto_switch.enabled and ac_online is not None:
+            return power.auto_switch.on_ac if ac_online else power.auto_switch.on_battery
+        return power.profile
+
+    async def _reconcile_power_profile(
+        self,
+        desired: str | None = None,
+    ) -> OperationResult | None:
         """Re-apply the persisted desired power profile on startup.
 
         Without this, a service restart (update, crash, reboot) leaves the
@@ -1318,29 +1516,34 @@ class ApplicationService:
         a redundant state write.  Failures are logged but never prevent
         service startup.
         """
-        desired = self._config.state.power.profile
+        desired = desired or self._config.state.power.profile
         if not desired:
-            return
+            return None
         cap = self._snapshots.snapshot.capabilities.get("power")
         if cap is None or not cap.writable:
-            return
+            return None
         applied = self._snapshots.snapshot.power.applied_profile
         if applied == desired:
-            return
+            return None
         log.info(
             "reconciling power profile: desired=%s applied=%s",
             desired,
             applied or "(unknown)",
         )
         try:
-            async with self._mutation_lock:
-                result = await self._apply_power_profile(desired, persist_desired=False)
+            result = await self._apply_power_profile(desired, persist_desired=False)
             if result.applied:
                 log.info("power profile reconciled to '%s'", desired)
             else:
                 log.warning("power profile reconciliation failed: %s", result.message)
+            return result
         except Exception as exc:  # noqa: BLE001
             log.warning("power profile reconciliation error: %s", exc)
+            return OperationResult.failed(
+                code="power_reconcile_failed",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+            )
 
     async def _refresh_all(self) -> None:
         """Refresh all domains and publish one snapshot."""
@@ -1681,6 +1884,8 @@ class ApplicationService:
             if key == failed_key and time.monotonic() < retry_at:
                 continue
             async with self._mutation_lock:
+                if self._closing or self._fan_restore_pending:
+                    continue
                 state = self._config.state.power.auto_switch
                 if not state.enabled:
                     last_ac = None
@@ -1816,6 +2021,9 @@ class ApplicationService:
             if self._supervisor.get_health("manual_fan_ttl").running:
                 last_speed = None
                 continue
+            if self._fan_fail_safe_error or self._fan_restore_pending or self._closing:
+                last_speed = None
+                continue
             cap = self._snapshots.snapshot.capabilities.get("fan")
             if cap is None or not cap.writable:
                 last_speed = None
@@ -1833,11 +2041,18 @@ class ApplicationService:
                     if (
                         self._config.state.fan.mode != "curve"
                         or self._supervisor.get_health("manual_fan_ttl").running
+                        or bool(self._fan_fail_safe_error)
+                        or self._fan_restore_pending
+                        or self._closing
                     ):
                         continue
                     from honor_control.core.validation import parse_curve
 
-                    temp = await self._queue.run("fan_temp", self._hw.read_fan_temp)
+                    temp = await self._run_fan_command(
+                        "fan_temp",
+                        self._hw.read_fan_temp,
+                        recovery_context="fan curve temperature read",
+                    )
                     if temp is None or not 1_000 <= temp <= 150_000:
                         raise RuntimeError(
                             f"fan temperature unavailable or implausible: {temp!r}"
@@ -1850,13 +2065,10 @@ class ApplicationService:
                     ):
                         speed = last_speed
                     if speed != last_speed:
-                        manual_ok = await self._queue.run(
-                            "fan_curve_manual", self._hw.set_fan_manual, speed
-                        )
-                        speed_ok = await self._queue.run(
-                            "fan_curve_speed", self._hw.set_fan_speed, speed
-                        )
-                        if not (manual_ok and speed_ok):
+                        if not await self._apply_manual_fan_speed(
+                            speed,
+                            command_prefix="fan_curve",
+                        ):
                             raise RuntimeError("EC rejected fan curve speed")
                         last_speed = speed
                 failures = 0
@@ -1915,75 +2127,182 @@ class ApplicationService:
         )
 
         deadline = asyncio.get_running_loop().time() + self._manual_ttl_seconds
-        while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(2.0, remaining))
-            async with self._mutation_lock:
-                temp = await self._queue.run(
-                    "fan_manual_watchdog_temp", self._hw.read_fan_temp
-                )
-                if temp is None or not 1_000 <= temp <= 150_000:
-                    await self._restore_fan_auto()
-                    return
-                target = self._snapshots.snapshot.fan.target_speed or 0
-                emergency_target = (
-                    100
-                    if temp >= 95_000
-                    else MANUAL_EMERGENCY_MIN_SPEED
-                    if temp >= MANUAL_EMERGENCY_TEMP_MC
-                    else 0
-                )
-                if emergency_target > target:
-                    ok = await self._queue.run(
-                        "fan_manual_watchdog_speed",
-                        self._hw.set_fan_speed,
-                        emergency_target,
-                    )
-                    if not ok:
-                        await self._restore_fan_auto()
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(2.0, remaining))
+                async with self._mutation_lock:
+                    if self._closing:
                         return
-                    await self._snapshots.update(
-                        "fan",
-                        replace(
-                            self._snapshots.snapshot.fan,
-                            temp_mc=temp,
-                            target_speed=emergency_target,
-                            last_error="Manual speed raised by thermal watchdog",
-                        ),
+                    temp = await self._run_fan_command(
+                        "fan_manual_watchdog_temp",
+                        self._hw.read_fan_temp,
+                        recovery_context="manual fan temperature watchdog",
                     )
-        async with self._mutation_lock:
-            await self._restore_fan_auto()
-            await self._snapshots.update(
-                "fan",
-                replace(
-                    self._snapshots.snapshot.fan,
-                    mode=FanMode.STOCK,
-                    target_speed=None,
-                    manual_expires_at=None,
+                    if temp is None or not 1_000 <= temp <= 150_000:
+                        if await self._restore_fan_auto():
+                            await self._publish_fan_stock_auto()
+                        return
+                    target = self._snapshots.snapshot.fan.target_speed or 0
+                    emergency_target = (
+                        100
+                        if temp >= 95_000
+                        else MANUAL_EMERGENCY_MIN_SPEED
+                        if temp >= MANUAL_EMERGENCY_TEMP_MC
+                        else 0
+                    )
+                    if emergency_target > target:
+                        ok = await self._run_fan_command(
+                            "fan_manual_watchdog_speed",
+                            self._hw.set_fan_speed,
+                            emergency_target,
+                            recovery_context="manual fan thermal watchdog",
+                        )
+                        if not ok:
+                            if await self._restore_fan_auto():
+                                await self._publish_fan_stock_auto()
+                            return
+                        await self._snapshots.update(
+                            "fan",
+                            replace(
+                                self._snapshots.snapshot.fan,
+                                temp_mc=temp,
+                                target_speed=emergency_target,
+                                last_error="Manual speed raised by thermal watchdog",
+                            ),
+                        )
+            async with self._mutation_lock:
+                if await self._restore_fan_auto():
+                    await self._publish_fan_stock_auto()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("manual fan watchdog failed; restoring stock auto")
+            async with self._mutation_lock:
+                if await self._restore_fan_auto():
+                    await self._publish_fan_stock_auto()
+            raise
+
+    def _track_fan_timeout_recovery(
+        self,
+        future: asyncio.Future[Any] | None,
+        *,
+        context: str,
+    ) -> None:
+        """Track the stock-auto command reserved behind a timed-out call."""
+        if future is None:
+            return
+        current = self._fan_restore_task
+        if current is not None and not current.done():
+            return
+        self._fan_restore_pending = True
+        self._fan_fail_safe_error = f"{context}; stock-auto restoration pending"
+        self._fan_restore_task = asyncio.create_task(
+            self._complete_fan_timeout_recovery(future),
+            name="fan-timeout-recovery",
+        )
+
+    async def _complete_fan_timeout_recovery(
+        self,
+        future: asyncio.Future[Any],
+    ) -> bool:
+        """Publish and observe a stock-auto recovery reserved by the queue."""
+        try:
+            await self._publish_fan_failed_safe(self._fan_fail_safe_error)
+            restored = bool(await asyncio.shield(future))
+            if not restored:
+                raise RuntimeError("EC did not confirm queued stock-auto recovery")
+            self._fan_fail_safe_error = ""
+            if not self._closing:
+                await self._refresh_fan()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("queued stock-auto recovery failed")
+            await self._publish_fan_failed_safe(
+                f"Queued stock-auto restoration failed: {exc}"
+            )
+            return False
+        finally:
+            self._fan_restore_pending = False
+
+    async def _publish_fan_failed_safe(self, message: str) -> None:
+        """Publish one explicit failed-safe fan state."""
+        self._fan_fail_safe_error = message
+        await self._snapshots.update(
+            "fan",
+            replace(
+                self._snapshots.snapshot.fan,
+                mode=FanMode.FAILED_SAFE,
+                target_speed=None,
+                manual_expires_at=None,
+                last_error=message,
+            ),
+        )
+
+    async def _publish_fan_stock_auto(self) -> None:
+        """Publish a verified transition back to firmware-owned fan control."""
+        await self._snapshots.update(
+            "fan",
+            replace(
+                self._snapshots.snapshot.fan,
+                mode=FanMode.STOCK,
+                target_speed=None,
+                manual_expires_at=None,
+            ),
+        )
+
+    async def _restore_fan_auto(self) -> bool:
+        pending = self._fan_restore_task
+        if (
+            pending is not None
+            and not pending.done()
+            and pending is not asyncio.current_task()
+        ):
+            try:
+                return bool(
+                    await asyncio.wait_for(
+                        asyncio.shield(pending),
+                        timeout=FAN_RECOVERY_WAIT_SECONDS,
+                    )
+                )
+            except TimeoutError:
+                await self._publish_fan_failed_safe(
+                    "Stock-auto restoration is still pending behind a timed-out "
+                    "hardware command"
+                )
+                return False
+        try:
+            restored = await self._queue.run(
+                "fan_auto_cleanup",
+                self._hw.set_fan_auto,
+                timeout_recovery=(
+                    "fan_auto_cleanup_retry",
+                    self._hw.set_fan_auto,
+                    (),
                 ),
             )
-
-    async def _restore_fan_auto(self) -> None:
-        try:
-            restored = await self._queue.run("fan_auto_cleanup", self._hw.set_fan_auto)
             if not restored:
                 raise RuntimeError("EC did not confirm stock-auto request")
+            self._fan_fail_safe_error = ""
             await self._refresh_fan()
+            return True
+        except CommandTimeoutError as exc:
+            self._track_fan_timeout_recovery(
+                exc.recovery_future,
+                context="stock-auto restoration timed out",
+            )
+            await self._publish_fan_failed_safe(self._fan_fail_safe_error)
+            return False
         except Exception as exc:  # noqa: BLE001
             log.exception("failed to restore stock fan mode")
-            self._fan_fail_safe_error = f"Stock-auto restoration failed: {exc}"
-            await self._snapshots.update(
-                "fan",
-                replace(
-                    self._snapshots.snapshot.fan,
-                    mode=FanMode.FAILED_SAFE,
-                    target_speed=None,
-                    manual_expires_at=None,
-                    last_error=self._fan_fail_safe_error,
-                ),
+            await self._publish_fan_failed_safe(
+                f"Stock-auto restoration failed: {exc}"
             )
+            return False
 
     async def _initialize_fan_safety(self) -> None:
         """Request firmware-owned fan control on startup when writes are verified."""
