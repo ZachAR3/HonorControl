@@ -33,7 +33,7 @@ def classify_dbus_error(error_name: str, message: str = "") -> ClientError:
     if "Unavailable" in error_name:
         return ClientError(TransportError.FEATURE_UNAVAILABLE, message)
     if "Busy" in error_name:
-        return ClientError(TransportError.INTERNAL, message)
+        return ClientError(TransportError.BUSY, message)
     if "Timeout" in error_name:
         return ClientError(TransportError.TIMEOUT, message)
     if "Dependency" in error_name:
@@ -42,6 +42,6 @@ def classify_dbus_error(error_name: str, message: str = "") -> ClientError:
         return ClientError(TransportError.INTERNAL, message)
     if "ServiceUnknown" in error_name or "NameHasNoOwner" in error_name:
         return ClientError(TransportError.SERVICE_UNAVAILABLE, message)
-    if "Timeout" in error_name or "NoReply" in error_name:
+    if "NoReply" in error_name:
         return ClientError(TransportError.TIMEOUT, message)
     return ClientError(TransportError.INTERNAL, message)

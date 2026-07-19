@@ -8,10 +8,13 @@ while offline or pending.  Gesture master toggle calls one atomic
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
+import threading
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -37,8 +40,11 @@ def _load_icon() -> QIcon:
     return QIcon()
 
 
-class HonorTray:
+class HonorTray(QObject):
     """Tray icon + context-menu controller."""
+
+    _gui_launch_succeeded = Signal()
+    _gui_launch_failed = Signal(str)
 
     def __init__(
         self,
@@ -48,11 +54,15 @@ class HonorTray:
         open_window: Callable[[], None] | None = None,
         quit_application: Callable[[], None] | None = None,
     ) -> None:
+        super().__init__()
         self._owns_controller = controller is None
         self.controller = controller or GuiController(bus_kind=bus_kind)
         self._open_window = open_window
         self._quit_application = quit_application
         self._profiles: list[tuple[str, str]] = []
+        self._gui_launch_in_progress = False
+        self._gui_launch_succeeded.connect(self._on_gui_launch_succeeded)
+        self._gui_launch_failed.connect(self._on_gui_launch_failed)
 
         self.tray = QSystemTrayIcon(_load_icon())
         self.tray.setToolTip("Honor Control")
@@ -183,22 +193,44 @@ class HonorTray:
         if self._open_window is not None:
             self._open_window()
             return
-        import os
-        import subprocess
+        if self._gui_launch_in_progress:
+            return
+        self._gui_launch_in_progress = True
+        threading.Thread(
+            target=self._launch_gui_worker,
+            name="honor-control-gui-launcher",
+            daemon=True,
+        ).start()
 
-        cmd = ["honor-control-gui"]
+    def _launch_gui_worker(self) -> None:
+        """Spawn the standalone GUI without blocking the Qt event loop."""
         try:
-            subprocess.Popen(cmd, env=dict(os.environ), start_new_session=True)
-            # The GUI owns an integrated tray. Hand off instead of leaving two
-            # tray icons and two independent D-Bus clients running.
-            self._quit()
-        except Exception as exc:  # noqa: BLE001
-            self.tray.showMessage(
-                "Honor Control",
-                f"Could not launch the GUI: {exc}",
-                QSystemTrayIcon.MessageIcon.Warning,
-                3000,
+            subprocess.Popen(
+                ["honor-control-gui"],
+                env=dict(os.environ),
+                start_new_session=True,
             )
+        except Exception as exc:  # noqa: BLE001
+            self._gui_launch_failed.emit(str(exc))
+        else:
+            self._gui_launch_succeeded.emit()
+
+    @Slot()
+    def _on_gui_launch_succeeded(self) -> None:
+        self._gui_launch_in_progress = False
+        # The GUI owns an integrated tray. Hand off instead of leaving two
+        # tray icons and two independent D-Bus clients running.
+        self._quit()
+
+    @Slot(str)
+    def _on_gui_launch_failed(self, message: str) -> None:
+        self._gui_launch_in_progress = False
+        self.tray.showMessage(
+            "Honor Control",
+            f"Could not launch the GUI: {message}",
+            QSystemTrayIcon.MessageIcon.Warning,
+            3000,
+        )
 
     def _set_charge_mode(self, mode: str) -> None:
         self.controller.call(f"charge:{mode}", "set_mode", mode)

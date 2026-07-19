@@ -30,6 +30,7 @@ from honor_control.backend.dbus.authorizer import (
     Authorizer,
     CallerSubject,
     PolkitAuthorizer,
+    _parse_start_time,
 )
 from honor_control.backend.dbus.codec import (
     operation_result_to_vardict,
@@ -135,7 +136,7 @@ async def _capture_caller() -> CallerSubject | None:
             ),
             timeout=2.0,
         )
-        start_time = int(stat.rsplit(")", 1)[1].split()[19])
+        start_time = _parse_start_time(stat)
         if pid <= 0 or uid < 0 or start_time <= 0:
             return None
         return CallerSubject(sender=sender, pid=pid, uid=uid, start_time=start_time)

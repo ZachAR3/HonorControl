@@ -72,6 +72,16 @@ def _make_power_adapter(tmp_path, monkeypatch):
     return adapter, ppd
 
 
+def _install_fake_gpu_probe(monkeypatch, find_gpu_irqs) -> None:
+    """Install the honor.gpu surface without requiring unpublished test deps."""
+    honor_module = types.ModuleType("honor")
+    honor_module.__path__ = []  # type: ignore[attr-defined]
+    gpu_module = types.ModuleType("honor.gpu")
+    gpu_module.find_gpu_irqs = find_gpu_irqs  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "honor", honor_module)
+    monkeypatch.setitem(sys.modules, "honor.gpu", gpu_module)
+
+
 class TestFakeHardwarePlatform:
     """Verify platform detection and capability probes."""
 
@@ -173,20 +183,6 @@ class TestFakeHardwareGestures:
         assert ges.available is True
         assert len(ges.mappings) == 3
 
-    def test_set_gesture_mapping_preserves_enabled(self) -> None:
-        hw = FakeHardware()
-        # Disable gesture 3:1, then change its mapping.
-        assert hw.set_gesture_enabled("3:1", False) is True
-        assert hw.set_gesture_mapping("3:1", "leftmeta,x") is True
-        entries = hw.list_gesture_mappings()
-        entry = next(e for e in entries if e.id == "3:1")
-        assert entry.enabled is False  # mapping changed but enabled preserved
-        assert entry.mapping == "leftmeta,x"
-
-    def test_set_gesture_enabled_unknown_id_returns_false(self) -> None:
-        hw = FakeHardware()
-        assert hw.set_gesture_enabled("bogus", True) is False
-
 
 class TestFakeHardwareGpu:
     """Verify GPU mitigation read/write."""
@@ -206,6 +202,44 @@ class TestFakeHardwareGpu:
         result = hw.restore_gpu_mitigation()
         assert result["restored"] is True
         assert hw.read_gpu().mitigation_enabled is False
+
+
+class TestHonorToolsAdapterGpuGate:
+    """M-4: the real adapter must never report GPU mitigation as writable.
+
+    ``FakeHardware`` reports GPU as ``SUPPORTED``, so the production gate is
+    only meaningfully exercised against the real adapter. The irreversible,
+    non-restorable mitigation must stay non-writable regardless of what
+    ``honor-tools`` finds.
+    """
+
+    def test_experimental_not_writable_when_irqs_found(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _install_fake_gpu_probe(monkeypatch, lambda: ["123: i915"])
+        cap = HonorToolsAdapter(root_path=tmp_path).get_gpu_capability()
+        assert cap.status == CapabilityStatus.EXPERIMENTAL
+        assert cap.writable is False
+
+    def test_unavailable_when_no_irqs(self, tmp_path, monkeypatch) -> None:
+        _install_fake_gpu_probe(monkeypatch, lambda: [])
+        cap = HonorToolsAdapter(root_path=tmp_path).get_gpu_capability()
+        assert cap.status == CapabilityStatus.UNAVAILABLE
+        assert cap.writable is False
+
+    def test_unavailable_when_probe_raises(self, tmp_path, monkeypatch) -> None:
+        def boom() -> list[str]:
+            raise RuntimeError("no gpu")
+
+        _install_fake_gpu_probe(monkeypatch, boom)
+        cap = HonorToolsAdapter(root_path=tmp_path).get_gpu_capability()
+        assert cap.status == CapabilityStatus.UNAVAILABLE
+        assert cap.writable is False
+
+    def test_restore_is_not_implemented(self, tmp_path) -> None:
+        result = HonorToolsAdapter(root_path=tmp_path).restore_gpu_mitigation()
+        assert result["restored"] is False
+        assert "not implemented" in result["error"]
 
 
 class TestHonorToolsAdapterFilesystem:
@@ -259,6 +293,30 @@ class TestHonorToolsAdapterFilesystem:
         adapter = HonorToolsAdapter(root_path=tmp_path)
         adapter._honor_ok = True  # noqa: SLF001
         assert adapter.detect_platform().matched is True
+
+    def test_unverified_fan_cpu_retains_platform_but_rejects_fan(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        dmi = tmp_path / "sys/class/dmi/id"
+        cpu = tmp_path / "sys/devices/system/cpu/cpu0"
+        dmi.mkdir(parents=True)
+        cpu.mkdir(parents=True)
+        (dmi / "sys_vendor").write_text("HONOR", encoding="utf-8")
+        (dmi / "product_name").write_text("MRA-XXX", encoding="utf-8")
+        (cpu / "model_name").write_text(
+            "Intel(R) Core(TM) Ultra 7 155H", encoding="utf-8"
+        )
+        honor_module = types.ModuleType("honor")
+        honor_module.__path__ = []  # type: ignore[attr-defined]
+        platform_module = types.ModuleType("honor.platform")
+        platform_module.detect = lambda: SimpleNamespace(name="MRA-XXX")  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "honor", honor_module)
+        monkeypatch.setitem(sys.modules, "honor.platform", platform_module)
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+        adapter._honor_ok = True  # noqa: SLF001
+
+        assert adapter.detect_platform().matched is True
+        assert adapter.get_fan_capability().status == CapabilityStatus.UNSUPPORTED
 
     def test_discovers_and_reads_non_bat0(self, tmp_path) -> None:
         supplies = tmp_path / "sys/class/power_supply"

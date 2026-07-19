@@ -292,7 +292,9 @@ class ApplicationService:
                 elif current.fan.mode == "curve":
                     started = await self._supervisor.start("fan_curve")
                     details["fan"] = (
-                        "curve_controller_started" if started else "controller_start_failed"
+                        "curve_controller_started"
+                        if started
+                        else "controller_start_failed"
                     )
                     if not started:
                         failures.append("fan curve controller did not start")
@@ -1500,7 +1502,9 @@ class ApplicationService:
         power = self._config.state.power
         ac_online = self._snapshots.snapshot.power.ac_online
         if power.auto_switch.enabled and ac_online is not None:
-            return power.auto_switch.on_ac if ac_online else power.auto_switch.on_battery
+            return (
+                power.auto_switch.on_ac if ac_online else power.auto_switch.on_battery
+            )
         return power.profile
 
     async def _reconcile_power_profile(
@@ -1883,6 +1887,9 @@ class ApplicationService:
             key = (ac, *policy)
             if key == failed_key and time.monotonic() < retry_at:
                 continue
+            hook_command = ""
+            hook_transition = ""
+            hook_profile = ""
             async with self._mutation_lock:
                 if self._closing or self._fan_restore_pending:
                     continue
@@ -1909,13 +1916,19 @@ class ApplicationService:
                     last_policy = policy
                     failed_key = None
                     failure_count = 0
-                    command = state.on_ac_script if ac else state.on_battery_script
-                    self._last_auto_script_status = await self._run_transition_script(
-                        command,
-                        transition="ac" if ac else "battery",
-                        profile=profile,
-                    )
-                    await self._refresh_power()
+                    # Capture the hook details; the hook runs after the lock is
+                    # released so a slow hook never blocks other mutations or the
+                    # fan thermal watchdog (it performs no hardware I/O).
+                    hook_command = state.on_ac_script if ac else state.on_battery_script
+                    hook_transition = "ac" if ac else "battery"
+                    hook_profile = profile
+            if result.applied:
+                self._last_auto_script_status = await self._run_transition_script(
+                    hook_command,
+                    transition=hook_transition,
+                    profile=hook_profile,
+                )
+                await self._refresh_power()
             if not result.applied:
                 failure_count = failure_count + 1 if failed_key == key else 1
                 failed_key = key
@@ -1995,6 +2008,17 @@ class ApplicationService:
             )
             try:
                 await asyncio.wait_for(process.wait(), timeout=15)
+            except asyncio.CancelledError:
+                # The auto-switch controller is cancelled during service
+                # shutdown.  Do not leave its root-owned hook running after
+                # the service has exited.
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await asyncio.shield(process.wait())
+                raise
             except TimeoutError:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -2299,9 +2323,7 @@ class ApplicationService:
             return False
         except Exception as exc:  # noqa: BLE001
             log.exception("failed to restore stock fan mode")
-            await self._publish_fan_failed_safe(
-                f"Stock-auto restoration failed: {exc}"
-            )
+            await self._publish_fan_failed_safe(f"Stock-auto restoration failed: {exc}")
             return False
 
     async def _initialize_fan_safety(self) -> None:

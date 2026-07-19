@@ -63,6 +63,7 @@ class TransportError(StrEnum):
 
     SERVICE_UNAVAILABLE = "service_unavailable"
     TIMEOUT = "timeout"
+    BUSY = "busy"
     NOT_AUTHORIZED = "not_authorized"
     INVALID_REQUEST = "invalid_request"
     FEATURE_UNAVAILABLE = "feature_unavailable"

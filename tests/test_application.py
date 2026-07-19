@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
+import sys
+import types
 from dataclasses import replace
 
 import pytest
@@ -12,7 +14,7 @@ from honor_control.backend.application import ApplicationService
 from honor_control.backend.command_queue import HardwareCommandQueue
 from honor_control.backend.config_store import ConfigStore, FanState, PowerState
 from honor_control.backend.gesture_runtime import GestureProbe, GestureRuntimeStatus
-from honor_control.backend.hardware import FakeHardware
+from honor_control.backend.hardware import FakeHardware, HonorToolsAdapter
 from honor_control.backend.snapshot_store import SnapshotStore
 from honor_control.backend.supervisor import RuntimeSupervisor
 from honor_control.backend.touchpad_firmware import (
@@ -58,6 +60,16 @@ def _allow_test_hook(monkeypatch) -> None:
         "_validate_script_command",
         staticmethod(validate),
     )
+
+
+def _install_fake_gpu_probe(monkeypatch, find_gpu_irqs) -> None:
+    """Install the honor.gpu surface without requiring unpublished test deps."""
+    honor_module = types.ModuleType("honor")
+    honor_module.__path__ = []  # type: ignore[attr-defined]
+    gpu_module = types.ModuleType("honor.gpu")
+    gpu_module.find_gpu_irqs = find_gpu_irqs  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "honor", honor_module)
+    monkeypatch.setitem(sys.modules, "honor.gpu", gpu_module)
 
 
 class _StubGestureRuntime:
@@ -419,6 +431,116 @@ class TestPowerMutation:
 
         asyncio.run(scenario())
 
+    def test_transition_hook_does_not_hold_mutation_lock(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """M-1: a slow transition hook must not block other mutations.
+
+        The hook performs no hardware I/O, so it runs after the mutation
+        lock is released. We assert the lock is not held while the hook
+        runs, and that a concurrent serialized mutation completes while a
+        slow hook is still pending.
+        """
+        _allow_test_hook(monkeypatch)
+        svc = _make_service(tmp_path)
+
+        lock_held_during_hook: list[bool] = []
+        hook_started = asyncio.Event()
+        release_hook = asyncio.Event()
+
+        async def slow_hook(command: str, *, transition: str, profile: str) -> str:
+            lock_held_during_hook.append(svc._mutation_lock.locked())  # noqa: SLF001
+            hook_started.set()
+            await release_hook.wait()  # stay "running" until the test releases us
+            return f"{transition} script completed"
+
+        monkeypatch.setattr(svc, "_run_transition_script", slow_hook)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.start_background()
+            await svc.configure_auto_switch(
+                True, "performance", "silent", "/usr/bin/true", ""
+            )
+            # Wait for the auto-switch loop to apply the profile and reach the
+            # hook (poll interval is ~2s).
+            await asyncio.wait_for(hook_started.wait(), timeout=5)
+
+            # While the hook is still pending, a concurrent serialized mutation
+            # must not be blocked by it. Before the fix the hook ran inside the
+            # mutation lock, so this would time out.
+            mutation_done = asyncio.Event()
+
+            async def concurrent_mutation() -> None:
+                await svc.set_fan_manual(50, 30)
+                mutation_done.set()
+
+            task = asyncio.create_task(concurrent_mutation())
+            await asyncio.wait_for(mutation_done.wait(), timeout=5)
+            assert lock_held_during_hook == [False]
+
+            release_hook.set()
+            await task
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_cancelled_transition_hook_kills_process_group(self, monkeypatch) -> None:
+        """Controller cancellation must not orphan the root-owned hook."""
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+        killed: list[tuple[int, int]] = []
+
+        class PendingProcess:
+            pid = 4242
+            returncode: int | None = None
+
+            async def wait(self) -> int:
+                started.set()
+                await stopped.wait()
+                assert self.returncode is not None
+                return self.returncode
+
+        process = PendingProcess()
+
+        async def create_process(*_args, **_kwargs):
+            return process
+
+        def kill_process_group(pid: int, sig: int) -> None:
+            killed.append((pid, sig))
+            process.returncode = -sig
+            stopped.set()
+
+        monkeypatch.setattr(
+            ApplicationService,
+            "_validate_script_command",
+            staticmethod(lambda _command: ["/test/hook"]),
+        )
+        monkeypatch.setattr(
+            "honor_control.backend.application.asyncio.create_subprocess_exec",
+            create_process,
+        )
+        monkeypatch.setattr(
+            "honor_control.backend.application.os.killpg", kill_process_group
+        )
+
+        async def scenario() -> None:
+            svc = _make_service()
+            task = asyncio.create_task(
+                svc._run_transition_script(  # noqa: SLF001
+                    "/test/hook", transition="ac", profile="performance"
+                )
+            )
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert killed == [(process.pid, 9)]
+            assert process.returncode == -9
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
     def test_missing_hardware_results_cannot_report_success(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -675,9 +797,7 @@ class TestFanMutation:
         assert "set_fan_speed" not in names
         assert "set_fan_auto" in names
 
-    def test_manual_speed_exception_restores_stock_auto(
-        self, tmp_path
-    ) -> None:
+    def test_manual_speed_exception_restores_stock_auto(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -690,16 +810,15 @@ class TestFanMutation:
             assert result.status == OperationStatus.FAILED
             assert svc._hw._fan_mode == FanMode.STOCK  # noqa: SLF001
             names = [
-                name for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+                name
+                for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
             ]
             assert names.index("set_fan_speed") < names.index("set_fan_auto")
             await svc.shutdown()
 
         asyncio.run(scenario())
 
-    def test_manual_watchdog_exception_restores_stock_auto(
-        self, tmp_path
-    ) -> None:
+    def test_manual_watchdog_exception_restores_stock_auto(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -893,6 +1012,28 @@ class TestGpuMutation:
         asyncio.run(svc.initialize())
         result = asyncio.run(svc.set_gpu_mitigation_enabled(False))
         assert result.status == OperationStatus.SUCCESS
+
+    def test_real_adapter_gate_rejects_mitigation(self, tmp_path, monkeypatch) -> None:
+        """M-4: against the real adapter the irreversible mitigation must be
+        unreachable, even when honor-tools reports GPU IRQs (EXPERIMENTAL)."""
+        _install_fake_gpu_probe(monkeypatch, lambda: ["123: i915"])
+        svc = ApplicationService(
+            hardware=HonorToolsAdapter(root_path=tmp_path),
+            config_store=ConfigStore(state_path=str(tmp_path / "state.toml")),
+            snapshot_store=SnapshotStore(),
+            command_queue=HardwareCommandQueue(),
+            supervisor=RuntimeSupervisor(),
+        )
+
+        async def scenario() -> None:
+            await svc.initialize()
+            result = await svc.set_gpu_mitigation_enabled(True)
+            assert result.status == OperationStatus.UNAVAILABLE
+            assert result.code == "gpu_unavailable"
+            assert result.applied is False
+            await svc.shutdown()
+
+        asyncio.run(scenario())
 
 
 class TestDiagnostics:

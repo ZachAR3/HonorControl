@@ -49,6 +49,7 @@ def _exit_for_client_error(exc: ClientError) -> int:
     return {
         TransportError.SERVICE_UNAVAILABLE: EXIT_SERVICE_UNAVAILABLE,
         TransportError.TIMEOUT: EXIT_SERVICE_UNAVAILABLE,
+        TransportError.BUSY: EXIT_SERVICE_UNAVAILABLE,
         TransportError.NOT_AUTHORIZED: EXIT_NOT_AUTHORIZED,
         TransportError.INVALID_REQUEST: EXIT_USAGE,
         TransportError.FEATURE_UNAVAILABLE: EXIT_UNAVAILABLE,
@@ -427,9 +428,7 @@ async def cmd_reload(args: argparse.Namespace, client) -> int:
     result = await client.reload()
     _emit(args, result.to_dict(), f"Reload: {result.message}")
     return (
-        EXIT_OK
-        if result.status == OperationStatus.SUCCESS
-        else EXIT_OPERATION_FAILED
+        EXIT_OK if result.status == OperationStatus.SUCCESS else EXIT_OPERATION_FAILED
     )
 
 
@@ -570,9 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.set_defaults(func=cmd_gesture_daemon)
 
     touchpad = sub.add_parser("touchpad", help="touchpad firmware controls")
-    tp_sub = touchpad.add_subparsers(
-        dest="subcommand", required=True, metavar="ACTION"
-    )
+    tp_sub = touchpad.add_subparsers(dest="subcommand", required=True, metavar="ACTION")
     tp_sub.add_parser("probe", help="check DMI, descriptor, and access").set_defaults(
         func=cmd_touchpad_probe
     )

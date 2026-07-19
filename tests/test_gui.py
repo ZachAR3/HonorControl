@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -115,9 +117,7 @@ class TestGuiController:
         assert worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
         assert controller._worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
 
-    def test_poll_timeout_preserves_online_state_and_later_snapshot(
-        self, qapp
-    ) -> None:
+    def test_poll_timeout_preserves_online_state_and_later_snapshot(self, qapp) -> None:
         from honor_control.client.errors import ClientError
         from honor_control.core.errors import TransportError
         from honor_control.frontend.gui.controller import GuiWorker
@@ -376,6 +376,47 @@ class TestIntegratedTray:
         tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)  # noqa: SLF001
         tray.shutdown()
         assert opened == [True]
+
+    def test_standalone_gui_launch_runs_off_main_thread(
+        self, qapp, monkeypatch
+    ) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.tray.tray import HonorTray
+
+        main_thread = threading.get_ident()
+        spawned_from: list[int] = []
+        spawned = threading.Event()
+        quit_requested = threading.Event()
+        quit_requested_from: list[int] = []
+
+        def request_quit() -> None:
+            quit_requested_from.append(threading.get_ident())
+            quit_requested.set()
+
+        def fake_popen(*_args, **_kwargs):
+            spawned_from.append(threading.get_ident())
+            spawned.set()
+            return object()
+
+        monkeypatch.setattr(
+            "honor_control.frontend.tray.tray.subprocess.Popen", fake_popen
+        )
+        tray = HonorTray(
+            controller=GuiController(),
+            quit_application=request_quit,
+        )
+        tray._open_gui()  # noqa: SLF001
+
+        assert spawned.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while not quit_requested.is_set() and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        assert spawned_from and spawned_from[0] != main_thread
+        assert quit_requested.is_set()
+        assert quit_requested_from == [main_thread]
+        tray.shutdown()
 
     def test_touchpad_shortcuts_follow_snapshot(self, qapp) -> None:
         from honor_control.frontend.gui.controller import GuiController

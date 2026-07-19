@@ -90,6 +90,21 @@ class CallerSubject:
     start_time: int = 0
 
 
+def _parse_start_time(stat_line: str) -> int:
+    """Extract starttime (field 22) from a ``/proc/<pid>/stat`` line.
+
+    The comm field (field 2) is parenthesized and may itself contain spaces
+    and ``)`` characters, so we split from the right on the final ``)``.  The
+    remainder is space-separated starting at field 3 (state); starttime is
+    field 22, i.e. index 19 of that remainder.  Returns ``0`` on malformed
+    input; callers treat a non-positive starttime as fail-closed.
+    """
+    try:
+        return int(stat_line.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return 0
+
+
 class Authorizer(Protocol):
     """Authorization interface: check if a caller may perform an action."""
 
@@ -165,19 +180,6 @@ class PolkitAuthorizer:
                 DomainError.NOT_AUTHORIZED,
                 "Authorization service is unavailable",
             ) from exc
-
-
-class InternalAuthorizer:
-    """Authorizer for internal controller calls (no D-Bus sender).
-
-    Internal calls bypass D-Bus authorization through this explicit
-    internal authorizer.  It never forges or omits a sender — it is a
-    distinct, auditable path.
-    """
-
-    async def check(self, method: str, caller: CallerSubject | None) -> None:
-        """Always allow internal calls (they are not D-Bus-originated)."""
-        return
 
 
 class FakeAuthorizer:

@@ -19,24 +19,11 @@ API_VERSION = 1
 #: Snapshot schema version. Increment when snapshot field semantics change.
 SCHEMA_VERSION = 4
 
-# -- Object paths for feature interfaces --------------------------------------
-
-PATH_BATTERY = f"{OBJECT_PATH}/Battery"
-PATH_POWER = f"{OBJECT_PATH}/Power"
-PATH_FAN = f"{OBJECT_PATH}/Fan"
-PATH_GESTURES = f"{OBJECT_PATH}/Gestures"
-PATH_GPU = f"{OBJECT_PATH}/Gpu"
-PATH_DIAGNOSTICS = f"{OBJECT_PATH}/Diagnostics"
-
 # -- Interface names ----------------------------------------------------------
 
+#: The service exports a single flat root interface; there are no per-feature
+#: object paths or sub-interfaces.
 IFACE_ROOT = BUS_NAME
-IFACE_BATTERY = f"{BUS_NAME}.Battery"
-IFACE_POWER = f"{BUS_NAME}.Power"
-IFACE_FAN = f"{BUS_NAME}.Fan"
-IFACE_GESTURES = f"{BUS_NAME}.Gestures"
-IFACE_GPU = f"{BUS_NAME}.Gpu"
-IFACE_DIAGNOSTICS = f"{BUS_NAME}.Diagnostics"
 
 # -- D-Bus error names --------------------------------------------------------
 

@@ -2,12 +2,13 @@
 
 ## Supported platforms
 
-Honor Control requires a **positive platform match** before any
-EC/fan/GPU write. A fallback `Platform` object is insufficient.
+Honor Control requires a **positive platform match** before model-specific
+power or EC/fan access. A fallback `Platform` object is insufficient, and fan
+control adds a narrower capture-backed CPU identity check.
 
 Detection checks:
 1. Exact verified DMI identity (`HONOR`, product `MRA-XXX`).
-2. Verified 2024 Intel Core Ultra/Meteor Lake CPU identity.
+2. Supported 2024 Intel Core Ultra/Meteor Lake CPU identity.
 3. Required resource discovery (sysfs paths, `acpi_call`, hwmon).
 4. Access mode (read/write permissions).
 5. Non-mutating read probe.
@@ -43,7 +44,7 @@ Detection checks:
 
 ### Fan control
 
-- Verified MRA-XXX platform.
+- Verified MRA-XXX platform with the capture-backed Core Ultra 5 125H CPU.
 - `/proc/acpi/call` (acpi_call kernel module).
 - Readable, positive `coretemp` or `k10temp` hwmon value.
 - RPM is displayed when any hwmon device exposes `fan*_input`. The current
@@ -62,10 +63,10 @@ Detection checks:
 
 ### GPU mitigation
 
-- i915 or xe GPU IRQs present in `/proc/interrupts`.
-- Online valid target CPU.
-- Writable IRQ affinity files.
-- Writable C-state control files.
+- Detection only: the capability probe looks for i915 or xe GPU IRQs in
+  `/proc/interrupts`. The mitigation is reported as experimental/unavailable
+  and is **not writable** until a reversible restore of the exact pre-change
+  IRQ affinity and C-state values exists (see Known limitations below).
 
 ## Known limitations
 

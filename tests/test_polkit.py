@@ -27,6 +27,7 @@ from honor_control.backend.dbus.authorizer import (
     CallerSubject,
     PolkitAuthorityInterface,
     PolkitAuthorizer,
+    _parse_start_time,
 )
 from honor_control.core.errors import DomainError, DomainException
 
@@ -268,3 +269,64 @@ class TestPolkitPolicyLevels:
                 allow_active = defaults.find("allow_active")
                 assert allow_active is not None
                 assert allow_active.text == "auth_admin"
+
+
+def _stat_line(pid: int, comm: str, starttime: int) -> str:
+    """Build a realistic ``/proc/<pid>/stat`` line.
+
+    Fields 3-21 are placeholders; ``starttime`` is field 22 (the value
+    ``_parse_start_time`` must extract). A couple of trailing fields are
+    appended for realism.
+    """
+    middle = " ".join(
+        [
+            "S",
+            "1",
+            str(pid),
+            str(pid),
+            "0",
+            "-1",
+            "4194304",
+            "100",
+            "0",
+            "0",
+            "0",
+            "10",
+            "5",
+            "0",
+            "0",
+            "20",
+            "0",
+            "1",
+            "0",
+        ]
+    )
+    return f"{pid} ({comm}) {middle} {starttime} 1234567 200 18446744073709551615"
+
+
+class TestParseStartTime:
+    """M-2: the security-critical caller starttime parse must be robust."""
+
+    def test_parses_normal_comm(self) -> None:
+        assert _parse_start_time(_stat_line(1234, "bash", 98765)) == 98765
+
+    def test_parses_comm_with_spaces(self) -> None:
+        assert _parse_start_time(_stat_line(200, "Web Content", 4242)) == 4242
+
+    def test_parses_comm_containing_close_paren(self) -> None:
+        # A process name containing ')' must not shift the field index: the
+        # parser splits from the right on the final ')'.
+        assert _parse_start_time(_stat_line(5678, "x)y", 55500)) == 55500
+
+    def test_empty_line_is_fail_closed(self) -> None:
+        assert _parse_start_time("") == 0
+
+    def test_truncated_line_is_fail_closed(self) -> None:
+        assert _parse_start_time("1234 (bash) S 1 2") == 0
+
+    def test_missing_comm_paren_is_fail_closed(self) -> None:
+        assert _parse_start_time("1234 bash S 1 2 3 4 5") == 0
+
+    def test_non_integer_starttime_is_fail_closed(self) -> None:
+        line = "1 (x) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 notanum 0 0"
+        assert _parse_start_time(line) == 0

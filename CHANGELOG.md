@@ -12,6 +12,21 @@
 - The hardware queue remains responsive on runtimes where cross-thread event
   loop wakeups are delayed, and automatic profile retries use bounded backoff.
 - `honor-tools` is pinned and preflighted against the supported 0.1.0 API.
+- ACPI fan responses are parsed as an integer result with NUL padding stripped
+  (e.g. `0x0\x00`), so EC fan commands no longer misreport failure.
+- Safety-review findings hardened across the serialized command queue
+  (timeout poison/recovery ordering), fan fail-safe stock-auto restoration,
+  config-store atomicity, and fail-closed polkit caller capture, with expanded
+  regression coverage.
+- AC/battery transition hooks now run after the mutation lock is released, so a
+  slow hook no longer blocks other mutations or the fan thermal watchdog.
+- The client and CLI now distinguish a busy hardware queue (transient,
+  retryable) from an internal fault instead of reporting both as internal.
+- The GUI debug-bundle save reports a failed write instead of raising an
+  unhandled exception in the slot.
+- Gesture input type 7 is labeled "screen recording" to match the
+  reverse-engineered protocol; its default chord remains a selective screenshot
+  (Linux has no universal screen-recording key).
 
 ### Changed — overhaul
 
@@ -59,9 +74,25 @@
   adapter, snapshot/queue/supervisor, application service, client/codec,
   and contract consistency.
 
+### Changed
+
+- Fan support is narrowed to the single capture-verified CPU (Core Ultra 5 125H
+  on MRA-XXX); unevidenced CPU markers were removed. Re-adding a CPU requires a
+  committed capture proving the same EC fan interface on that SKU. The broader
+  platform identities remain available to the independent sysfs/PPD power
+  backend.
+- `powerprofilesctl get` results are cached briefly (invalidated on every set)
+  to reduce subprocess churn from the poll loops.
+- Added end-to-end coverage for the D-Bus wire path (a real private-bus
+  round trip), the `/proc` caller-starttime parse, the real adapter's
+  non-writable GPU gate, and the transition-hook-out-of-lock guarantee.
+
 ### Removed
 
 - WMI firmware execution buttons and CLI commands from normal surfaces.
+- Dead code: unused per-feature D-Bus object-path/interface constants, the
+  vestigial `InternalAuthorizer`, and `FakeHardware` gesture setters that were
+  never part of the hardware protocol.
 - `firmware_run_wmi_command`, `firmware_get_setting`, `firmware_set_setting`
   from the D-Bus API.
 - `RealBackend` direct fallback from `honorctl`.

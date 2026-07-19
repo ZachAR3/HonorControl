@@ -51,15 +51,22 @@ from honor_control.core.models import (
 
 log = logging.getLogger("honor_control.backend.hardware")
 
-# Fan EC commands are hardware-specific. This is the only DMI/CPU identity
-# verified by this repository's captures and the live target machine.
-_SUPPORTED_FAN_IDENTITIES: dict[str, tuple[str, ...]] = {
+# Platform identities retain the models supported by the non-EC power backend.
+# Fan EC commands require the narrower, capture-backed identity below.
+_SUPPORTED_PLATFORM_IDENTITIES: dict[str, tuple[str, ...]] = {
     "mra-xxx": (
         "core(tm) ultra 5 125h",
         "core(tm) ultra 7 155h",
         "core(tm) ultra 9 185h",
         "meteor lake",
     ),
+}
+
+# Adding another fan marker requires a committed capture proving the same EC
+# fan interface on that SKU. An unverified marker could admit a machine with a
+# different EC fan layout.
+_SUPPORTED_FAN_IDENTITIES: dict[str, tuple[str, ...]] = {
+    "mra-xxx": ("core(tm) ultra 5 125h",),
 }
 
 _CPU_ROOT = "/sys/devices/system/cpu"
@@ -73,6 +80,9 @@ _RAPL_LIMIT_FILES = (
     "constraint_1_power_limit_uw",
 )
 PPD_SETTLE_SECONDS = 0.5
+#: Cache ``powerprofilesctl get`` briefly so the 2-5s poll loops do not spawn a
+#: subprocess each tick. Invalidated on every set so readback stays fresh.
+PPD_GET_CACHE_SECONDS = 2.0
 _POWER_CHECK_KEYS = (
     "governor_ok",
     "epp_ok",
@@ -539,24 +549,6 @@ class FakeHardware:
         self._check_fail("query_touchpad_support")
         return self._touchpad_support
 
-    def set_gesture_mapping(self, gesture_id: str, mapping: str) -> bool:
-        self._log("set_gesture_mapping", gesture_id, mapping)
-        self._check_fail("set_gesture_mapping")
-        if gesture_id in self._gesture_mappings:
-            enabled, _ = self._gesture_mappings[gesture_id]
-            self._gesture_mappings[gesture_id] = (enabled, mapping)
-            return True
-        return False
-
-    def set_gesture_enabled(self, gesture_id: str, enabled: bool) -> bool:
-        self._log("set_gesture_enabled", gesture_id, enabled)
-        self._check_fail("set_gesture_enabled")
-        if gesture_id in self._gesture_mappings:
-            _, mapping = self._gesture_mappings[gesture_id]
-            self._gesture_mappings[gesture_id] = (enabled, mapping)
-            return True
-        return False
-
     # -- GPU --
 
     def read_gpu(self) -> GpuSnapshot:
@@ -683,6 +675,7 @@ class HonorToolsAdapter:
             self._root / "sys/class/hwmon"
         )
         self._fan_inputs = _discover_fan_inputs(self._root / "sys/class/hwmon")
+        self._ppd_cache: tuple[float, str] | None = None
 
     def _refresh_discovery(self) -> None:
         """Refresh hotpluggable sysfs paths before capability/read operations."""
@@ -773,6 +766,35 @@ class HonorToolsAdapter:
             self._platform_detected = True
         return self._platform
 
+    def _identity_matches(self, identities: dict[str, tuple[str, ...]]) -> bool:
+        """Return whether live DMI and CPU data match an explicit allowlist."""
+        vendor = self._read_text("/sys/class/dmi/id/sys_vendor")
+        product = self._read_text("/sys/class/dmi/id/product_name")
+        cpu_model = self._read_cpu_model().casefold()
+        expected_cpus = identities.get(product.casefold(), ())
+        return bool(
+            vendor.casefold() == "honor"
+            and expected_cpus
+            and any(marker in cpu_model for marker in expected_cpus)
+        )
+
+    def _require_fan_platform_or_none(self) -> Any:
+        """Return the platform only when its EC fan interface is verified."""
+        platform = self._require_platform_or_none()
+        if platform is None or not self._identity_matches(_SUPPORTED_FAN_IDENTITIES):
+            return None
+        return platform
+
+    def _require_fan_platform(self) -> Any:
+        """Require a capture-verified EC fan platform for direct writes."""
+        platform = self._require_fan_platform_or_none()
+        if platform is None:
+            raise DomainException(
+                DomainError.UNSUPPORTED,
+                "Fan EC control is disabled on an unverified CPU identity",
+            )
+        return platform
+
     def _detect_platform_obj(self) -> Any:
         """Detect the platform using honor.platform.detect().
 
@@ -785,20 +807,12 @@ class HonorToolsAdapter:
         try:
             from honor.platform import detect
 
-            vendor = self._read_text("/sys/class/dmi/id/sys_vendor")
-            product = self._read_text("/sys/class/dmi/id/product_name")
-            cpu_model = self._read_cpu_model().casefold()
-            expected_cpus = _SUPPORTED_FAN_IDENTITIES.get(product.casefold(), ())
-            if (
-                vendor.casefold() != "honor"
-                or not expected_cpus
-                or not any(marker in cpu_model for marker in expected_cpus)
-            ):
+            if not self._identity_matches(_SUPPORTED_PLATFORM_IDENTITIES):
                 log.warning(
-                    "platform is not in the verified fan allowlist: %r %r %r",
-                    vendor,
-                    product,
-                    cpu_model,
+                    "platform is not in the supported identity allowlist: %r %r %r",
+                    self._read_text("/sys/class/dmi/id/sys_vendor"),
+                    self._read_text("/sys/class/dmi/id/product_name"),
+                    self._read_cpu_model().casefold(),
                 )
                 return None
             plat = detect()
@@ -929,12 +943,20 @@ class HonorToolsAdapter:
             return None
 
     def _get_ppd_profile(self) -> str:
+        now = time.monotonic()
+        cached = self._ppd_cache
+        if cached is not None and now - cached[0] < PPD_GET_CACHE_SECONDS:
+            return cached[1]
         result = self._run_powerprofilesctl("get")
         if result is None or result.returncode != 0:
             return ""
-        return result.stdout.strip()
+        value = result.stdout.strip()
+        self._ppd_cache = (now, value)
+        return value
 
     def _set_ppd_profile(self, profile: str) -> bool:
+        # Drop any cached read so the post-set readback observes the new value.
+        self._ppd_cache = None
         result = self._run_powerprofilesctl("set", profile)
         if result is None or result.returncode != 0:
             if result is not None and result.stderr.strip():
@@ -1010,12 +1032,12 @@ class HonorToolsAdapter:
 
     def get_fan_capability(self) -> Capability:
         self._refresh_discovery()
-        plat = self._require_platform_or_none()
+        plat = self._require_fan_platform_or_none()
         if plat is None:
             return Capability(
                 status=CapabilityStatus.UNSUPPORTED,
                 reason_code="platform_not_supported",
-                message="Fan control requires a recognized Honor platform",
+                message="Fan control requires a capture-verified Honor CPU identity",
             )
         acpi_path = getattr(plat, "acpi_call_path", "/proc/acpi/call")
         rooted_acpi_path = self._rooted(acpi_path)
@@ -1467,7 +1489,7 @@ class HonorToolsAdapter:
 
     def read_fan(self) -> FanSnapshot:
         self._refresh_discovery()
-        plat = self._require_platform_or_none()
+        plat = self._require_fan_platform_or_none()
         if plat is None:
             return FanSnapshot(available=False)
         try:
@@ -1498,17 +1520,17 @@ class HonorToolsAdapter:
 
     def set_fan_auto(self) -> bool:
         self._require_honor()
-        plat = self._require_platform()
+        plat = self._require_fan_platform()
         return self._verified_acpi_call(plat, str(plat.fan_auto_cmd))
 
     def set_fan_manual(self, speed: int) -> bool:
         self._require_honor()
-        plat = self._require_platform()
+        plat = self._require_fan_platform()
         return self._verified_acpi_call(plat, str(plat.fan_manual_cmd))
 
     def set_fan_speed(self, speed: int) -> bool:
         self._require_honor()
-        plat = self._require_platform()
+        plat = self._require_fan_platform()
         if (
             isinstance(speed, bool)
             or not isinstance(speed, int)

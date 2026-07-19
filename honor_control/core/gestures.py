@@ -18,6 +18,9 @@ DEFAULT_GESTURE_MAPPINGS: dict[str, str] = {
     "4:2": "volumedown",
     "10:3": "leftmeta,v",
     "6": "print",
+    # Firmware input type 7 is "screen recording" (see protocol.json); Linux
+    # has no universal screen-recording key, so the default chord emulates a
+    # selective screenshot (Shift+Print).
     "7": "leftshift,print",
     "8": "leftmeta,h",
     "9": "leftalt,f4",
@@ -30,7 +33,7 @@ GESTURE_NAMES: dict[str, str] = {
     "4:2": "Right edge swipe down (volume down)",
     "10:3": "Two-finger swipe left (notification panel)",
     "6": "One-knuckle double knock (screenshot)",
-    "7": "Two-knuckle double knock (selective screenshot)",
+    "7": "Two-knuckle double knock (screen recording)",
     "8": "Top-left corner click (minimize)",
     "9": "Top-right corner click (close window)",
 }

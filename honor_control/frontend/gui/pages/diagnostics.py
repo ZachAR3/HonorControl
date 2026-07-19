@@ -144,7 +144,11 @@ class DiagnosticsPage(PageBase):
                 self, "Save debug bundle", "honor-control-debug.json", "JSON (*.json)"
             )
             if filename:
-                Path(filename).write_text(
-                    json.dumps(result, indent=2, default=str), encoding="utf-8"
-                )
-                self.results_label.setText(f"Debug bundle saved to {filename}")
+                try:
+                    Path(filename).write_text(
+                        json.dumps(result, indent=2, default=str), encoding="utf-8"
+                    )
+                except OSError as exc:
+                    self.results_label.setText(f"Could not save debug bundle: {exc}")
+                else:
+                    self.results_label.setText(f"Debug bundle saved to {filename}")
