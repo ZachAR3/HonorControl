@@ -77,16 +77,24 @@ class StatusDot(QWidget):
     RED = "#c0392b"
     AMBER = "#f39c12"
     GREY = "#7f8c8d"
+    _NAMES = {
+        GREEN: "healthy",
+        RED: "error",
+        AMBER: "warning",
+        GREY: "unknown",
+    }
 
     def __init__(self, color: str = GREY, parent: QWidget | None = None) -> None:
         """Create the dot with an initial colour."""
         super().__init__(parent)
         self._color = color
         self.setFixedSize(14, 14)
+        self.setAccessibleName(f"Status: {self._NAMES.get(color, 'unknown')}")
 
     def set_color(self, color: str) -> None:
         """Change the dot colour and repaint."""
         self._color = color
+        self.setAccessibleName(f"Status: {self._NAMES.get(color, 'unknown')}")
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt API

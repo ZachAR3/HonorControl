@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from honor_control.core.models import FanCurvePoint
@@ -27,6 +27,11 @@ class FanCurveGraph(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(260)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Fan curve editor")
+        self.setAccessibleDescription(
+            "Use arrow keys to edit the selected point and Delete to remove it"
+        )
         self._points = [
             FanCurvePoint(40_000, 0),
             FanCurvePoint(60_000, 30),
@@ -64,9 +69,18 @@ class FanCurveGraph(QWidget):
             key=lambda i: self._points[i + 1].temp_mc - self._points[i].temp_mc,
         )
         left, right = self._points[largest_gap], self._points[largest_gap + 1]
+        if right.temp_mc - left.temp_mc <= 1000:
+            return
         temp = ((left.temp_mc + right.temp_mc) // 2 // 1000) * 1000
+        temp = max(left.temp_mc + 1000, min(right.temp_mc - 1000, temp))
         speed = round((left.speed + right.speed) / 2 / 5) * 5
-        self._points.insert(largest_gap + 1, FanCurvePoint(temp, speed))
+        if temp >= 95_000:
+            speed = 100
+        candidate = list(self._points)
+        candidate.insert(largest_gap + 1, FanCurvePoint(temp, speed))
+        self._points = list(
+            validate_curve_points([(point.temp_mc, point.speed) for point in candidate])
+        )
         self._selected = largest_gap + 1
         self._emit_change()
 
@@ -225,6 +239,41 @@ class FanCurveGraph(QWidget):
 
     def mouseReleaseEvent(self, _event: QMouseEvent) -> None:  # noqa: N802
         self._dragging = False
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if not self._points:
+            return
+        if self._selected < 0 and event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
+            self.select(0)
+            event.accept()
+            return
+        if self._selected < 0:
+            super().keyPressEvent(event)
+            return
+        point = self._points[self._selected]
+        if event.key() == Qt.Key.Key_Left:
+            self.update_selected(point.temp_mc - 1000, point.speed)
+        elif event.key() == Qt.Key.Key_Right:
+            self.update_selected(point.temp_mc + 1000, point.speed)
+        elif event.key() == Qt.Key.Key_Up:
+            self.update_selected(point.temp_mc, point.speed + 5)
+        elif event.key() == Qt.Key.Key_Down:
+            self.update_selected(point.temp_mc, point.speed - 5)
+        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.remove_selected()
+        elif event.key() == Qt.Key.Key_Home:
+            self.select(0)
+        elif event.key() == Qt.Key.Key_End:
+            self.select(len(self._points) - 1)
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
 
     def _emit_change(self) -> None:
         self.points_changed.emit(self.points)

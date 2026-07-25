@@ -74,7 +74,7 @@ class BatteryPage(PageBase):
         )
         self.register_control(self.slider)
         self.register_control(self.spin)
-        self.register_control(self.apply_btn)
+        self.register_pending_control("set_thresholds", self.apply_btn)
         limit.layout.addWidget(self.apply_btn)
         self.add_widget(limit)
 
@@ -87,6 +87,7 @@ class BatteryPage(PageBase):
                 f"{mode}: {CHARGE_PRESETS[mode][0]}% end / {CHARGE_PRESETS[mode][1]}% start"
             )
             self.register_control(btn)
+            self.register_pending_control("set_mode", btn)
             self.mode_buttons[mode] = btn
             btn.clicked.connect(
                 lambda _checked=False, name=mode: self.intent.emit("set_mode", (name,))
@@ -119,7 +120,8 @@ class BatteryPage(PageBase):
         start = bat.observed_start
         if end is not None and start is not None:
             self.threshold_row.set_value(f"{end}% stop · {start}% start")
-            self._block_value(end)
+            if not self.slider.isSliderDown():
+                self._block_value(end)
         else:
             self.threshold_row.set_value("—")
         if (

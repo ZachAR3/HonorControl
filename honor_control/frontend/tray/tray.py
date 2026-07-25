@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from honor_control import __version__
 from honor_control.core.models import POWER_PROFILES, SystemSnapshot
 from honor_control.frontend.gui.controller import GuiController
+from honor_control.frontend.single_instance import acquire_single_instance
 
 #: Refresh interval (ms) for the tooltip + menu state.
 TRAY_REFRESH_MS = 5000
@@ -323,6 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("Honor Control Tray")
     app.setQuitOnLastWindowClosed(False)
+    instance_lock = acquire_single_instance("tray")
+    if instance_lock is None:
+        print("honor-control-tray: another instance is already running", file=sys.stderr)
+        return 0
+    app._honor_instance_lock = instance_lock  # type: ignore[attr-defined]
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print(
             "honor-control-tray: no system tray available yet; the icon will "

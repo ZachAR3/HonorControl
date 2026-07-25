@@ -17,6 +17,8 @@ import pytest
 # Set offscreen before importing Qt.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from honor_control.core.models import (  # noqa: E402
@@ -26,6 +28,7 @@ from honor_control.core.models import (  # noqa: E402
     FanMode,
     FanSnapshot,
     GesturesSnapshot,
+    OperationResult,
     PlatformInfo,
     PowerProfileEntry,
     PowerSnapshot,
@@ -273,6 +276,131 @@ class TestGuiPageConstruction:
         assert not page.curve_widget.isHidden()
         assert page.curve_graph.points == edited
 
+    def test_failed_fan_apply_reconciles_mode_to_snapshot(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.fan import FanPage
+
+        state = GuiState()
+        page = FanPage(state)
+        state.set_snapshot(
+            SystemSnapshot(
+                sequence=1,
+                fan=FanSnapshot(available=True, mode=FanMode.STOCK),
+            )
+        )
+        page.rb_curve.click()
+        assert page.rb_curve.isChecked()
+
+        state.emit_completed(
+            "set_curve:default",
+            OperationResult.failed(code="write_failed", message="failed"),
+        )
+
+        assert page.rb_auto.isChecked()
+
+    def test_saved_fan_curve_remains_selected_while_controller_applies(
+        self, qapp
+    ) -> None:
+        from honor_control.frontend.gui.pages.fan import FanPage
+
+        state = GuiState()
+        page = FanPage(state)
+        state.set_snapshot(
+            SystemSnapshot(
+                sequence=1,
+                fan=FanSnapshot(available=True, mode=FanMode.STOCK),
+            )
+        )
+        page.rb_curve.click()
+
+        state.emit_completed(
+            "set_curve:default",
+            OperationResult.success(persisted=True, applied=False),
+        )
+
+        assert page.rb_curve.isChecked()
+
+    def test_failed_power_apply_reconciles_selection_to_snapshot(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.power import PowerPage
+
+        state = GuiState()
+        page = PowerPage(state)
+        profiles = (
+            PowerProfileEntry(name="balanced", label="Balanced"),
+            PowerProfileEntry(name="performance", label="Performance"),
+        )
+        state.set_snapshot(
+            SystemSnapshot(
+                sequence=1,
+                power=PowerSnapshot(
+                    applied_profile="balanced",
+                    desired_profile="balanced",
+                    profiles=profiles,
+                ),
+            )
+        )
+        page.active_combo.setCurrentIndex(page.active_combo.findData("performance"))
+        assert page.active_combo.currentData() == "performance"
+
+        state.emit_completed(
+            "set_profile:performance",
+            OperationResult.failed(code="write_failed", message="failed"),
+        )
+
+        assert page.active_combo.currentData() == "balanced"
+
+    def test_pending_operation_disables_its_apply_control(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.battery import BatteryPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = BatteryPage(state)
+
+        state.mark_pending("set_thresholds:80:75")
+        assert not page.apply_btn.isEnabled()
+        state.emit_completed(
+            "set_thresholds:80:75",
+            OperationResult.success(applied=True),
+        )
+        assert page.apply_btn.isEnabled()
+
+    def test_battery_refresh_does_not_move_slider_during_drag(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.battery import BatteryPage
+
+        state = GuiState()
+        page = BatteryPage(state)
+        page.slider.setValue(70)
+        page.slider.setSliderDown(True)
+        page._on_snapshot(  # noqa: SLF001
+            SystemSnapshot(battery=BatterySnapshot(observed_end=90, observed_start=85))
+        )
+        assert page.slider.value() == 70
+        page.slider.setSliderDown(False)
+
+    def test_fan_add_point_preserves_curve_invariants(self, qapp) -> None:
+        from honor_control.core.models import FanCurvePoint
+        from honor_control.frontend.gui.fan_curve_editor import FanCurveGraph
+
+        graph = FanCurveGraph()
+        graph.set_points([FanCurvePoint(40_000, 0), FanCurvePoint(41_000, 10)])
+        graph.add_point()
+        assert [point.temp_mc for point in graph.points] == [40_000, 41_000]
+
+        graph.set_points([FanCurvePoint(94_000, 50), FanCurvePoint(100_000, 100)])
+        graph.add_point()
+        added = graph.points[1]
+        assert added.temp_mc == 97_000
+        assert added.speed == 100
+
+    def test_fan_curve_editor_supports_keyboard_editing(self, qapp) -> None:
+        from honor_control.frontend.gui.fan_curve_editor import FanCurveGraph
+
+        graph = FanCurveGraph()
+        graph.select(1)
+        before = graph.points[1].speed
+        QTest.keyClick(graph, Qt.Key.Key_Up)
+        assert graph.points[1].speed == before + 5
+        assert graph.accessibleName() == "Fan curve editor"
+
     def test_diagnostics_page_construction(self, qapp) -> None:
         from honor_control.frontend.gui.pages.diagnostics import DiagnosticsPage
 
@@ -341,7 +469,6 @@ class TestGuiPageConstruction:
                 ({"edge_volume": 1, "three_finger_drag": 1},),
             )
         ]
-
 
 class TestIntegratedTray:
     def test_shared_controller_owns_no_duplicate_refresh_loop(
@@ -451,3 +578,27 @@ class TestIntegratedTray:
         assert window.isHidden()
         assert window._shutdown is False  # noqa: SLF001
         window._shutdown_application()  # noqa: SLF001
+
+def test_single_instance_lock_rejects_duplicate(qapp) -> None:
+    from honor_control.frontend.single_instance import acquire_single_instance
+
+    name = f"test-{os.getpid()}-{time.monotonic_ns()}"
+    first = acquire_single_instance(name)
+    assert first is not None
+    try:
+        assert acquire_single_instance(name) is None
+    finally:
+        first.unlock()
+
+
+def test_protocol_mismatch_uses_persistent_banner(qapp, monkeypatch) -> None:
+    from honor_control.frontend.gui.controller import GuiController
+    from honor_control.frontend.gui.main_window import MainWindow
+
+    monkeypatch.setattr(GuiController, "start", lambda _self: None)
+    monkeypatch.setattr(GuiController, "stop", lambda _self: None)
+    window = MainWindow(bus_kind="session")
+    window.controller.protocol_mismatch.emit("schema mismatch")
+    assert window.banner.isVisibleTo(window)
+    assert "Incompatible service version" in window.banner_label.text()
+    window._shutdown_application()  # noqa: SLF001

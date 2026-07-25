@@ -59,6 +59,10 @@ PAGES: list[tuple[type[PageBase], str, str]] = [
 
 #: Refresh interval (ms) for the periodic snapshot poll.
 REFRESH_INTERVAL_MS = 5000
+OFFLINE_MESSAGE = (
+    "Honor Control service is not running. "
+    "Start it with: sudo systemctl start honor-control.service"
+)
 
 
 class MainWindow(QMainWindow):
@@ -229,12 +233,9 @@ class MainWindow(QMainWindow):
         banner.setMinimumHeight(36)
         bh = QHBoxLayout(banner)
         bh.setContentsMargins(16, 4, 16, 4)
-        label = QLabel(
-            "Honor Control service is not running. "
-            "Start it with: sudo systemctl start honor-control.service"
-        )
-        label.setWordWrap(True)
-        bh.addWidget(label)
+        self.banner_label = QLabel(OFFLINE_MESSAGE)
+        self.banner_label.setWordWrap(True)
+        bh.addWidget(self.banner_label)
         bh.addStretch(1)
         banner.setStyleSheet(
             "QFrame#HonorBanner { background: #fff3cd; border-bottom: 1px solid #ffe69c; }"
@@ -266,6 +267,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.controller.snapshot_received.connect(self.state.set_snapshot)
         self.controller.connection_changed.connect(self._on_connection)
+        self.controller.protocol_mismatch.connect(self._on_protocol_mismatch)
         self.controller.error.connect(self.state.emit_error)
         self.controller.operation_started.connect(self.state.mark_pending)
         self.controller.operation_completed.connect(self.state.emit_completed)
@@ -315,6 +317,8 @@ class MainWindow(QMainWindow):
         self.controller.call(operation_id, method, *values)
 
     def _update_availability(self, available: bool) -> None:
+        if available:
+            self.banner_label.setText(OFFLINE_MESSAGE)
         self.banner.setVisible(not available)
         color = StatusDot.GREEN if available else StatusDot.RED
         self.health_dot.set_color(color)
@@ -323,6 +327,10 @@ class MainWindow(QMainWindow):
         )
         for page in self._pages:
             page.set_backend_available(available)
+
+    def _on_protocol_mismatch(self, message: str) -> None:
+        self.banner_label.setText(f"Incompatible service version: {message}")
+        self.banner.setVisible(True)
 
     def _on_stale_changed(self, domains: tuple[str, ...]) -> None:
         if domains:

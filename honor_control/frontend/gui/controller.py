@@ -45,6 +45,7 @@ class GuiWorker(QThread):
 
     snapshot_ready = Signal(object)  # SystemSnapshot
     connection_changed = Signal(bool)  # connected
+    protocol_mismatch = Signal(str)  # incompatible API/schema message
     error = Signal(str)  # error message
     operation_result = Signal(str, object)  # operation_id, OperationResult
 
@@ -110,6 +111,8 @@ class GuiWorker(QThread):
                             )
             except ClientError as exc:
                 self.connection_changed.emit(False)
+                if exc.code == TransportError.API_MISMATCH:
+                    self.protocol_mismatch.emit(exc.message)
                 self.error.emit(exc.message)
             finally:
                 await self._cancel_tasks()
@@ -230,6 +233,7 @@ class GuiController(QObject):
 
     snapshot_received = Signal(object)  # SystemSnapshot
     connection_changed = Signal(bool)  # connected
+    protocol_mismatch = Signal(str)  # incompatible API/schema message
     operation_started = Signal(str)  # operation_id
     operation_completed = Signal(str, object)  # operation_id, OperationResult
     error = Signal(str)  # error message
@@ -243,6 +247,7 @@ class GuiController(QObject):
         self._worker = GuiWorker(bus_kind=bus_kind, timeout=timeout)
         self._worker.snapshot_ready.connect(self._on_snapshot)
         self._worker.connection_changed.connect(self._on_connection)
+        self._worker.protocol_mismatch.connect(self.protocol_mismatch)
         self._worker.error.connect(self._on_error)
         self._worker.operation_result.connect(self._on_operation_result)
         self._pending_ops: set[str] = set()

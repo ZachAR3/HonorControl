@@ -7,8 +7,10 @@ dialog in the user process.  Loads logs on demand with bounded lines.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -26,6 +28,8 @@ from honor_control.frontend.gui.widgets import Card, InfoRow, StatusDot
 
 class DiagnosticsPage(PageBase):
     """System info, capabilities, self-test, logs and debug export."""
+
+    _bundle_saved = Signal(str)
 
     title = "Diagnostics"
     icon = "preferences-system-devices"
@@ -78,9 +82,9 @@ class DiagnosticsPage(PageBase):
         self.results_label = QLabel("No checks run yet.")
         self.results_label.setWordWrap(True)
         actions.layout.addWidget(self.results_label)
-        self.register_control(self.run_btn)
-        self.register_control(self.export_btn)
-        self.register_control(self.logs_btn)
+        self.register_pending_control("run_checks", self.run_btn)
+        self.register_pending_control("get_debug_bundle", self.export_btn)
+        self.register_pending_control("get_recent_logs", self.logs_btn)
         self.add_widget(actions)
 
         logs_card = Card("Recent backend logs")
@@ -94,6 +98,7 @@ class DiagnosticsPage(PageBase):
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
         self.state.operation_completed.connect(self._on_operation)
+        self._bundle_saved.connect(self.results_label.setText)
 
     @staticmethod
     def _label(key: str) -> str:
@@ -144,11 +149,21 @@ class DiagnosticsPage(PageBase):
                 self, "Save debug bundle", "honor-control-debug.json", "JSON (*.json)"
             )
             if filename:
-                try:
-                    Path(filename).write_text(
-                        json.dumps(result, indent=2, default=str), encoding="utf-8"
-                    )
-                except OSError as exc:
-                    self.results_label.setText(f"Could not save debug bundle: {exc}")
-                else:
-                    self.results_label.setText(f"Debug bundle saved to {filename}")
+                self.results_label.setText("Saving debug bundle…")
+                threading.Thread(
+                    target=self._save_debug_bundle,
+                    args=(filename, result),
+                    name="honor-debug-bundle-save",
+                    daemon=True,
+                ).start()
+
+    def _save_debug_bundle(self, filename: str, result: dict) -> None:
+        try:
+            Path(filename).write_text(
+                json.dumps(result, indent=2, default=str), encoding="utf-8"
+            )
+        except OSError as exc:
+            message = f"Could not save debug bundle: {exc}"
+        else:
+            message = f"Debug bundle saved to {filename}"
+        self._bundle_saved.emit(message)

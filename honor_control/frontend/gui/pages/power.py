@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QWidget,
@@ -52,7 +53,7 @@ class PowerPage(PageBase):
         active_row.addWidget(self.active_apply)
         active.layout.addLayout(active_row)
         self.register_control(self.active_combo)
-        self.register_control(self.active_apply)
+        self.register_pending_control("set_profile", self.active_apply)
         self.add_widget(active)
 
         editor = Card("Profile editor")
@@ -156,6 +157,8 @@ class PowerPage(PageBase):
             self.profile_reset,
         ):
             self.register_control(widget)
+        self.register_pending_control("save_power_profile", self.profile_save)
+        self.register_pending_control("delete_power_profile", self.profile_delete)
         self.add_widget(editor)
 
         automatic = Card("Automatic AC / battery switching")
@@ -205,7 +208,7 @@ class PowerPage(PageBase):
             else:
                 widget.currentIndexChanged.connect(self._mark_auto_dirty)
             self.register_control(widget)
-        self.register_control(self.auto_save)
+        self.register_pending_control("configure_auto_switch", self.auto_save)
         self.add_widget(automatic)
 
         telemetry = Card("Telemetry")
@@ -218,6 +221,7 @@ class PowerPage(PageBase):
         self.add_widget(telemetry)
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
+        self.state.operation_completed.connect(self._on_operation_completed)
 
     def _profile_entries(self, snap: SystemSnapshot) -> tuple[PowerProfileEntry, ...]:
         return snap.power.profiles or POWER_PROFILES
@@ -426,8 +430,25 @@ class PowerPage(PageBase):
 
     def _delete_profile(self) -> None:
         name = self.edit_combo.currentData()
-        if name:
+        if not name:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete power profile",
+            f"Delete the custom power profile {name!r}?",
+            QMessageBox.StandardButton.Delete | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Delete:
             self.intent.emit("delete_power_profile", (name,))
+
+    def _on_operation_completed(self, operation_id: str, result: object) -> None:
+        if not operation_id.startswith("set_profile:"):
+            return
+        if result is not None and bool(getattr(result, "applied", False)):
+            return
+        self._active_combo_dirty = False
+        self.refresh()
 
     def _mark_auto_dirty(self, *_args) -> None:
         if not self._loading:

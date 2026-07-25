@@ -21,7 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from honor_control.core.models import POWER_PROFILES, FanMode, SystemSnapshot
+from honor_control.core.models import (
+    POWER_PROFILES,
+    FanMode,
+    OperationStatus,
+    SystemSnapshot,
+)
 from honor_control.core.validation import format_curve, parse_curve
 from honor_control.frontend.gui.fan_curve_editor import FanCurveGraph
 from honor_control.frontend.gui.pages import PageBase
@@ -90,7 +95,7 @@ class FanPage(PageBase):
         self.register_control(self.rb_curve)
         self.register_control(self.rb_manual)
         self.register_control(self.manual_slider)
-        self.register_control(self.manual_apply)
+        self.register_pending_control("set_manual", self.manual_apply)
         self.add_widget(mode_card)
 
         # Curve editor (visible only in custom mode)
@@ -147,7 +152,7 @@ class FanPage(PageBase):
         self.register_control(self.point_speed)
         self.register_control(self.point_add)
         self.register_control(self.point_remove)
-        self.register_control(self.curve_apply)
+        self.register_pending_control("set_curve", self.curve_apply)
         self.add_widget(self.curve_widget)
         self.curve_widget.setVisible(False)
 
@@ -162,6 +167,7 @@ class FanPage(PageBase):
 
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
+        self.state.operation_completed.connect(self._on_operation_completed)
 
     def _on_snapshot(self, snap: SystemSnapshot) -> None:
         fan = snap.fan
@@ -289,6 +295,21 @@ class FanPage(PageBase):
                 [(point.temp_mc, point.speed) for point in points],
             ),
         )
+
+    def _on_operation_completed(self, operation_id: str, result: object) -> None:
+        method = operation_id.split(":", 1)[0]
+        if method not in {"set_stock_auto", "set_curve", "set_manual"}:
+            return
+        if result is not None and getattr(result, "status", None) == OperationStatus.SUCCESS:
+            accepted = (
+                bool(getattr(result, "persisted", False))
+                if method == "set_curve"
+                else bool(getattr(result, "applied", False))
+            )
+            if accepted:
+                return
+        self._mode_dirty = False
+        self.refresh()
 
     def refresh(self) -> None:
         snap = self.state.snapshot

@@ -48,7 +48,11 @@ class PageBase(QWidget):
         self._scroll.setWidget(content)
         outer.addWidget(self._scroll)
         self._controls: list[QWidget] = []
+        self._pending_controls: dict[str, list[QWidget]] = {}
+        self._pending_operations: set[str] = set()
         self._build()
+        self.state.operation_pending.connect(self._update_pending_started)
+        self.state.operation_completed.connect(self._update_pending_completed)
 
     def _build(self) -> None:
         """Construct the page's widgets. Override in subclasses."""
@@ -64,6 +68,13 @@ class PageBase(QWidget):
         self._controls.append(widget)
         return widget
 
+    def register_pending_control(self, method: str, widget: QWidget) -> QWidget:
+        """Disable ``widget`` while an operation for ``method`` is pending."""
+        if widget not in self._controls:
+            self.register_control(widget)
+        self._pending_controls.setdefault(method, []).append(widget)
+        return widget
+
     def unregister_control(self, widget: QWidget) -> None:
         """Forget a dynamically removed control."""
         try:
@@ -73,7 +84,29 @@ class PageBase(QWidget):
 
     def set_backend_available(self, available: bool) -> None:
         for w in self._controls:
-            w.setEnabled(available)
+            pending = any(
+                operation.split(":", 1)[0] == method
+                and w in self._pending_controls.get(method, ())
+                for operation in self._pending_operations
+                for method in self._pending_controls
+            )
+            w.setEnabled(available and not pending)
+
+    def _update_pending_started(self, operation_id: str) -> None:
+        self._pending_operations.add(operation_id)
+        method = operation_id.split(":", 1)[0]
+        for widget in self._pending_controls.get(method, ()):
+            widget.setEnabled(False)
+
+    def _update_pending_completed(self, operation_id: str, _result: object) -> None:
+        self._pending_operations.discard(operation_id)
+        method = operation_id.split(":", 1)[0]
+        for widget in self._pending_controls.get(method, ()):
+            still_pending = any(
+                pending.split(":", 1)[0] == method
+                for pending in self._pending_operations
+            )
+            widget.setEnabled(self.state.connected and not still_pending)
 
     def add_heading(self, text: str) -> QLabel:
         label = QLabel(text)

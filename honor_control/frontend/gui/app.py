@@ -14,6 +14,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from honor_control import __version__
+from honor_control.frontend.single_instance import acquire_single_instance
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -54,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
         QIcon.setThemeName("breeze")
     _apply_metadata(app)
     app.setQuitOnLastWindowClosed(False)
+    instance_lock = acquire_single_instance("gui")
+    if instance_lock is None:
+        print("honor-control-gui: another instance is already running", file=sys.stderr)
+        return 0
+    app._honor_instance_lock = instance_lock  # type: ignore[attr-defined]
 
     from honor_control.frontend.gui.main_window import MainWindow
 
