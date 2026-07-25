@@ -470,6 +470,34 @@ class TestGuiPageConstruction:
             )
         ]
 
+    def test_overview_quick_profile_action_preserves_controller_intent(
+        self, qapp
+    ) -> None:
+        from honor_control.frontend.gui.pages.dashboard import DashboardPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = DashboardPage(state)
+        emitted: list[tuple[str, object]] = []
+        page.intent.connect(lambda method, args: emitted.append((method, args)))
+
+        page.mode_buttons["performance"].click()
+
+        assert emitted == [("set_profile", ("performance",))]
+
+    def test_toggle_switch_is_keyboard_operable(self, qapp) -> None:
+        from honor_control.frontend.gui.widgets import ToggleSwitch
+
+        toggle = ToggleSwitch(False)
+        toggled: list[bool] = []
+        toggle.toggled.connect(toggled.append)
+        QTest.keyClick(toggle, Qt.Key.Key_Space)
+
+        assert toggle.isChecked() is True
+        assert toggled == [True]
+        assert toggle.accessibleName()
+
+
 class TestIntegratedTray:
     def test_shared_controller_owns_no_duplicate_refresh_loop(
         self, qapp, monkeypatch
@@ -578,6 +606,29 @@ class TestIntegratedTray:
         assert window.isHidden()
         assert window._shutdown is False  # noqa: SLF001
         window._shutdown_application()  # noqa: SLF001
+
+    def test_window_shell_compacts_at_supported_narrow_width(
+        self, qapp, monkeypatch
+    ) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.gui.main_window import MainWindow
+
+        monkeypatch.setattr(GuiController, "start", lambda _self: None)
+        monkeypatch.setattr(GuiController, "stop", lambda _self: None)
+        window = MainWindow(bus_kind="session")
+        window.show()
+        window.resize(760, 520)
+        qapp.processEvents()
+
+        assert window.sidebar_frame.width() == 136
+        assert window.device_label.isHidden()
+
+        window.resize(900, 600)
+        qapp.processEvents()
+        assert window.sidebar_frame.width() == 176
+        assert not window.device_label.isHidden()
+        window._shutdown_application()  # noqa: SLF001
+
 
 def test_single_instance_lock_rejects_duplicate(qapp) -> None:
     from honor_control.frontend.single_instance import acquire_single_instance
