@@ -27,6 +27,7 @@ class PageBase(QWidget):
 
     title: str = "Page"
     icon: str = ""
+    show_page_title: bool = True
     intent = Signal(str, object)
 
     def __init__(
@@ -42,14 +43,20 @@ class PageBase(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         content = QWidget()
+        content.setObjectName("HonorContent")
         self._root = QVBoxLayout(content)
-        self._root.setContentsMargins(20, 20, 20, 20)
-        self._root.setSpacing(14)
+        self._root.setContentsMargins(32, 24, 32, 24)
+        self._root.setSpacing(0)
         self._scroll.setWidget(content)
         outer.addWidget(self._scroll)
         self._controls: list[QWidget] = []
         self._pending_controls: dict[str, list[QWidget]] = {}
         self._pending_operations: set[str] = set()
+        if self.show_page_title:
+            heading = QLabel(self.title)
+            heading.setObjectName("HonorPageTitle")
+            heading.setContentsMargins(0, 0, 0, 14)
+            self._root.addWidget(heading)
         self._build()
         self.state.operation_pending.connect(self._update_pending_started)
         self.state.operation_completed.connect(self._update_pending_completed)

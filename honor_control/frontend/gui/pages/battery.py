@@ -34,19 +34,26 @@ class BatteryPage(PageBase):
     icon = "battery-good"
 
     def _build(self) -> None:
-        cap = Card("Battery")
+        cap = Card("")
         cap_row = QHBoxLayout()
         self.capacity_value = QLabel("— %")
-        self.capacity_value.setStyleSheet("font-size: 28px; font-weight: 700;")
-        self.capacity_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.capacity_value.setObjectName("HonorPrimaryValue")
         cap_row.addWidget(self.capacity_value)
+        cap_row.addSpacing(24)
+        self.status_summary = QLabel("—")
+        self.status_summary.setProperty("muted", True)
+        cap_row.addWidget(self.status_summary)
+        cap_row.addStretch(1)
+        self.health_summary = QLabel("—")
+        self.health_summary.setProperty("muted", True)
+        cap_row.addWidget(self.health_summary)
         cap.layout.addLayout(cap_row)
         self.status_row = InfoRow("Status", "—")
         self.ac_row = InfoRow("Power source", "—")
         self.threshold_row = InfoRow("Thresholds", "—")
-        cap.layout.addWidget(self.status_row)
-        cap.layout.addWidget(self.ac_row)
-        cap.layout.addWidget(self.threshold_row)
+        self.status_row.setVisible(False)
+        self.ac_row.setVisible(False)
+        self.threshold_row.setVisible(False)
         self.add_widget(cap)
 
         limit = Card("Charge limit")
@@ -64,9 +71,10 @@ class BatteryPage(PageBase):
         ll.addWidget(self.spin)
         limit.layout.addLayout(ll)
         self.limit_help = QLabel("Recommended: 80% for daily use, 60% for storage.")
-        self.limit_help.setStyleSheet("color: rgba(128, 128, 128, 200);")
+        self.limit_help.setProperty("muted", True)
         limit.layout.addWidget(self.limit_help)
         self.apply_btn = QPushButton("Apply charge limit")
+        self.apply_btn.setProperty("quiet", True)
         self.apply_btn.clicked.connect(
             lambda: self.intent.emit(
                 "set_thresholds", (self.spin.value(), self.spin.value() - 5)
@@ -75,7 +83,6 @@ class BatteryPage(PageBase):
         self.register_control(self.slider)
         self.register_control(self.spin)
         self.register_pending_control("set_thresholds", self.apply_btn)
-        limit.layout.addWidget(self.apply_btn)
         self.add_widget(limit)
 
         modes = Card("Charge modes")
@@ -99,7 +106,20 @@ class BatteryPage(PageBase):
         wrap.setLayout(row)
         wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         modes.layout.addWidget(wrap)
+        self.mode_help = QLabel("Select a preset to set its start and stop thresholds.")
+        self.mode_help.setProperty("muted", True)
+        modes.layout.addWidget(self.mode_help)
         self.add_widget(modes)
+
+        actions = Card("")
+        action_row = QHBoxLayout()
+        action_row.addWidget(self.apply_btn)
+        action_row.addStretch(1)
+        self.applied_label = QLabel("Changes are verified after applying")
+        self.applied_label.setProperty("muted", True)
+        action_row.addWidget(self.applied_label)
+        actions.layout.addLayout(action_row)
+        self.add_widget(actions)
 
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
@@ -116,6 +136,16 @@ class BatteryPage(PageBase):
             if bat.ac_online is False
             else "—"
         )
+        status = str(bat.status) if bat.status else "Unknown"
+        source = (
+            "Connected to AC"
+            if bat.ac_online is True
+            else "On battery"
+            if bat.ac_online is False
+            else "Power source unknown"
+        )
+        self.status_summary.setText(f"{status}  ·  {source}")
+        self.health_summary.setText("Healthy" if bat.available else "Unavailable")
         end = bat.observed_end
         start = bat.observed_start
         if end is not None and start is not None:
@@ -137,6 +167,9 @@ class BatteryPage(PageBase):
         mode = str(bat.mode) if bat.mode else ""
         for name, btn in self.mode_buttons.items():
             btn.setChecked(name == mode)
+        preset = CHARGE_PRESETS.get(mode)
+        if preset is not None:
+            self.mode_help.setText(f"Starts at {preset[1]}%  ·  Stops at {preset[0]}%")
 
     def _on_slider_changed(self, value: int) -> None:
         self.spin.blockSignals(True)

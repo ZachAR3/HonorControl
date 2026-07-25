@@ -7,7 +7,7 @@ section.  No synchronous version/path calls.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from honor_control import __version__
 from honor_control.core.models import SystemSnapshot
@@ -30,11 +30,18 @@ class SettingsPage(PageBase):
         close_host = QWidget()
         close_layout = QHBoxLayout(close_host)
         close_layout.setContentsMargins(0, 6, 0, 0)
-        close_copy = QLabel(
-            "<b>Keep running in the tray</b><br>"
-            "<span style='color: rgba(128, 128, 128, 210);'>"
-            "Closing the window hides it; Quit exits the application.</span>"
+        close_copy = QWidget()
+        copy_layout = QVBoxLayout(close_copy)
+        copy_layout.setContentsMargins(0, 0, 0, 0)
+        copy_layout.setSpacing(2)
+        close_title = QLabel("Keep running in the tray")
+        close_title.setStyleSheet("font-weight: 600;")
+        copy_layout.addWidget(close_title)
+        close_description = QLabel(
+            "Closing the window hides it; Quit exits the application."
         )
+        close_description.setProperty("muted", True)
+        copy_layout.addWidget(close_description)
         close_layout.addWidget(close_copy, 1)
         self.close_to_tray = ToggleSwitch(True)
         self.close_to_tray.setToolTip("Hide the window instead of exiting")

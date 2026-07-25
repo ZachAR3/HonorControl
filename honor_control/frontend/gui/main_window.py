@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import QSettings, QSize, QTimer
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -20,8 +20,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
-    QMenuBar,
     QMessageBox,
     QStackedWidget,
     QSystemTrayIcon,
@@ -32,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from honor_control import __version__
 from honor_control.frontend.gui.controller import GuiController
+from honor_control.frontend.gui.design import apply_design_system
 from honor_control.frontend.gui.pages import PageBase
 from honor_control.frontend.gui.pages.battery import BatteryPage
 from honor_control.frontend.gui.pages.dashboard import DashboardPage
@@ -46,9 +45,9 @@ from honor_control.frontend.tray.tray import HonorTray
 
 log = logging.getLogger("honor_control.frontend.gui.main_window")
 
-#: Sidebar entries: (page class, freedesktop icon name, display label).
+#: Sidebar entries: (page class, legacy icon name, display label).
 PAGES: list[tuple[type[PageBase], str, str]] = [
-    (DashboardPage, "go-home", "Dashboard"),
+    (DashboardPage, "go-home", "Overview"),
     (BatteryPage, "battery-good", "Battery"),
     (PowerPage, "preferences-system-power", "Power"),
     (TouchpadPage, "input-touchpad", "Touchpad"),
@@ -82,8 +81,12 @@ class MainWindow(QMainWindow):
         self._tray_notice_shown = False
 
         self.setWindowTitle("Honor Control")
-        self.resize(980, 700)
-        self.setMinimumSize(640, 480)
+        self.setObjectName("HonorWindow")
+        app = QApplication.instance()
+        if isinstance(app, QApplication) and not app.property("honorTheme"):
+            apply_design_system(app)
+        self.resize(980, 640)
+        self.setMinimumSize(700, 500)
         geometry = self._settings.value("window/geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -112,117 +115,89 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self.controller.refresh)
         self._timer.start()
 
+        self.statusBar().setSizeGripEnabled(False)
+        self.footer_identity = QLabel(f"Honor Control {__version__}")
+        self.footer_identity.setProperty("muted", True)
+        self.statusBar().addPermanentWidget(self.footer_identity)
         self.statusBar().showMessage("Connecting…", 2500)
 
     # UI construction
 
-    @staticmethod
-    def _global_style() -> str:
-        return """
-            QFrame#HonorSidebar {
-                background: palette(alternate-base);
-                border-right: 1px solid palette(mid);
-            }
-            QLabel#HonorSidebarTitle { font-size: 15px; font-weight: 700; }
-            QListWidget#HonorSidebarList {
-                background: palette(alternate-base); border: none; outline: none;
-            }
-            QListWidget#HonorSidebarList::item {
-                padding: 6px 8px; border-radius: 6px;
-            }
-            QListWidget#HonorSidebarList::item:selected {
-                background: palette(highlight); color: palette(highlighted-text);
-            }
-            QFrame#HonorHeader {
-                background: palette(window); border-bottom: 1px solid palette(mid);
-            }
-            QFrame#HonorCard {
-                background: palette(base); border: 1px solid palette(mid);
-                border-radius: 8px;
-            }
-            QLabel#HonorCardTitle { font-weight: 600; font-size: 13px; }
-            QLabel { color: palette(window-text); }
-        """
-
     def _build_ui(self) -> None:
         central = QWidget(self)
-        root = QHBoxLayout(central)
+        central.setObjectName("HonorWindow")
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.setCentralWidget(central)
-        self.setStyleSheet(self._global_style())
-
-        sidebar = self._build_sidebar()
-        root.addWidget(sidebar)
-
-        right = QWidget()
-        rlay = QVBoxLayout(right)
-        rlay.setContentsMargins(0, 0, 0, 0)
-        rlay.setSpacing(0)
-        rlay.addWidget(self._build_header())
+        root.addWidget(self._build_header())
         self.banner = self._build_banner()
-        rlay.addWidget(self.banner)
+        root.addWidget(self.banner)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        self.sidebar_frame = self._build_sidebar()
+        body_layout.addWidget(self.sidebar_frame)
 
         self.stack = QStackedWidget()
+        self.stack.setObjectName("HonorContent")
         for page_cls, _icon, _label in PAGES:
             page = page_cls(self.state)
             page.intent.connect(self._on_intent)
             self._pages.append(page)
             self.stack.addWidget(page)
-        rlay.addWidget(self.stack, 1)
-        root.addWidget(right, 1)
+        body_layout.addWidget(self.stack, 1)
+        root.addWidget(body, 1)
         self.sidebar.setCurrentRow(0)
 
     def _build_sidebar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("HonorSidebar")
-        bar.setMinimumWidth(160)
-        bar.setMaximumWidth(220)
+        bar.setFixedWidth(176)
         lay = QVBoxLayout(bar)
-        lay.setContentsMargins(8, 12, 8, 12)
-        lay.setSpacing(6)
-        title = QLabel("Honor Control")
-        title.setObjectName("HonorSidebarTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(title)
-        subtitle = QLabel("MagicBook management")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: rgba(128, 128, 128, 200); font-size: 11px;")
-        lay.addWidget(subtitle)
+        lay.setContentsMargins(0, 14, 0, 12)
+        lay.setSpacing(0)
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("HonorSidebarList")
-        self.sidebar.setIconSize(QSize(20, 20))
         self.sidebar.setUniformItemSizes(True)
-        self.sidebar.setSpacing(2)
         self.sidebar.setFrameShape(QFrame.Shape.NoFrame)
         self.sidebar.currentRowChanged.connect(self._on_sidebar_changed)
         lay.addWidget(self.sidebar, 1)
-        for _page_cls, icon_name, label in PAGES:
+        for _page_cls, _icon_name, label in PAGES:
             item = QListWidgetItem(label)
-            icon = QIcon.fromTheme(icon_name)
-            if not icon.isNull():
-                item.setIcon(icon)
-            item.setSizeHint(QSize(0, 34))
+            item.setSizeHint(QSize(0, 36))
             self.sidebar.addItem(item)
         return bar
 
     def _build_header(self) -> QWidget:
         header = QFrame()
         header.setObjectName("HonorHeader")
-        header.setMinimumHeight(52)
+        header.setFixedHeight(52)
         h = QHBoxLayout(header)
-        h.setContentsMargins(16, 6, 12, 6)
-        self.page_title = QLabel("Dashboard")
-        self.page_title.setStyleSheet("font-size: 16px; font-weight: 600;")
-        h.addWidget(self.page_title)
+        h.setContentsMargins(20, 0, 16, 0)
+        h.setSpacing(12)
+        brand = QLabel("Honor Control")
+        brand.setObjectName("HonorBrand")
+        h.addWidget(brand)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.VLine)
+        separator.setFixedHeight(20)
+        h.addWidget(separator)
+        self.device_label = QLabel("Detecting device…")
+        self.device_label.setObjectName("HonorDevice")
+        h.addWidget(self.device_label)
         h.addStretch(1)
         self.service_label = QLabel("Service: …")
         h.addWidget(self.service_label)
         self.health_dot = StatusDot(StatusDot.GREY)
         h.addWidget(self.health_dot)
         refresh = QToolButton()
-        refresh.setIcon(QIcon.fromTheme("view-refresh"))
+        refresh.setText("Refresh")
+        refresh.setProperty("quiet", True)
         refresh.setToolTip("Refresh now (Ctrl+R)")
+        refresh.setAccessibleName("Refresh hardware state")
         refresh.clicked.connect(self.controller.refresh)
         h.addWidget(refresh)
         return header
@@ -237,32 +212,21 @@ class MainWindow(QMainWindow):
         self.banner_label.setWordWrap(True)
         bh.addWidget(self.banner_label)
         bh.addStretch(1)
-        banner.setStyleSheet(
-            "QFrame#HonorBanner { background: #fff3cd; border-bottom: 1px solid #ffe69c; }"
-            " QLabel { color: #664d03; }"
-        )
         banner.setVisible(False)
         return banner
 
     def _build_menu(self) -> None:
-        menubar: QMenuBar = self.menuBar()
-        file_menu = QMenu("&File", self)
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.quit_application)
-        file_menu.addAction(quit_action)
-        menubar.addMenu(file_menu)
-        view_menu = QMenu("&View", self)
+        self.addAction(quit_action)
         refresh_action = QAction("&Refresh", self)
         refresh_action.setShortcut(QKeySequence.StandardKey.Refresh)
         refresh_action.triggered.connect(self.controller.refresh)
-        view_menu.addAction(refresh_action)
-        menubar.addMenu(view_menu)
-        help_menu = QMenu("&Help", self)
+        self.addAction(refresh_action)
         about_action = QAction("&About Honor Control", self)
         about_action.triggered.connect(self._about)
-        help_menu.addAction(about_action)
-        menubar.addMenu(help_menu)
+        self.addAction(about_action)
 
     def _connect_signals(self) -> None:
         self.controller.snapshot_received.connect(self.state.set_snapshot)
@@ -273,6 +237,7 @@ class MainWindow(QMainWindow):
         self.controller.operation_completed.connect(self.state.emit_completed)
         self.controller.operation_completed.connect(self._on_operation_completed)
         self.state.connection_changed.connect(self._update_availability)
+        self.state.snapshot_changed.connect(self._update_identity)
         self.state.stale_changed.connect(self._on_stale_changed)
         self.state.error_occurred.connect(
             lambda msg: self.statusBar().showMessage(f"Error: {msg}", 4000)
@@ -283,7 +248,6 @@ class MainWindow(QMainWindow):
     def _on_sidebar_changed(self, row: int) -> None:
         if 0 <= row < len(self._pages):
             self.stack.setCurrentIndex(row)
-            self.page_title.setText(PAGES[row][2])
             self._pages[row].refresh()
 
     # Availability
@@ -303,6 +267,18 @@ class MainWindow(QMainWindow):
 
     def _on_intent(self, method: str, args: object) -> None:
         values = tuple(args) if isinstance(args, (tuple, list)) else ()
+        if method == "navigate" and values:
+            target = str(values[0])
+            row = next(
+                (index for index, page in enumerate(PAGES) if page[2] == target),
+                -1,
+            )
+            if row >= 0:
+                self.sidebar.setCurrentRow(row)
+            return
+        if method == "quit":
+            self.quit_application()
+            return
         if method == "set_close_to_tray":
             self._close_to_tray = bool(values[0]) if values else True
             self._settings.setValue("window/close_to_tray", self._close_to_tray)
@@ -332,6 +308,11 @@ class MainWindow(QMainWindow):
         self.banner_label.setText(f"Incompatible service version: {message}")
         self.banner.setVisible(True)
 
+    def _update_identity(self, snapshot: object) -> None:
+        platform = getattr(snapshot, "platform", None)
+        model = str(getattr(platform, "model", "") or "HONOR laptop")
+        self.device_label.setText(model)
+
     def _on_stale_changed(self, domains: tuple[str, ...]) -> None:
         if domains:
             self.statusBar().showMessage(
@@ -357,6 +338,13 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Keep the compact shell useful at the supported narrow width."""
+        compact = event.size().width() < 820
+        self.sidebar_frame.setFixedWidth(136 if compact else 176)
+        self.device_label.setVisible(not compact)
+        super().resizeEvent(event)
 
     def quit_application(self) -> None:
         """Exit the GUI process explicitly from File or the tray menu."""

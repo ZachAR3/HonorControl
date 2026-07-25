@@ -45,17 +45,25 @@ class DiagnosticsPage(PageBase):
 
         caps = Card("Capabilities")
         self.cap_dots: dict[str, StatusDot] = {}
+        self.cap_labels: dict[str, QLabel] = {}
         grid = QVBoxLayout()
         for key in ("battery", "power", "fan", "gestures", "gpu"):
             h = QHBoxLayout()
-            lbl = QLabel(key)
+            h.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(key.capitalize())
             dot = StatusDot(StatusDot.GREY)
             self.cap_dots[key] = dot
             h.addWidget(lbl)
             h.addStretch(1)
             h.addWidget(dot)
+            state_label = QLabel("Checking…")
+            state_label.setProperty("muted", True)
+            state_label.setMinimumWidth(82)
+            self.cap_labels[key] = state_label
+            h.addWidget(state_label)
             row = QWidget()
             row.setLayout(h)
+            row.setFixedHeight(25)
             grid.addWidget(row)
         wrap = QWidget()
         wrap.setLayout(grid)
@@ -117,12 +125,16 @@ class DiagnosticsPage(PageBase):
             if cap is None:
                 dot.set_color(StatusDot.GREY)
                 dot.setToolTip("Capability has not been probed")
+                self.cap_labels[key].setText("Unknown")
             elif cap.status == "supported":
                 dot.set_color(StatusDot.GREEN)
+                self.cap_labels[key].setText("Ready")
             elif cap.status == "unavailable":
                 dot.set_color(StatusDot.AMBER)
+                self.cap_labels[key].setText("Unavailable")
             else:
                 dot.set_color(StatusDot.RED)
+                self.cap_labels[key].setText("Error")
             if cap is not None:
                 dot.setToolTip(cap.message or cap.reason_code)
 

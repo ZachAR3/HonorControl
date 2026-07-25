@@ -7,6 +7,8 @@ dots, toggle switches, section labels, info rows and a collapsible
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
@@ -19,7 +21,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsDropShadowEffect,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
 
 
 class Card(QFrame):
-    """A softly-shadowed container with a title and a vertical body layout.
+    """A flat, ruled content section with a title and vertical body layout.
 
     Use :attr:`layout` (a :class:`QVBoxLayout`) to add child widgets; the
     built-in title label renders as a bold heading.
@@ -43,40 +44,29 @@ class Card(QFrame):
         self.setObjectName("HonorCard")
         self.setFrameShape(QFrame.Shape.NoFrame)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(10)
+        outer.setContentsMargins(0, 12, 0, 16)
+        outer.setSpacing(8)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("HonorCardTitle")
-        # Use palette-aware bold styling so the title is readable on any theme.
-        self.title_label.setStyleSheet("font-weight: 600; font-size: 13px;")
         self.title_label.setVisible(bool(title))
         outer.addWidget(self.title_label)
         self._body = QVBoxLayout()
-        self._body.setSpacing(8)
+        self._body.setSpacing(6)
         outer.addLayout(self._body)
-        self._apply_shadow()
 
     @property
     def layout(self) -> QVBoxLayout:  # type: ignore[override]
         """Return the body layout callers add widgets to."""
         return self._body
 
-    def _apply_shadow(self) -> None:
-        """Attach a subtle drop shadow so the card lifts off the background."""
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 2)
-        shadow.setColor(QColor(0, 0, 0, 70))
-        self.setGraphicsEffect(shadow)
-
 
 class StatusDot(QWidget):
     """A circular status indicator (green / red / amber / grey)."""
 
-    GREEN = "#27ae60"
-    RED = "#c0392b"
-    AMBER = "#f39c12"
-    GREY = "#7f8c8d"
+    GREEN = "#63B239"
+    RED = "#B74336"
+    AMBER = "#D8A52B"
+    GREY = "#7D7B74"
     _NAMES = {
         GREEN: "healthy",
         RED: "error",
@@ -88,7 +78,7 @@ class StatusDot(QWidget):
         """Create the dot with an initial colour."""
         super().__init__(parent)
         self._color = color
-        self.setFixedSize(14, 14)
+        self.setFixedSize(12, 12)
         self.setAccessibleName(f"Status: {self._NAMES.get(color, 'unknown')}")
 
     def set_color(self, color: str) -> None:
@@ -101,10 +91,9 @@ class StatusDot(QWidget):
         """Draw a filled circle with a thin contrasting ring."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRect(1, 1, 12, 12)
+        rect = QRect(2, 2, 8, 8)
         painter.setBrush(QColor(self._color))
-        # Use a semi-transparent white ring that's visible on any background.
-        painter.setPen(QPen(QColor(255, 255, 255, 120), 1))
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(rect)
 
 
@@ -123,16 +112,14 @@ class ToggleSwitch(QWidget):
         # getter (which PySide may call during construction) never sees an
         # AttributeError.
         self._checked = checked
-        # Widget is 46px wide, knob radius is 9px.
-        # Unchecked: knob at left  → knob_pos = 2  (center at 2+9=11)
-        # Checked:   knob at right → knob_pos = 26 (center at 26+9=35)
-        self._knob_pos = 26.0 if checked else 2.0
-        self.setFixedSize(46, 24)
+        self._knob_pos = 18.0 if checked else 2.0
+        self.setFixedSize(36, 20)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("On/off switch")
         self._knob = QPropertyAnimation(self, b"knob_pos")
-        self._knob.setDuration(140)
+        reduce_motion = os.environ.get("HONOR_CONTROL_REDUCE_MOTION", "").lower()
+        self._knob.setDuration(0 if reduce_motion in {"1", "true", "yes"} else 120)
         self._knob.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def isChecked(self) -> bool:  # noqa: N802 - Qt API naming
@@ -144,7 +131,7 @@ class ToggleSwitch(QWidget):
         if checked == self._checked:
             return
         self._checked = checked
-        self._animate_to(26.0 if checked else 2.0)
+        self._animate_to(18.0 if checked else 2.0)
         self.update()
 
     def _animate_to(self, target: float) -> None:
@@ -171,7 +158,7 @@ class ToggleSwitch(QWidget):
         """Flip state on click."""
         if event.button() == Qt.MouseButton.LeftButton:
             self._checked = not self._checked
-            self._animate_to(26.0 if self._checked else 2.0)
+            self._animate_to(18.0 if self._checked else 2.0)
             self.toggled.emit(self._checked)
         super().mouseReleaseEvent(event)
 
@@ -179,7 +166,7 @@ class ToggleSwitch(QWidget):
         """Support standard keyboard activation."""
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._checked = not self._checked
-            self._animate_to(26.0 if self._checked else 2.0)
+            self._animate_to(18.0 if self._checked else 2.0)
             self.toggled.emit(self._checked)
             event.accept()
             return
@@ -190,13 +177,17 @@ class ToggleSwitch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Track
-        track = QColor("#3daee9") if self._checked else QColor("#808080")
+        track = (
+            self.palette().color(self.palette().ColorRole.Highlight)
+            if self._checked
+            else self.palette().color(self.palette().ColorRole.Mid)
+        )
         painter.setBrush(track)
         painter.setPen(QPen(QColor(0, 0, 0, 0), 0))
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
+        painter.drawRoundedRect(self.rect().adjusted(0, 1, -1, -2), 9, 9)
         # Knob
         painter.setBrush(QColor("#ffffff"))
-        painter.drawEllipse(QPoint(int(self._knob_pos) + 9, 11), 9, 9)
+        painter.drawEllipse(QPoint(int(self._knob_pos) + 8, 10), 7, 7)
 
 
 class SectionLabel(QLabel):
@@ -224,13 +215,12 @@ class InfoRow(QWidget):
     ) -> None:
         """Create the row; call :meth:`set_value` to update."""
         super().__init__(parent)
+        self.setObjectName("HonorInfoRow")
         h = QHBoxLayout(self)
-        h.setContentsMargins(0, 2, 0, 2)
+        h.setContentsMargins(0, 6, 0, 6)
+        h.setSpacing(12)
         self._label = QLabel(label)
-        # palette(mid) is a dimmer text colour that adapts to the theme.
-        # Use a slightly brighter role (WindowText at 70% opacity via CSS alpha)
-        # so labels stay readable on both light and dark backgrounds.
-        self._label.setStyleSheet("color: rgba(128, 128, 128, 200);")
+        self._label.setProperty("muted", True)
         self._value = QLabel(value)
         self._value.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse

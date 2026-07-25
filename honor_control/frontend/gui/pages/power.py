@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -41,34 +42,56 @@ class PowerPage(PageBase):
         self._auto_dirty = False
         self._loading = False
 
-        active = Card("Active power profile")
+        active = Card("Performance mode")
         active_row = QHBoxLayout()
         self.active_combo = QComboBox()
         self.active_combo.currentIndexChanged.connect(self._on_active_combo_changed)
-        self.active_apply = QPushButton("Apply profile")
+        self.active_combo.setVisible(False)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_buttons: dict[str, QPushButton] = {}
+        for entry in POWER_PROFILES:
+            button = QPushButton(entry.label)
+            button.setCheckable(True)
+            button.setMinimumWidth(100)
+            button.clicked.connect(
+                lambda _checked=False, name=entry.name: self._select_active_mode(name)
+            )
+            self.mode_group.addButton(button)
+            self.mode_buttons[entry.name] = button
+            active_row.addWidget(button)
+        active_row.addStretch(1)
+        self.applied_label = QLabel("Applied profile · —")
+        self.applied_label.setProperty("muted", True)
+        active_row.addWidget(self.applied_label)
+        self.active_apply = QPushButton("Apply changes")
+        self.active_apply.setProperty("quiet", True)
         self.active_apply.clicked.connect(
             lambda: self.intent.emit("set_profile", (self.active_combo.currentData(),))
         )
-        active_row.addWidget(self.active_combo, 1)
         active_row.addWidget(self.active_apply)
         active.layout.addLayout(active_row)
         self.register_control(self.active_combo)
         self.register_pending_control("set_profile", self.active_apply)
         self.add_widget(active)
 
-        editor = Card("Profile editor")
+        editor = Card("Profile settings")
         pick_row = QHBoxLayout()
         self.edit_combo = QComboBox()
         self.profile_new = QPushButton("New profile")
         self.profile_new.clicked.connect(self._new_profile)
         self.edit_combo.currentIndexChanged.connect(self._load_profile_editor)
-        pick_row.addWidget(QLabel("Edit:"))
+        pick_row.addWidget(QLabel("Profile"))
         pick_row.addWidget(self.edit_combo, 1)
         pick_row.addWidget(self.profile_new)
+        self.profile_new.setProperty("quiet", True)
         editor.layout.addLayout(pick_row)
 
         form_widget = QWidget()
         form = QFormLayout(form_widget)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(20)
+        form.setVerticalSpacing(0)
         self.profile_name = QLineEdit()
         self.profile_name.setPlaceholderText("lowercase-name")
         self.profile_label = QLineEdit()
@@ -115,6 +138,26 @@ class PowerPage(PageBase):
         form.addRow("Power-profiles-daemon", self.ppd)
         form.addRow("Turbo", self.turbo)
         form.addRow("Maximum CPU performance", self.max_perf)
+        self._metadata_widgets = (
+            self.profile_name,
+            form.labelForField(self.profile_name),
+            self.profile_label,
+            form.labelForField(self.profile_label),
+            self.profile_description,
+            form.labelForField(self.profile_description),
+        )
+        for widget in (
+            self.profile_name,
+            self.profile_label,
+            self.profile_description,
+            self.pl1,
+            self.pl2,
+            self.governor,
+            self.epp,
+            self.ppd,
+            self.max_perf,
+        ):
+            widget.setProperty("rowControl", True)
         editor.layout.addWidget(form_widget)
         for widget in (
             self.profile_name,
@@ -138,9 +181,9 @@ class PowerPage(PageBase):
         self.register_control(self.turbo)
         self.register_control(self.max_perf)
         profile_buttons = QHBoxLayout()
-        self.profile_save = QPushButton("Save profile")
+        self.profile_save = QPushButton("Apply changes")
         self.profile_delete = QPushButton("Delete custom profile")
-        self.profile_reset = QPushButton("Reset built-in values")
+        self.profile_reset = QPushButton("Reset profile")
         self.profile_save.clicked.connect(self._save_profile)
         self.profile_delete.clicked.connect(self._delete_profile)
         self.profile_reset.clicked.connect(self._reset_profile)
@@ -148,6 +191,9 @@ class PowerPage(PageBase):
         profile_buttons.addWidget(self.profile_reset)
         profile_buttons.addWidget(self.profile_delete)
         profile_buttons.addWidget(self.profile_save)
+        self.profile_save.setProperty("quiet", True)
+        self.profile_delete.setProperty("quiet", True)
+        self.profile_reset.setProperty("quiet", True)
         editor.layout.addLayout(profile_buttons)
         for widget in (
             self.edit_combo,
@@ -164,6 +210,9 @@ class PowerPage(PageBase):
         automatic = Card("Automatic AC / battery switching")
         auto_form_widget = QWidget()
         auto_form = QFormLayout(auto_form_widget)
+        auto_form.setContentsMargins(0, 0, 0, 0)
+        auto_form.setHorizontalSpacing(20)
+        auto_form.setVerticalSpacing(0)
         self.auto_enabled = QCheckBox("Enable automatic switching")
         self.auto_ac = QComboBox()
         self.auto_battery = QComboBox()
@@ -178,6 +227,13 @@ class PowerPage(PageBase):
         auto_form.addRow("When running on battery", self.auto_battery)
         auto_form.addRow("After switching to AC", self.auto_ac_script)
         auto_form.addRow("After switching to battery", self.auto_battery_script)
+        for widget in (
+            self.auto_ac,
+            self.auto_battery,
+            self.auto_ac_script,
+            self.auto_battery_script,
+        ):
+            widget.setProperty("rowControl", True)
         automatic.layout.addWidget(auto_form_widget)
         warning = QLabel(
             "Scripts run as root after a successful transition, without a shell, "
@@ -185,11 +241,13 @@ class PowerPage(PageBase):
             "be root-owned and not group/world-writable."
         )
         warning.setWordWrap(True)
-        warning.setStyleSheet("color: rgba(180, 110, 0, 220); font-size: 11px;")
+        warning.setProperty("muted", True)
+        warning.setStyleSheet("font-size: 11px;")
         automatic.layout.addWidget(warning)
         auto_bottom = QHBoxLayout()
         self.script_status = QLabel("Not run")
         self.auto_save = QPushButton("Save automatic settings")
+        self.auto_save.setProperty("quiet", True)
         self.auto_save.clicked.connect(self._save_auto)
         auto_bottom.addWidget(self.script_status, 1)
         auto_bottom.addWidget(self.auto_save)
@@ -218,6 +276,7 @@ class PowerPage(PageBase):
         self.profile_row = InfoRow("Applied profile", "—")
         for row in (self.temp_row, self.fan_row, self.ac_row, self.profile_row):
             telemetry.layout.addWidget(row)
+        telemetry.setVisible(False)
         self.add_widget(telemetry)
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
@@ -272,6 +331,9 @@ class PowerPage(PageBase):
             self._active_combo_dirty = False
         if not self._active_combo_dirty:
             self._select_data(self.active_combo, applied)
+        for name, button in self.mode_buttons.items():
+            button.setChecked(name == self.active_combo.currentData())
+        self.applied_label.setText(f"Applied profile · {applied or 'Not reported'}")
         if self._auto_matches(snap):
             self._auto_dirty = False
         if not self._auto_dirty:
@@ -361,6 +423,7 @@ class PowerPage(PageBase):
         self.max_perf.setValue(profile.max_perf_pct)
         self.profile_delete.setEnabled(not profile.built_in)
         self.profile_reset.setEnabled(profile.built_in)
+        self._set_metadata_visible(not profile.built_in)
         self._loading = False
         self._profile_dirty = False
 
@@ -379,6 +442,7 @@ class PowerPage(PageBase):
         self.max_perf.setValue(100)
         self.profile_delete.setEnabled(False)
         self.profile_reset.setEnabled(False)
+        self._set_metadata_visible(True)
         self._loading = False
         self._profile_dirty = True
 
@@ -390,6 +454,19 @@ class PowerPage(PageBase):
         """Track user selection so snapshots don't snap the combo back."""
         if not self._loading:
             self._active_combo_dirty = True
+        for name, button in self.mode_buttons.items():
+            button.setChecked(name == self.active_combo.currentData())
+
+    def _select_active_mode(self, name: str) -> None:
+        self._select_data(self.active_combo, name)
+        self._active_combo_dirty = True
+        for mode, button in self.mode_buttons.items():
+            button.setChecked(mode == name)
+
+    def _set_metadata_visible(self, visible: bool) -> None:
+        for widget in self._metadata_widgets:
+            if widget is not None:
+                widget.setVisible(visible)
 
     def _save_profile(self) -> None:
         self.intent.emit(

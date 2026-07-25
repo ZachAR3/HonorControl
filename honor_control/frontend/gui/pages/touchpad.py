@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -83,8 +84,8 @@ class _FirmwareSettingRow(QWidget):
         spec = TOUCHPAD_SETTING_SPECS[setting]
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 7, 2, 7)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, 5, 0, 5)
+        layout.setSpacing(12)
 
         copy_host = QWidget()
         copy_layout = QVBoxLayout(copy_host)
@@ -95,14 +96,15 @@ class _FirmwareSettingRow(QWidget):
         copy_layout.addWidget(self.title_label)
         description_label = QLabel(description)
         description_label.setWordWrap(True)
-        description_label.setStyleSheet(
-            "color: rgba(128, 128, 128, 210); font-size: 11px;"
-        )
+        description_label.setProperty("muted", True)
+        description_label.setStyleSheet("font-size: 11px;")
         copy_layout.addWidget(description_label)
         layout.addWidget(copy_host, 1)
 
         self.combo = QComboBox()
-        self.combo.setMinimumWidth(170)
+        self.combo.setMinimumWidth(112)
+        self.combo.setMaximumWidth(150)
+        self.combo.setProperty("rowControl", True)
         self.combo.addItem("Not configured", None)
         if spec.labels:
             for value, label in enumerate(spec.labels):
@@ -188,6 +190,12 @@ class TouchpadPage(PageBase):
         self._support_pending = False
 
         self._build_status()
+        self._firmware_grid = QGridLayout()
+        self._firmware_grid.setContentsMargins(0, 0, 0, 0)
+        self._firmware_grid.setHorizontalSpacing(24)
+        self._firmware_grid.setVerticalSpacing(0)
+        self._firmware_grid.setColumnStretch(0, 1)
+        self._firmware_grid.setColumnStretch(1, 1)
         self._build_firmware_group(
             "Touch response",
             (
@@ -197,10 +205,15 @@ class TouchpadPage(PageBase):
                 TouchpadSetting.PRESS_PICTURE,
                 TouchpadSetting.MOUSE_LIKE_MODE,
             ),
+            0,
+            0,
+            3,
         )
         self._build_firmware_group(
             "Multitouch",
             (TouchpadSetting.THREE_FINGER_DRAG,),
+            0,
+            1,
         )
         self._build_firmware_group(
             "Edge gestures",
@@ -210,6 +223,8 @@ class TouchpadPage(PageBase):
                 TouchpadSetting.EDGE_CONTROL_CENTER,
                 TouchpadSetting.EDGE_CLOSE_OR_MINIMIZE,
             ),
+            1,
+            1,
         )
         self._build_firmware_group(
             "Knuckle gestures",
@@ -217,7 +232,15 @@ class TouchpadPage(PageBase):
                 TouchpadSetting.KNUCKLE_SCREENSHOT,
                 TouchpadSetting.KNUCKLE_SCREEN_RECORD,
             ),
+            2,
+            1,
         )
+        firmware_host = QWidget()
+        firmware_host.setLayout(self._firmware_grid)
+        self.add_widget(firmware_host)
+        actions_card = Card("")
+        actions_card.layout.addLayout(self._firmware_actions)
+        self.add_widget(actions_card)
         self._build_runtime()
         self._build_mappings()
         self.add_stretch()
@@ -250,15 +273,16 @@ class TouchpadPage(PageBase):
             "not written that value yet."
         )
         explanation.setWordWrap(True)
-        explanation.setStyleSheet("color: rgba(128, 128, 128, 210);")
+        explanation.setProperty("muted", True)
+        explanation.setVisible(False)
         status.layout.addWidget(explanation)
 
         self.device_row = InfoRow("Validated HID endpoint", "—")
         self.master_row = InfoRow("WMI master switch", "—")
         self.support_row = InfoRow("Capability query", "Not run")
         status.layout.addWidget(self.device_row)
-        status.layout.addWidget(self.master_row)
-        status.layout.addWidget(self.support_row)
+        self.master_row.setVisible(False)
+        self.support_row.setVisible(False)
         actions = QHBoxLayout()
         actions.addStretch(1)
         self.discard_button = QPushButton("Discard changes")
@@ -270,22 +294,32 @@ class TouchpadPage(PageBase):
         self.apply_button.clicked.connect(self._apply_firmware_changes)
         self.register_control(self.apply_button)
         actions.addWidget(self.apply_button)
-        status.layout.addLayout(actions)
+        self._firmware_actions = actions
         self.add_widget(status)
 
     def _build_firmware_group(
         self,
         title: str,
         settings: tuple[TouchpadSetting, ...],
+        grid_row: int,
+        column: int,
+        row_span: int = 1,
     ) -> None:
         card = Card(title)
         for setting in settings:
-            row = _FirmwareSettingRow(setting)
-            row.changed.connect(self._stage_firmware_setting)
-            self._firmware_rows[setting.value] = row
-            self.register_control(row.combo)
-            card.layout.addWidget(row)
-        self.add_widget(card)
+            setting_row = _FirmwareSettingRow(setting)
+            setting_row.changed.connect(self._stage_firmware_setting)
+            self._firmware_rows[setting.value] = setting_row
+            self.register_control(setting_row.combo)
+            card.layout.addWidget(setting_row)
+        self._firmware_grid.addWidget(
+            card,
+            grid_row,
+            column,
+            row_span,
+            1,
+            Qt.AlignmentFlag.AlignTop,
+        )
 
     def _build_runtime(self) -> None:
         card = Card("Desktop gesture dispatch")
@@ -294,7 +328,7 @@ class TouchpadPage(PageBase):
             "keyboard shortcuts. It is independent of the firmware settings above."
         )
         description.setWordWrap(True)
-        description.setStyleSheet("color: rgba(128, 128, 128, 210);")
+        description.setProperty("muted", True)
         card.layout.addWidget(description)
         self.daemon_row = InfoRow("Dispatch service", "—")
         self.events_row = InfoRow("Reports / shortcuts emitted", "0 / 0")
@@ -316,7 +350,7 @@ class TouchpadPage(PageBase):
             "are consumed live by the gesture dispatch service."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: rgba(128, 128, 128, 210);")
+        intro.setProperty("muted", True)
         card.layout.addWidget(intro)
         controls = QHBoxLayout()
         enable_all = QPushButton("Enable all")

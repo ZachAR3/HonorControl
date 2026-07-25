@@ -14,6 +14,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from honor_control import __version__
+from honor_control.frontend.gui.design import apply_design_system
 from honor_control.frontend.single_instance import acquire_single_instance
 
 
@@ -54,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     if not QIcon.themeName():
         QIcon.setThemeName("breeze")
     _apply_metadata(app)
+    apply_design_system(app)
     app.setQuitOnLastWindowClosed(False)
     instance_lock = acquire_single_instance("gui")
     if instance_lock is None:

@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QRadioButton,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -43,28 +42,46 @@ class FanPage(PageBase):
         self._curve_dirty = False
         self._mode_dirty = False
         self._loading_curve = False
-        status = Card("Fan status")
+        status = Card("")
+        summary = QHBoxLayout()
+        self.temp_summary = QLabel("—")
+        self.temp_summary.setStyleSheet("font-weight: 600;")
+        summary.addWidget(self.temp_summary)
+        self.rpm_summary = QLabel("—")
+        self.rpm_summary.setProperty("muted", True)
+        summary.addWidget(self.rpm_summary)
+        summary.addStretch(1)
+        self.mode_summary = QLabel("—")
+        self.mode_summary.setProperty("muted", True)
+        summary.addWidget(self.mode_summary)
+        status.layout.addLayout(summary)
         self.temp_row = InfoRow("Temperature", "—")
         self.speed_row = InfoRow("Target speed", "—")
         self.rpm_row = InfoRow("Measured speed", "—")
         self.mode_row = InfoRow("Mode", "—")
         for row in (self.temp_row, self.speed_row, self.rpm_row, self.mode_row):
-            status.layout.addWidget(row)
+            row.setVisible(False)
         self.add_widget(status)
 
-        mode_card = Card("Fan mode")
+        mode_card = Card("")
         self.mode_group = QButtonGroup(self)
         self.mode_group.setExclusive(True)
-        self.rb_auto = QRadioButton("Stock (Auto — EC firmware curve)")
-        self.rb_curve = QRadioButton("Custom curve")
+        self.rb_auto = QPushButton("Stock auto")
+        self.rb_curve = QPushButton("Custom curve")
         self.rb_curve.setToolTip("Configure and activate a validated temperature curve")
-        self.rb_manual = QRadioButton("Manual speed")
+        self.rb_manual = QPushButton("Manual")
+        for button in (self.rb_auto, self.rb_curve, self.rb_manual):
+            button.setCheckable(True)
         self.mode_group.addButton(self.rb_auto, 0)
         self.mode_group.addButton(self.rb_curve, 1)
         self.mode_group.addButton(self.rb_manual, 2)
-        mode_card.layout.addWidget(self.rb_auto)
-        mode_card.layout.addWidget(self.rb_curve)
-        mode_card.layout.addWidget(self.rb_manual)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(0)
+        mode_row.addWidget(self.rb_auto)
+        mode_row.addWidget(self.rb_curve)
+        mode_row.addWidget(self.rb_manual)
+        mode_row.addStretch(1)
+        mode_card.layout.addLayout(mode_row)
 
         self.manual_widget = QWidget()
         mh = QHBoxLayout(self.manual_widget)
@@ -105,6 +122,7 @@ class FanPage(PageBase):
         profile_row = QHBoxLayout()
         profile_row.addWidget(QLabel("Profile:"))
         self.profile_combo = QComboBox()
+        self.profile_combo.setProperty("rowControl", True)
         self.profile_combo.addItems(
             ["default", *(entry.name for entry in POWER_PROFILES)]
         )
@@ -138,9 +156,8 @@ class FanPage(PageBase):
             "Click to add, drag to edit, right-click to remove. "
             "2–12 points; 95 °C and above must be 100%."
         )
-        self.curve_hint.setStyleSheet(
-            "color: rgba(128, 128, 128, 200); font-size: 11px;"
-        )
+        self.curve_hint.setProperty("muted", True)
+        self.curve_hint.setStyleSheet("font-size: 11px;")
         self.curve_hint.setWordWrap(True)
         cl.addWidget(self.curve_hint)
         self.curve_apply = QPushButton("Validate and apply curve")
@@ -189,8 +206,12 @@ class FanPage(PageBase):
         temp = fan.temp_mc
         try:
             self.temp_row.set_value(f"{int(temp) // 1000} °C" if temp else "—")
+            self.temp_summary.setText(
+                f"{int(temp) // 1000} °C CPU" if temp else "Temperature unavailable"
+            )
         except (TypeError, ValueError):
             self.temp_row.set_value("—")
+            self.temp_summary.setText("Temperature unavailable")
         speed = fan.target_speed
         self.speed_row.set_value(
             f"{speed} %"
@@ -206,8 +227,18 @@ class FanPage(PageBase):
             if fan.available
             else "Unavailable"
         )
+        self.rpm_summary.setText(
+            f"{fan.measured_rpm:,} RPM"
+            if fan.measured_rpm is not None
+            else "RPM not exposed"
+        )
         self.mode_row.set_value(
             f"{fan.mode} — {fan.last_error}" if fan.last_error else str(fan.mode)
+        )
+        self.mode_summary.setText(
+            f"{str(fan.mode).replace('_', ' ').title()} active"
+            if fan.available
+            else "Fan controls unavailable"
         )
         saved = fan.curves.get(self.profile_combo.currentText(), "")
         current = format_curve(list(self.curve_graph.points))
@@ -300,7 +331,10 @@ class FanPage(PageBase):
         method = operation_id.split(":", 1)[0]
         if method not in {"set_stock_auto", "set_curve", "set_manual"}:
             return
-        if result is not None and getattr(result, "status", None) == OperationStatus.SUCCESS:
+        if (
+            result is not None
+            and getattr(result, "status", None) == OperationStatus.SUCCESS
+        ):
             accepted = (
                 bool(getattr(result, "persisted", False))
                 if method == "set_curve"
