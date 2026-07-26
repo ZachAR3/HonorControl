@@ -30,7 +30,8 @@ services.
   the final validation step
 
 See [touchpad protocol and Linux validation](docs/gesture-linux-remaining-work.md) for
-the confirmed protocol, Windows capture procedure, and implementation gate.
+the statically verified protocol, Windows capture procedure, and implementation
+gate. The output direction still requires Linux hardware replay.
 
 ## Architecture
 
@@ -169,6 +170,10 @@ honor-control-gui        # GUI + integrated system tray
 honor-control-tray       # optional tray-only process
 ```
 
+`honor-touchpadctl` is a root-only diagnostic that talks to hidraw directly.
+Do not run its write commands while `honor-control.service` is applying
+touchpad settings; normal GUI and `honorctl` operations should use the daemon.
+
 Closing the GUI window hides it to the tray by default. Left-click the tray
 icon to restore the existing window; its menu provides quick power-profile,
 charge-limit, gesture-daemon, and touchpad controls. Use **Quit** from the File
@@ -180,8 +185,8 @@ or tray menu to exit. This behavior can be disabled on the Settings page.
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run non-hardware tests
-pytest -m "not hardware"
+# Run the offline/fake-hardware test suite
+pytest
 
 # Run lint
 ruff check honor_control tests

@@ -36,4 +36,5 @@ else
 fi
 [[ $# -gt 0 ]] && ARGS+=("$@")
 
+cd "$ROOT"
 exec "$PY" -m honor_control.backend.service "${ARGS[@]}"

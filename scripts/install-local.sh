@@ -197,11 +197,13 @@ done
 
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpadctl" /usr/bin/honor-touchpadctl
 assert_replaceable "$ROOT/packaging/systemd/honor-control.service" /etc/systemd/system/honor-control.service
+assert_replaceable "$ROOT/packaging/modules-load.d/honor-control.conf" /usr/lib/modules-load.d/honor-control.conf
 assert_replaceable "$ROOT/packaging/dbus/org.honorlinux.Control1.conf" /usr/share/dbus-1/system.d/org.honorlinux.Control1.conf
 assert_replaceable "$ROOT/packaging/dbus/org.honorlinux.Control1.service" /usr/share/dbus-1/system-services/org.honorlinux.Control1.service
 assert_replaceable "$ROOT/packaging/polkit/org.honorlinux.control.policy" /usr/share/polkit-1/actions/org.honorlinux.control.policy
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/share/applications/org.honorlinux.Control.desktop
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop
+assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml
@@ -254,12 +256,20 @@ if command -v systemd-analyze >/dev/null 2>&1; then
 fi
 
 echo "==> [4/7] Installing system packaging files"
+# Adopt a prior touchpad-only install into this transaction. Its ownership
+# manifest would otherwise survive and conflict with the full uninstaller.
+if [[ -f /usr/lib/honor-touchpad/installed-files.sha256 ]]; then
+    backup_destination /usr/lib/honor-touchpad/installed-files.sha256
+    rm -f /usr/lib/honor-touchpad/installed-files.sha256
+fi
 install_managed "$ROOT/packaging/systemd/honor-control.service" /etc/systemd/system/honor-control.service 0644
+install_managed "$ROOT/packaging/modules-load.d/honor-control.conf" /usr/lib/modules-load.d/honor-control.conf 0644
 install_managed "$ROOT/packaging/dbus/org.honorlinux.Control1.conf" /usr/share/dbus-1/system.d/org.honorlinux.Control1.conf 0644
 install_managed "$ROOT/packaging/dbus/org.honorlinux.Control1.service" /usr/share/dbus-1/system-services/org.honorlinux.Control1.service 0644
 install_managed "$ROOT/packaging/polkit/org.honorlinux.control.policy" /usr/share/polkit-1/actions/org.honorlinux.control.policy 0644
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/share/applications/org.honorlinux.Control.desktop 0644
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop 0644
+install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop 0644
 install_managed "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
 install_managed "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore 0755
 install_managed "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml 0644
@@ -287,6 +297,13 @@ done
 echo "==> [7/7] Reloading services"
 systemctl daemon-reload
 systemctl reload dbus 2>/dev/null || true
+command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+for module in acpi_call uinput; do
+    if ! modprobe "$module" 2>/dev/null; then
+        echo "warning: kernel module $module is unavailable; related features will be disabled" >&2
+    fi
+done
 if $WAS_ACTIVE; then
     if ! systemctl restart honor-control.service; then
         echo "error: new service failed; restoring previous release" >&2
@@ -318,6 +335,16 @@ for destination in "${MANAGED_DESTS[@]}"; do
     [[ -f "$destination" && ! -L "$destination" ]] && sha256sum "$destination" >> "$MANIFEST"
 done
 COMMITTED=true
+
+# Keep the active release and one known-good predecessor for manual rollback.
+# Older project-owned release directories only waste space after a successful
+# transaction.
+for candidate in "$INSTALL_ROOT"/releases/*; do
+    [[ -d "$candidate" ]] || continue
+    [[ "$candidate" == "$RELEASE_DIR" || "$candidate" == "$OLD_RELEASE" ]] && continue
+    rm -rf -- "$candidate" || \
+        echo "warning: could not prune old release $candidate" >&2
+done
 
 echo
 echo "Done. Enable and start the service with:"

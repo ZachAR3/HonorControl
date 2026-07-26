@@ -22,8 +22,8 @@ hardware writes.
 ## Test commands
 
 ```bash
-# Run all non-hardware tests
-pytest -m "not hardware"
+# Run the offline/fake-hardware test suite
+pytest
 
 # Run a specific test layer
 pytest tests/test_core.py          # domain validation
@@ -48,20 +48,13 @@ Run before committing:
 ```bash
 ruff check honor_control tests
 python -m compileall honor_control
-pytest -q -m "not hardware"
+pytest -q
 QT_QPA_PLATFORM=offscreen python -c "from honor_control.frontend.gui.app import main; print('GUI OK')"
 ```
 
-## Hardware test procedure
+## Manual hardware verification
 
-Hardware tests are **not** run in CI. They require explicit opt-in:
-
-```bash
-# Run hardware tests (requires real Honor hardware + root)
-pytest -m hardware
-```
-
-Hardware tests:
+The automated suite never accesses physical hardware. Manual verification must:
 - Start from stock mode.
 - Apply one conservative curve.
 - Observe bounded writes for a fixed interval.

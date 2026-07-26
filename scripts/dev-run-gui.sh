@@ -24,4 +24,5 @@ if [[ -z "$PY" ]]; then
     exit 1
 fi
 
+cd "$ROOT"
 exec "$PY" -m honor_control.frontend.gui.app "$@"

@@ -61,6 +61,11 @@ Detection checks:
   the descriptor-verified vendor collection (`ff00:0001`, report ID `0x0e`,
   9-byte input/output reports).
 
+The system installer writes a `modules-load.d` entry for `acpi_call` and
+`uinput` and attempts to load both immediately. If the distribution does not
+provide `acpi_call`, fan control remains unavailable until that module is
+installed; the service itself stays hardened with kernel-module loading denied.
+
 ### GPU mitigation
 
 - Detection only: the capability probe looks for i915 or xe GPU IRQs in

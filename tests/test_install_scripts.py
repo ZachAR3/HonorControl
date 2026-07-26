@@ -38,6 +38,8 @@ def test_installer_has_transaction_and_offline_mode() -> None:
     assert "assert_replaceable" in source
     assert "refusing to replace unrelated" in source
     assert "COMMITTED=true" in source
+    assert "Keep the active release and one known-good predecessor" in source
+    assert "Adopt a prior touchpad-only install" in source
 
 
 def test_uninstaller_checks_ownership_and_stops_touchpad_service() -> None:
@@ -50,7 +52,7 @@ def test_uninstaller_checks_ownership_and_stops_touchpad_service() -> None:
 
 def test_privileged_touchpad_wrapper_uses_isolated_trusted_imports() -> None:
     source = TOUCHPAD_WRAPPER.read_text(encoding="utf-8")
-    assert "exec /usr/bin/python3 -I -c" in source
+    assert "exec /usr/bin/python3 -I -P -c" in source
     assert 'sys.path.insert(0, "/usr/lib/honor-touchpad")' in source
     assert "PYTHONPATH" not in source
     assert "python3 -m" not in source
@@ -93,6 +95,17 @@ def test_resume_jobs_share_one_ordered_transaction() -> None:
     assert source.count("systemctl --no-block restart") == 2
 
 
-def test_smoke_suite_always_excludes_hardware_tests() -> None:
+def test_smoke_suite_runs_the_offline_suite_without_a_noop_marker() -> None:
     source = SMOKE.read_text(encoding="utf-8")
-    assert '-m "not hardware"' in source
+    assert '-m "not hardware"' not in source
+
+
+def test_installer_provisions_required_modules_and_tray_autostart() -> None:
+    source = INSTALL.read_text(encoding="utf-8")
+    assert "/usr/lib/modules-load.d/honor-control.conf" in source
+    assert "/etc/xdg/autostart/org.honorlinux.Control.Tray.desktop" in source
+    modules = (ROOT / "packaging/modules-load.d/honor-control.conf").read_text(
+        encoding="utf-8"
+    )
+    assert "acpi_call" in modules
+    assert "uinput" in modules

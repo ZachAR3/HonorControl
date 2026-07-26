@@ -78,11 +78,13 @@ if [[ -f "$MANIFEST" ]]; then
     done < "$MANIFEST"
 else
     remove_if_owned /etc/systemd/system/honor-control.service "$ROOT/packaging/systemd/honor-control.service"
+    remove_if_owned /usr/lib/modules-load.d/honor-control.conf "$ROOT/packaging/modules-load.d/honor-control.conf"
     remove_if_owned /usr/share/dbus-1/system.d/org.honorlinux.Control1.conf "$ROOT/packaging/dbus/org.honorlinux.Control1.conf"
     remove_if_owned /usr/share/dbus-1/system-services/org.honorlinux.Control1.service "$ROOT/packaging/dbus/org.honorlinux.Control1.service"
     remove_if_owned /usr/share/polkit-1/actions/org.honorlinux.control.policy "$ROOT/packaging/polkit/org.honorlinux.control.policy"
     remove_if_owned /usr/share/applications/org.honorlinux.Control.desktop "$ROOT/packaging/desktop/org.honorlinux.Control.desktop"
     remove_if_owned /usr/share/applications/org.honorlinux.Control.Tray.desktop "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop"
+    remove_if_owned /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop"
     remove_if_owned /etc/systemd/system/honor-touchpad-restore.service "$ROOT/packaging/systemd/honor-touchpad-restore.service"
     remove_if_owned /usr/lib/systemd/system-sleep/honor-touchpad-restore "$ROOT/packaging/systemd/honor-touchpad-system-sleep"
     remove_if_owned /usr/share/doc/honor-control/honor-touchpad.example.toml "$ROOT/packaging/touchpad/honor-touchpad.example.toml"
@@ -119,6 +121,9 @@ fi
 
 echo "==> Reloading systemd"
 systemctl daemon-reload
+systemctl reload dbus 2>/dev/null || true
+command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database /usr/share/applications 2>/dev/null || true
 
 echo
 echo "Done. honor-control has been removed."
