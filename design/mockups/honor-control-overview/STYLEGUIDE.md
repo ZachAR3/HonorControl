@@ -95,8 +95,8 @@ It is not an enterprise dashboard, a marketing site, or a decorative AI concept.
   adjacent borders form one visual group.
 - Text actions use the accent color with no border or fill. Reserve filled
   accent buttons for selected states and the rare primary action.
-- Form-style configuration rows use a shared label column and a borderless
-  value control over a 1px bottom rule.
+- Form-style configuration rows use a shared label column and a value control
+  with a visible surface and border so editability is explicit.
 
 ## Component patterns
 
@@ -120,6 +120,9 @@ It is not an enterprise dashboard, a marketing site, or a decorative AI concept.
 - Selected segmented controls use the accent fill and white text.
 - Disabled controls retain their geometry and use muted text with a rule-color
   border; pending hardware actions disable only the affected control.
+- Mouse-wheel and trackpad-scroll gestures over combo boxes, numeric inputs,
+  and sliders scroll the page and never change the hovered value. Values are
+  changed only through an intentional click, drag, or keyboard action.
 - Status is always communicated with text as well as color.
 - Custom animation is limited to the compact toggle transition. It is disabled
   without changing state when `HONOR_CONTROL_REDUCE_MOTION=1` is set.

@@ -76,6 +76,11 @@ class PowerPage(PageBase):
         self.add_widget(active)
 
         editor = Card("Profile settings")
+        edit_hint = QLabel(
+            "Editable · choose or type values, then select Apply changes."
+        )
+        edit_hint.setProperty("editHint", True)
+        editor.layout.addWidget(edit_hint)
         pick_row = QHBoxLayout()
         self.edit_combo = QComboBox()
         self.profile_new = QPushButton("New profile")
@@ -208,6 +213,11 @@ class PowerPage(PageBase):
         self.add_widget(editor)
 
         automatic = Card("Automatic AC / battery switching")
+        auto_hint = QLabel(
+            "Editable · automatic profile and transition-script settings."
+        )
+        auto_hint.setProperty("editHint", True)
+        automatic.layout.addWidget(auto_hint)
         auto_form_widget = QWidget()
         auto_form = QFormLayout(auto_form_widget)
         auto_form.setContentsMargins(0, 0, 0, 0)

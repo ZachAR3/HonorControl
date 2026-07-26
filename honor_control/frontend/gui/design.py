@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtGui import QColor, QFont, QPalette, QWheelEvent
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QSlider,
+    QWidget,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,60 @@ DARK = Theme(
 )
 
 
+class WheelControlGuard(QObject):
+    """Route wheel gestures over value controls to their containing page.
+
+    Native Qt combo boxes, spin boxes, and sliders otherwise mutate as soon as
+    the pointer happens to be over them. Honor Control reserves the wheel for
+    page scrolling; values remain editable by click, drag, or keyboard.
+    """
+
+    _CONTROL_TYPES = (QComboBox, QAbstractSpinBox, QSlider)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.Wheel or not isinstance(
+            watched, self._CONTROL_TYPES
+        ):
+            return False
+        if not isinstance(event, QWheelEvent):
+            return True
+        scroll_area = self._containing_scroll_area(watched)
+        if scroll_area is not None:
+            self._scroll(scroll_area, event)
+        event.accept()
+        return True
+
+    @staticmethod
+    def _containing_scroll_area(widget: QWidget) -> QAbstractScrollArea | None:
+        parent = widget.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QAbstractScrollArea):
+                return parent
+            parent = parent.parentWidget()
+        return None
+
+    @staticmethod
+    def _scroll(scroll_area: QAbstractScrollArea, event: QWheelEvent) -> None:
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        vertical = scroll_area.verticalScrollBar()
+        horizontal = scroll_area.horizontalScrollBar()
+        if pixel.y():
+            vertical.setValue(vertical.value() - pixel.y())
+        elif angle.y():
+            steps = angle.y() / 120
+            vertical.setValue(
+                vertical.value() - round(steps * vertical.singleStep() * 3)
+            )
+        elif pixel.x():
+            horizontal.setValue(horizontal.value() - pixel.x())
+        elif angle.x():
+            steps = angle.x() / 120
+            horizontal.setValue(
+                horizontal.value() - round(steps * horizontal.singleStep() * 3)
+            )
+
+
 def system_prefers_dark(app: QApplication) -> bool:
     """Return whether the desktop palette currently uses a dark window color."""
     return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
@@ -99,6 +161,9 @@ def apply_design_system(app: QApplication) -> Theme:
     app.setFont(font)
     app.setStyleSheet(_style_sheet(theme))
     app.setProperty("honorTheme", "dark" if theme is DARK else "light")
+    if not hasattr(app, "_honor_wheel_guard"):
+        app._honor_wheel_guard = WheelControlGuard(app)  # type: ignore[attr-defined]
+        app.installEventFilter(app._honor_wheel_guard)  # type: ignore[attr-defined]
     return theme
 
 
@@ -170,6 +235,10 @@ def _style_sheet(t: Theme) -> str:
             font-size: 20px;
             font-weight: 600;
         }}
+        QLabel[editHint="true"] {{
+            color: {t.accent};
+            font-size: 12px;
+        }}
         QFrame#HonorCard {{
             background: transparent;
             border: none;
@@ -225,12 +294,16 @@ def _style_sheet(t: Theme) -> str:
         }}
         QComboBox[rowControl="true"], QLineEdit[rowControl="true"],
         QSpinBox[rowControl="true"], QDoubleSpinBox[rowControl="true"] {{
-            background: transparent;
-            border: none;
-            border-bottom: 1px solid {t.rule};
-            border-radius: 0;
-            min-height: 24px;
-            padding: 0 6px;
+            background: {t.control};
+            border: 1px solid {t.rule};
+            border-radius: 3px;
+            min-height: 26px;
+            padding: 0 8px;
+        }}
+        QComboBox[rowControl="true"]:focus, QLineEdit[rowControl="true"]:focus,
+        QSpinBox[rowControl="true"]:focus, QDoubleSpinBox[rowControl="true"]:focus {{
+            background: {t.surface};
+            border-color: {t.accent};
         }}
         QPushButton:disabled, QToolButton:disabled, QComboBox:disabled,
         QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{

@@ -413,6 +413,36 @@ class TestGuiPageConstruction:
         page._on_snapshot(snap)
         assert page.info_rows["model"].set_value is not None
 
+    def test_experimental_gpu_capability_is_not_shown_as_an_error(self, qapp) -> None:
+        from honor_control.core.errors import CapabilityStatus
+        from honor_control.core.models import Capability
+        from honor_control.frontend.gui.pages.diagnostics import DiagnosticsPage
+
+        state = GuiState()
+        page = DiagnosticsPage(state)
+        page._on_snapshot(
+            SystemSnapshot(
+                capabilities={
+                    "gpu": Capability(
+                        status=CapabilityStatus.EXPERIMENTAL,
+                        message="Restore is not yet supported",
+                    )
+                }
+            )
+        )
+
+        assert page.cap_labels["gpu"].text() == "Experimental"
+        assert page.cap_dots["gpu"].accessibleName() == "Status: warning"
+
+    def test_diagnostics_can_save_loaded_logs(self, qapp, tmp_path) -> None:
+        from honor_control.frontend.gui.pages.diagnostics import DiagnosticsPage
+
+        page = DiagnosticsPage(GuiState())
+        destination = tmp_path / "honor-control.log"
+        page._save_logs(str(destination), ["first", "second"])  # noqa: SLF001
+
+        assert destination.read_text(encoding="utf-8") == "first\nsecond\n"
+
     def test_settings_page_construction(self, qapp) -> None:
         from honor_control.frontend.gui.pages.settings import SettingsPage
 
@@ -496,6 +526,88 @@ class TestGuiPageConstruction:
         assert toggle.isChecked() is True
         assert toggled == [True]
         assert toggle.accessibleName()
+
+    def test_wheel_over_value_control_scrolls_page_without_mutating(self, qapp) -> None:
+        from PySide6.QtCore import QPoint, QPointF
+        from PySide6.QtGui import QWheelEvent
+
+        from honor_control.frontend.gui.design import WheelControlGuard
+        from honor_control.frontend.gui.pages.power import PowerPage
+
+        page = PowerPage(GuiState())
+        page.resize(700, 260)
+        page.show()
+        qapp.processEvents()
+        scroll_bar = page._scroll.verticalScrollBar()  # noqa: SLF001
+        scroll_bar.setValue(min(20, scroll_bar.maximum()))
+        before_scroll = scroll_bar.value()
+        before_value = page.pl1.value()
+        event = QWheelEvent(
+            QPointF(2, 2),
+            QPointF(2, 2),
+            QPoint(),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+
+        handled = WheelControlGuard().eventFilter(page.pl1, event)
+
+        assert handled is True
+        assert page.pl1.value() == before_value
+        assert scroll_bar.value() > before_scroll
+
+
+class TestLocalSystemProbe:
+    def test_collects_neofetch_style_specs_from_linux_files(self, tmp_path) -> None:
+        from honor_control.frontend.gui.system_info import probe_local_system
+
+        proc_root = tmp_path / "proc"
+        etc_root = tmp_path / "etc"
+        sys_root = tmp_path / "sys"
+        proc_root.mkdir()
+        etc_root.mkdir()
+        (proc_root / "meminfo").write_text(
+            "MemTotal:       8388608 kB\nMemAvailable:   2097152 kB\n",
+            encoding="utf-8",
+        )
+        (etc_root / "os-release").write_text(
+            'PRETTY_NAME="Test Linux 1"\n',
+            encoding="utf-8",
+        )
+        gpu = sys_root / "class/drm/card0/device"
+        hwmon = gpu / "hwmon/hwmon0"
+        hwmon.mkdir(parents=True)
+        (gpu / "uevent").write_text(
+            "PCI_ID=8086:7D55\nDRIVER=i915\n",
+            encoding="utf-8",
+        )
+        (hwmon / "temp1_input").write_text("56000\n", encoding="utf-8")
+        battery = sys_root / "class/power_supply/BAT0"
+        battery.mkdir(parents=True)
+        (battery / "energy_full").write_text("54000000\n", encoding="utf-8")
+        (battery / "energy_full_design").write_text("60000000\n", encoding="utf-8")
+        (battery / "cycle_count").write_text("123\n", encoding="utf-8")
+
+        info = probe_local_system(
+            proc_root=proc_root,
+            sys_root=sys_root,
+            etc_root=etc_root,
+            environ={
+                "XDG_CURRENT_DESKTOP": "KDE",
+                "XDG_SESSION_TYPE": "wayland",
+            },
+        )
+
+        assert info.os_name == "Test Linux 1"
+        assert info.desktop == "KDE · wayland"
+        assert info.memory == "6.0 / 8.0 GiB used"
+        assert info.graphics == "Intel integrated graphics · PCI 8086:7d55 · i915"
+        assert info.gpu_temperature == "56 °C"
+        assert info.battery_health == "90% of design capacity"
+        assert info.battery_cycles == "123"
 
 
 class TestIntegratedTray:
