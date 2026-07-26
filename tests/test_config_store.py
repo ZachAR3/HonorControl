@@ -23,6 +23,7 @@ from honor_control.backend.config_store import (
     _toml_dump,
     default_state,
 )
+from honor_control.core.errors import DomainException
 
 
 @pytest.fixture
@@ -184,6 +185,27 @@ class TestConfigStoreUpdate:
         assert store.state == default_state()
         assert store.valid is False
         assert "disk full" in store.last_error
+
+    def test_failed_atomic_replace_preserves_primary_file(
+        self, tmp_state_path: pathlib.Path, monkeypatch
+    ) -> None:
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+        asyncio.run(store.update(lambda s: _set_battery(s, 70, 65, "home")))
+        original = tmp_state_path.read_bytes()
+
+        def fail_replace(_source: str, _destination: str) -> None:
+            raise OSError("interrupted rename")
+
+        monkeypatch.setattr(
+            "honor_control.backend.config_store.os.replace", fail_replace
+        )
+        with pytest.raises(DomainException):
+            asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "travel")))
+
+        assert tmp_state_path.read_bytes() == original
+        assert store.state.battery.end_threshold == 70
+        assert not list(tmp_state_path.parent.glob("*.tmp"))
 
 
 class TestConfigStoreSerialization:

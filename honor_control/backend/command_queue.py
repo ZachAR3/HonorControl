@@ -83,9 +83,7 @@ class HardwareCommandQueue:
         func: Callable[..., T],
         *args: Any,
         timeout: float = DEFAULT_TIMEOUT,
-        timeout_recovery: tuple[
-            str, Callable[..., Any], tuple[Any, ...]
-        ] | None = None,
+        timeout_recovery: tuple[str, Callable[..., Any], tuple[Any, ...]] | None = None,
     ) -> T:
         """Execute one call or fail while a previously timed-out call runs.
 
@@ -132,9 +130,7 @@ class HardwareCommandQueue:
                 return result
             except TimeoutError:
                 future.add_done_callback(self._consume_abandoned_completion)
-                recovery_future = self._queue_timeout_recovery(
-                    loop, timeout_recovery
-                )
+                recovery_future = self._queue_timeout_recovery(loop, timeout_recovery)
                 self._timed_out_future = recovery_future or future
                 raise CommandTimeoutError(
                     name,
@@ -164,9 +160,7 @@ class HardwareCommandQueue:
             return None
         recovery_name, recovery_func, recovery_args = recovery
         future: asyncio.Future[Any] = loop.create_future()
-        self._requests.put_nowait(
-            _WorkItem(loop, future, recovery_func, recovery_args)
-        )
+        self._requests.put_nowait(_WorkItem(loop, future, recovery_func, recovery_args))
         log.warning(
             "hw-queue: reserved recovery %s after timed-out command",
             recovery_name,

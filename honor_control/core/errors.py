@@ -10,6 +10,17 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from honor_control.contract import (
+    ERR_BUSY,
+    ERR_DEPENDENCY,
+    ERR_INTERNAL,
+    ERR_INVALID_ARGUMENT,
+    ERR_NOT_AUTHORIZED,
+    ERR_TIMEOUT,
+    ERR_UNAVAILABLE,
+    ERR_UNSUPPORTED,
+)
+
 
 class DomainError(StrEnum):
     """Stable error codes for application-layer failures."""
@@ -95,12 +106,12 @@ class DomainException(Exception):
 def error_name_for(code: DomainError) -> str:
     """Map a domain error code to its D-Bus error name."""
     return {
-        DomainError.NOT_AUTHORIZED: "org.honorlinux.Control1.Error.NotAuthorized",
-        DomainError.INVALID_ARGUMENT: "org.honorlinux.Control1.Error.InvalidArgument",
-        DomainError.UNSUPPORTED: "org.honorlinux.Control1.Error.Unsupported",
-        DomainError.UNAVAILABLE: "org.honorlinux.Control1.Error.Unavailable",
-        DomainError.BUSY: "org.honorlinux.Control1.Error.Busy",
-        DomainError.TIMEOUT: "org.honorlinux.Control1.Error.Timeout",
-        DomainError.DEPENDENCY: "org.honorlinux.Control1.Error.Dependency",
-        DomainError.INTERNAL: "org.honorlinux.Control1.Error.Internal",
+        DomainError.NOT_AUTHORIZED: ERR_NOT_AUTHORIZED,
+        DomainError.INVALID_ARGUMENT: ERR_INVALID_ARGUMENT,
+        DomainError.UNSUPPORTED: ERR_UNSUPPORTED,
+        DomainError.UNAVAILABLE: ERR_UNAVAILABLE,
+        DomainError.BUSY: ERR_BUSY,
+        DomainError.TIMEOUT: ERR_TIMEOUT,
+        DomainError.DEPENDENCY: ERR_DEPENDENCY,
+        DomainError.INTERNAL: ERR_INTERNAL,
     }[code]

@@ -91,6 +91,7 @@ log = logging.getLogger("honor_control.backend.application")
 
 FAN_SPEED_WRITE_HYSTERESIS = 3
 FAN_RECOVERY_WAIT_SECONDS = 10.0
+FAN_CURVE_POLL_SECONDS = 2.0
 AUTO_SWITCH_POLL_SECONDS = 2.0
 AUTO_SWITCH_MAX_RETRY_SECONDS = 60.0
 
@@ -2037,7 +2038,7 @@ class ApplicationService:
         last_speed: int | None = None
         failures = 0
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(FAN_CURVE_POLL_SECONDS)
             state = self._config.state.fan
             if state.mode != "curve":
                 last_speed = None

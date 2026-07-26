@@ -22,7 +22,12 @@ from honor_control.backend.touchpad_firmware import (
     TouchpadFirmwareError,
 )
 from honor_control.core.errors import DomainException
-from honor_control.core.models import FanMode, OperationStatus
+from honor_control.core.models import (
+    Capability,
+    CapabilityStatus,
+    FanMode,
+    OperationStatus,
+)
 from honor_control.core.touchpad import TouchpadSetting
 
 
@@ -143,6 +148,26 @@ class TestBatteryMutation:
         asyncio.run(svc.initialize())
         with pytest.raises(DomainException):
             asyncio.run(svc.set_battery_thresholds(30, 25))
+
+    def test_unsupported_battery_refuses_before_write(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        svc._hw.call_log.clear()  # noqa: SLF001
+        monkeypatch.setattr(
+            svc._hw,  # noqa: SLF001
+            "get_battery_capability",
+            lambda: Capability(status=CapabilityStatus.UNSUPPORTED),
+        )
+
+        result = asyncio.run(svc.set_battery_thresholds(80, 75))
+
+        assert result.status == OperationStatus.UNAVAILABLE
+        assert not any(
+            name == "write_battery_thresholds"
+            for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+        )
 
     def test_set_mode_home(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
@@ -275,6 +300,26 @@ class TestPowerMutation:
         asyncio.run(svc.initialize())
         with pytest.raises(DomainException):
             asyncio.run(svc.set_power_profile("1bad"))
+
+    def test_unsupported_power_refuses_before_write(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        svc._hw.call_log.clear()  # noqa: SLF001
+        monkeypatch.setattr(
+            svc._hw,  # noqa: SLF001
+            "get_power_capability",
+            lambda: Capability(status=CapabilityStatus.UNSUPPORTED),
+        )
+
+        result = asyncio.run(svc.set_power_profile("balanced"))
+
+        assert result.status == OperationStatus.UNAVAILABLE
+        assert not any(
+            name == "apply_power_profile"
+            for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+        )
 
     def test_set_auto_switch(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
@@ -728,6 +773,24 @@ class TestFanMutation:
         with pytest.raises(DomainException):
             asyncio.run(svc.set_fan_curve("default", "40000:0"))
 
+    def test_unsupported_fan_refuses_before_write(self, tmp_path, monkeypatch) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        svc._hw.call_log.clear()  # noqa: SLF001
+        monkeypatch.setattr(
+            svc._hw,  # noqa: SLF001
+            "get_fan_capability",
+            lambda: Capability(status=CapabilityStatus.UNSUPPORTED),
+        )
+
+        result = asyncio.run(svc.set_fan_manual(50, 300))
+
+        assert result.status == OperationStatus.UNAVAILABLE
+        assert not any(
+            name in {"set_fan_manual", "set_fan_speed"}
+            for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+        )
+
     def test_curve_controller_publishes_computed_target(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
 
@@ -742,6 +805,58 @@ class TestFanMutation:
             target = fan.target_speed
             await svc._refresh_fan()  # noqa: SLF001
             assert (await svc.get_snapshot()).fan.target_speed == target
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_curve_controller_forces_full_speed_at_95c(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from honor_control.backend import application
+
+        svc = _make_service(tmp_path)
+        monkeypatch.setattr(application, "FAN_CURVE_POLL_SECONDS", 0.001)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.set_fan_curve("default", "40000:0,95000:100")
+            svc._hw._fan_temp = 96_000  # noqa: SLF001
+            task = asyncio.create_task(svc._fan_curve_loop())  # noqa: SLF001
+            try:
+                for _attempt in range(100):
+                    if (await svc.get_snapshot()).fan.target_speed == 100:
+                        break
+                    await asyncio.sleep(0.002)
+                assert (await svc.get_snapshot()).fan.target_speed == 100
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await svc.shutdown()
+
+        asyncio.run(scenario())
+
+    def test_curve_controller_fails_safe_after_three_errors(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from honor_control.backend import application
+
+        svc = _make_service(tmp_path)
+        monkeypatch.setattr(application, "FAN_CURVE_POLL_SECONDS", 0.001)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            await svc.set_fan_curve("default", "40000:0,95000:100")
+
+            def fail_temperature() -> int:
+                raise RuntimeError("sensor failed")
+
+            monkeypatch.setattr(svc._hw, "read_fan_temp", fail_temperature)  # noqa: SLF001
+            with pytest.raises(RuntimeError, match="repeated failures"):
+                await svc._fan_curve_loop()  # noqa: SLF001
+
+            snapshot = await svc.get_snapshot()
+            assert snapshot.fan.mode == FanMode.FAILED_SAFE
+            assert svc.config_store.state.fan.mode == "stock"
             await svc.shutdown()
 
         asyncio.run(scenario())

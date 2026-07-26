@@ -40,6 +40,7 @@ from honor_control.core.models import (
     PowerSnapshot,
     ServiceHealth,
     SystemSnapshot,
+    utc_now,
 )
 
 log = logging.getLogger("honor_control.client.sdbus_client")
@@ -325,8 +326,9 @@ class SdbusClient(ControlClient):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            self._connected = False
             log.warning("state signal listener stopped: %s", exc)
+        finally:
+            self._connected = False
 
     def _queue_snapshot_refresh(self, sequence: int) -> None:
         """Retain the highest signalled sequence and start one fetch task."""
@@ -743,7 +745,7 @@ def _optional_enum(enum_type, value: Any):
 
 def _datetime(value: Any) -> datetime:
     parsed = _optional_datetime(value)
-    return parsed or SystemSnapshot().observed_at
+    return parsed or utc_now()
 
 
 def _optional_datetime(value: Any) -> datetime | None:

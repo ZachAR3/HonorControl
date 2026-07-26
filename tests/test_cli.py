@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,10 +17,14 @@ from honor_control.cli.honorctl import (
     EXIT_SERVICE_UNAVAILABLE,
     EXIT_UNAVAILABLE,
     EXIT_USAGE,
+    _async_main,
+    _exit_for_client_error,
     build_parser,
     cmd_power_auto_switch,
     cmd_reload,
 )
+from honor_control.client.errors import ClientError
+from honor_control.core.errors import TransportError
 from honor_control.core.models import OperationResult
 
 CLI_PATH = Path(__file__).parent.parent / "honor_control" / "cli" / "honorctl.py"
@@ -74,6 +79,50 @@ class TestCliSafety:
         }
         assert len(codes) == 7
         assert EXIT_OK == 0
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (TransportError.INVALID_REQUEST, EXIT_USAGE),
+            (TransportError.FEATURE_UNAVAILABLE, EXIT_UNAVAILABLE),
+            (TransportError.NOT_AUTHORIZED, EXIT_NOT_AUTHORIZED),
+            (TransportError.SERVICE_UNAVAILABLE, EXIT_SERVICE_UNAVAILABLE),
+            (TransportError.TIMEOUT, EXIT_SERVICE_UNAVAILABLE),
+            (TransportError.BUSY, EXIT_SERVICE_UNAVAILABLE),
+            (TransportError.API_MISMATCH, EXIT_PROTOCOL),
+            (TransportError.INTERNAL, EXIT_PROTOCOL),
+        ],
+    )
+    def test_transport_error_exit_table(
+        self, error: TransportError, expected: int
+    ) -> None:
+        assert _exit_for_client_error(ClientError(error, "message")) == expected
+
+    def test_unexpected_handler_error_is_clean_protocol_failure(
+        self, monkeypatch, capsys
+    ) -> None:
+        from honor_control.cli import honorctl
+
+        class Client:
+            closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        async def fail(_args, _client) -> int:
+            raise RuntimeError("boom")
+
+        client = Client()
+
+        async def get_client(_args):
+            return client, None
+
+        monkeypatch.setattr(honorctl, "_get_client", get_client)
+        code = asyncio.run(_async_main(SimpleNamespace(func=fail)))
+
+        assert code == EXIT_PROTOCOL
+        assert client.closed is True
+        assert "unexpected error: boom" in capsys.readouterr().err
 
     def test_parser_has_bus_flag(self) -> None:
         parser = build_parser()

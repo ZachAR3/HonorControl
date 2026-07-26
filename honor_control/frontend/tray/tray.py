@@ -326,7 +326,9 @@ def main(argv: list[str] | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     instance_lock = acquire_single_instance("tray")
     if instance_lock is None:
-        print("honor-control-tray: another instance is already running", file=sys.stderr)
+        print(
+            "honor-control-tray: another instance is already running", file=sys.stderr
+        )
         return 0
     app._honor_instance_lock = instance_lock  # type: ignore[attr-defined]
     if not QSystemTrayIcon.isSystemTrayAvailable():

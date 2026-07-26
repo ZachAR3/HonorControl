@@ -91,8 +91,8 @@ def _milli_c(v: Any) -> str:
 async def _get_client(args: argparse.Namespace):
     """Return a connected client.  Never falls back to a backend."""
     if args.bus == "session":
-        # Session bus dev mode: connect to a FakeClient-backed service.
-        # In production dev mode, the service itself uses FakeHardware.
+        # The transport is still real D-Bus; the development service on the
+        # session bus owns the FakeHardware boundary.
         client = SdbusClient(bus_kind="session", timeout=args.timeout)
     else:
         client = SdbusClient(bus_kind="system", timeout=args.timeout)
@@ -632,6 +632,9 @@ async def _async_main(args: argparse.Namespace) -> int:
     except ClientError as exc:
         print(f"honorctl: {exc.message}", file=sys.stderr)
         return _exit_for_client_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        print(f"honorctl: unexpected error: {exc}", file=sys.stderr)
+        return EXIT_PROTOCOL
     finally:
         await client.close()
 

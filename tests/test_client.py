@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,12 +16,14 @@ from honor_control.backend.dbus.codec import (
     to_variant,
 )
 from honor_control.client.errors import ClientError, classify_dbus_error
+from honor_control.client.proxy import ControlProxy
 from honor_control.client.sdbus_client import (
     FakeClient,
     SdbusClient,
     _decode_result,
     _decode_snapshot,
 )
+from honor_control.contract import API_VERSION, SCHEMA_VERSION
 from honor_control.core.errors import TransportError
 from honor_control.core.models import (
     BatterySnapshot,
@@ -87,6 +91,23 @@ class TestCodec:
         decoded = _decode_snapshot(from_variant(snapshot_to_vardict(snap)))
         assert decoded.gestures.firmware_settings == {"edge_volume": 1}
 
+    def test_none_fields_are_omitted_and_decode_to_none(self) -> None:
+        wire = snapshot_to_vardict(
+            SystemSnapshot(
+                battery=BatterySnapshot(
+                    available=True,
+                    capacity_percent=None,
+                    ac_online=None,
+                )
+            )
+        )
+        plain = from_variant(wire)
+        assert "capacity_percent" not in plain["battery"]
+        assert "ac_online" not in plain["battery"]
+        decoded = _decode_snapshot(plain)
+        assert decoded.battery.capacity_percent is None
+        assert decoded.battery.ac_online is None
+
     def test_operation_result_round_trip(self) -> None:
         result = OperationResult.success(message="ok", applied=True)
         vd = operation_result_to_vardict(result)
@@ -125,6 +146,30 @@ class TestClientErrorMapping:
     def test_unknown_falls_back_to_internal(self) -> None:
         err = classify_dbus_error("org.freedesktop.DBus.Error.Failed", "oops")
         assert err.code == TransportError.INTERNAL
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("org.honorlinux.Control1.Error.Busy", TransportError.BUSY),
+            (
+                "org.honorlinux.Control1.Error.Unavailable",
+                TransportError.FEATURE_UNAVAILABLE,
+            ),
+            (
+                "org.honorlinux.Control1.Error.Dependency",
+                TransportError.FEATURE_UNAVAILABLE,
+            ),
+            (
+                "org.freedesktop.DBus.Error.NameHasNoOwner",
+                TransportError.SERVICE_UNAVAILABLE,
+            ),
+            ("org.freedesktop.DBus.Error.NoReply", TransportError.TIMEOUT),
+        ],
+    )
+    def test_remaining_stable_mappings(
+        self, name: str, expected: TransportError
+    ) -> None:
+        assert classify_dbus_error(name, "message").code == expected
 
 
 class TestDecodeResult:
@@ -270,6 +315,23 @@ class TestSdbusClientSubscriptions:
 
         asyncio.run(scenario())
 
+    def test_clean_signal_stream_end_marks_client_offline(self) -> None:
+        client = SdbusClient()
+
+        class StateChanged:
+            @staticmethod
+            def catch():
+                async def empty_stream():
+                    if False:
+                        yield 0, []
+
+                return empty_stream()
+
+        client._proxy = SimpleNamespace(StateChanged=StateChanged())  # noqa: SLF001
+        client._connected = True  # noqa: SLF001
+        asyncio.run(client._listen_for_changes())  # noqa: SLF001
+        assert client.connected is False
+
     def test_notification_timeout_does_not_mark_transport_offline(
         self, monkeypatch
     ) -> None:
@@ -289,6 +351,54 @@ class TestSdbusClientSubscriptions:
             await client.close()
 
         asyncio.run(scenario())
+
+
+class TestSdbusClientHandshake:
+    @pytest.mark.parametrize(
+        ("api_version", "schema_version"),
+        [
+            (API_VERSION + 1, SCHEMA_VERSION),
+            (API_VERSION, SCHEMA_VERSION + 1),
+        ],
+    )
+    def test_version_mismatch_fails_closed(
+        self,
+        api_version: int,
+        schema_version: int,
+        monkeypatch,
+    ) -> None:
+        class Bus:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class Proxy:
+            async def GetApiVersion(self) -> int:  # noqa: N802
+                return api_version
+
+            async def GetSchemaVersion(self) -> int:  # noqa: N802
+                return schema_version
+
+        bus = Bus()
+        fake_sdbus = SimpleNamespace(
+            sd_bus_open_system=lambda: bus,
+            sd_bus_open_user=lambda: bus,
+        )
+        monkeypatch.setitem(sys.modules, "sdbus", fake_sdbus)
+        monkeypatch.setattr(
+            ControlProxy,
+            "new_proxy",
+            classmethod(lambda _cls, *_args, **_kwargs: Proxy()),
+        )
+        client = SdbusClient()
+
+        with pytest.raises(ClientError) as exc_info:
+            asyncio.run(client.connect())
+
+        assert exc_info.value.code == TransportError.API_MISMATCH
+        assert client.connected is False
+        assert bus.closed is True
 
 
 def asyncio_run(coro):

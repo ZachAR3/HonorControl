@@ -154,6 +154,36 @@ class TestCommandQueue:
         asyncio.run(scenario())
         q.shutdown()
 
+    def test_cancelled_call_blocks_overlap_until_worker_finishes(self) -> None:
+        q = HardwareCommandQueue()
+
+        async def scenario() -> None:
+            import time
+
+            task = asyncio.create_task(q.run("slow", lambda: time.sleep(0.08)))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            with pytest.raises(DomainException) as busy:
+                await q.run("must-not-overlap", lambda: None)
+            assert busy.value.code == DomainError.BUSY
+
+            await asyncio.sleep(0.1)
+            assert await q.run("recovered", lambda: 2) == 2
+
+        asyncio.run(scenario())
+        q.shutdown()
+
+    def test_shutdown_rejects_new_work(self) -> None:
+        q = HardwareCommandQueue()
+        q.shutdown()
+
+        with pytest.raises(DomainException) as unavailable:
+            asyncio.run(q.run("after-shutdown", lambda: None))
+        assert unavailable.value.code == DomainError.UNAVAILABLE
+
 
 class TestSupervisor:
     """Verify controller lifecycle and health."""
