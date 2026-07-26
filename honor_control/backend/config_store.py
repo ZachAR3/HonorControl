@@ -60,8 +60,8 @@ DEFAULT_STATE_PATH = "/var/lib/honor-control/state.toml"
 class BatteryState:
     """Desired battery thresholds/mode."""
 
-    end_threshold: int = 90
-    start_threshold: int = 85
+    end_threshold: int = 80
+    start_threshold: int = 75
     mode: str = "home"
 
 

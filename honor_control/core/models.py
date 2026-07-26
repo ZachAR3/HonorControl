@@ -71,8 +71,8 @@ class DiagnosticSeverity(StrEnum):
 #: Charge-mode presets: name -> (end_threshold, start_threshold).
 CHARGE_PRESETS: dict[str, tuple[int, int]] = {
     "off": (100, 95),
-    "home": (90, 85),
-    "travel": (80, 75),
+    "home": (80, 75),
+    "travel": (90, 85),
     "storage": (60, 55),
 }
 

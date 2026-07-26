@@ -88,8 +88,8 @@ class TestChargePresets:
 
     def test_preset_values(self) -> None:
         assert CHARGE_PRESETS["off"] == (100, 95)
-        assert CHARGE_PRESETS["home"] == (90, 85)
-        assert CHARGE_PRESETS["travel"] == (80, 75)
+        assert CHARGE_PRESETS["home"] == (80, 75)
+        assert CHARGE_PRESETS["travel"] == (90, 85)
         assert CHARGE_PRESETS["storage"] == (60, 55)
 
     def test_all_presets_in_valid_range(self) -> None:
@@ -99,7 +99,8 @@ class TestChargePresets:
             assert start <= end
 
     def test_derive_charge_mode_matches_preset(self) -> None:
-        assert derive_charge_mode(90, 85) == ChargeMode.HOME
+        assert derive_charge_mode(80, 75) == ChargeMode.HOME
+        assert derive_charge_mode(90, 85) == ChargeMode.TRAVEL
         assert derive_charge_mode(100, 95) == ChargeMode.OFF
 
     def test_derive_charge_mode_custom_for_unknown_pair(self) -> None:

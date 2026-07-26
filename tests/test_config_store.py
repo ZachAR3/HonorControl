@@ -167,7 +167,7 @@ class TestConfigStoreUpdate:
         with pytest.raises(Exception):
             asyncio.run(store.update(lambda s: _set_battery(s, 30, 25, "home")))
         # Old state retained.
-        assert store.state.battery.end_threshold == 90
+        assert store.state.battery.end_threshold == 80
 
     def test_save_failure_keeps_old_state_and_marks_invalid(
         self, tmp_state_path: pathlib.Path, monkeypatch

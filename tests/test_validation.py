@@ -64,11 +64,11 @@ class TestChargePresets:
     def test_off_mode_is_100(self) -> None:
         assert CHARGE_PRESETS["off"] == (100, 95)
 
-    def test_home_mode_is_90(self) -> None:
-        assert CHARGE_PRESETS["home"] == (90, 85)
+    def test_home_mode_is_80(self) -> None:
+        assert CHARGE_PRESETS["home"] == (80, 75)
 
-    def test_travel_mode_is_80(self) -> None:
-        assert CHARGE_PRESETS["travel"] == (80, 75)
+    def test_travel_mode_is_90(self) -> None:
+        assert CHARGE_PRESETS["travel"] == (90, 85)
 
     def test_storage_mode_is_60(self) -> None:
         assert CHARGE_PRESETS["storage"] == (60, 55)
