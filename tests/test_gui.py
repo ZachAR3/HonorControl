@@ -206,6 +206,19 @@ class TestGuiPageConstruction:
         page._on_snapshot(snap)
         assert "80" in page.capacity_value.text()
 
+    def test_battery_charge_modes_are_mutually_exclusive(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.battery import BatteryPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = BatteryPage(state)
+
+        page.mode_buttons["home"].click()
+        page.mode_buttons["travel"].click()
+
+        assert page.mode_buttons["travel"].isChecked()
+        assert sum(button.isChecked() for button in page.mode_buttons.values()) == 1
+
     def test_power_page_construction(self, qapp) -> None:
         from honor_control.frontend.gui.pages.power import PowerPage
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -86,10 +87,13 @@ class BatteryPage(PageBase):
         self.add_widget(limit)
 
         modes = Card("Charge modes")
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
         self.mode_buttons: dict[str, QPushButton] = {}
         for mode in ("off", "home", "travel", "storage"):
             btn = QPushButton(mode.capitalize())
             btn.setCheckable(True)
+            self.mode_group.addButton(btn)
             btn.setToolTip(
                 f"{mode}: {CHARGE_PRESETS[mode][0]}% end / {CHARGE_PRESETS[mode][1]}% start"
             )
