@@ -25,6 +25,11 @@ WMI_GUID = "ABBC0F5B-8EA1-11D1-A000-C90629100000"
 MASTER_DISABLE_COMMAND = 0x00001002
 MASTER_ENABLE_COMMAND = 0x00011002
 
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_UNAVAILABLE = 3
+EXIT_OPERATION_FAILED = 4
+
 
 def _emit(payload: object, *, as_json: bool) -> None:
     if as_json:
@@ -152,6 +157,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="honor-touchpadctl",
         description="Typed Honor 35cc:0104 HID firmware controls",
+        epilog=(
+            "This root-only diagnostic bypasses the daemon. Do not run write "
+            "commands while honor-control.service is applying touchpad settings."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(
@@ -259,11 +268,11 @@ def main(argv: list[str] | None = None) -> int:
                 "master_attribute": str(_master_attribute(args.wmi_root) or ""),
             }
             _emit(payload, as_json=args.json)
-            return 0 if probe.available else 2
+            return EXIT_OK if probe.available else EXIT_UNAVAILABLE
 
         if args.command == "list":
             _emit(_settings_payload(), as_json=args.json)
-            return 0
+            return EXIT_OK
 
         if args.command == "encode":
             setting = parse_touchpad_setting(args.setting)
@@ -277,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
             }
             _emit(payload, as_json=args.json)
-            return 0
+            return EXIT_OK
 
         if args.command == "set":
             result = transport.apply_setting(
@@ -296,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
                 "readback": "unavailable",
             }
             _emit(payload, as_json=args.json)
-            return 0
+            return EXIT_OK
 
         if args.command == "apply":
             if args.wait < 0:
@@ -306,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload = _encoded_profile_payload(settings, master)
                 payload.update({"dry_run": True, "applied": False})
                 _emit(payload, as_json=args.json)
-                return 0
+                return EXIT_OK
 
             attribute = _master_attribute(args.wmi_root)
             master_observed: bool | None = None
@@ -368,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             _emit(payload, as_json=args.json)
-            return 0
+            return EXIT_OK
 
         if args.command == "support":
             bits = transport.query_supported_gestures(
@@ -383,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
                 "unknown_bits": sorted(bits - SUPPORTED_GESTURE_BITS.keys()),
             }
             _emit(payload, as_json=args.json)
-            return 0
+            return EXIT_OK
 
         if args.command == "master":
             attribute = _master_attribute(args.wmi_root)
@@ -399,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
                 {"touchpad_enabled": current, "attribute": str(attribute)},
                 as_json=args.json,
             )
-            return 0
+            return EXIT_OK
     except (ValueError, OSError, RuntimeError, TouchpadFirmwareError) as exc:
         payload = {"error": str(exc)}
         if isinstance(exc, TouchpadFirmwareError):
@@ -414,8 +423,14 @@ def main(argv: list[str] | None = None) -> int:
             _emit(payload, as_json=True)
         else:
             print(f"honor-touchpadctl: {exc}", file=sys.stderr)
-        return 1
-    return 1
+        if isinstance(exc, ValueError):
+            return EXIT_USAGE
+        if isinstance(exc, TouchpadFirmwareError):
+            return EXIT_OPERATION_FAILED if exc.reports_applied else EXIT_UNAVAILABLE
+        if isinstance(exc, OSError):
+            return EXIT_UNAVAILABLE
+        return EXIT_OPERATION_FAILED
+    return EXIT_OPERATION_FAILED
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Confirmed Honor MagicTouchPad firmware protocol.
+"""Statically verified Honor MagicTouchPad firmware protocol.
 
 The current Honor service opens the vendor HID collection for ``35cc:0104``
 (usage page ``0xff00``, usage ``0x0001``) and writes nine-byte output reports.
@@ -8,6 +8,7 @@ both the drag and light-touch bits in that order.
 
 The master touchpad switch is deliberately absent from this encoder.  Honor
 implements that switch through its OEM ACPI-WMI method, not through HID.
+The output protocol has not yet been wire-captured or replayed on Linux hardware.
 """
 
 from __future__ import annotations
@@ -181,7 +182,9 @@ def parse_touchpad_setting(value: str | TouchpadSetting) -> TouchpadSetting:
             return _ALIASES[normalized]
         except KeyError as exc:
             names = ", ".join(setting.value for setting in TouchpadSetting)
-            raise ValueError(f"unknown touchpad setting {value!r}; choose {names}") from exc
+            raise ValueError(
+                f"unknown touchpad setting {value!r}; choose {names}"
+            ) from exc
 
 
 def parse_touchpad_value(

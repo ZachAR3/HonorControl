@@ -262,9 +262,9 @@ class FakeHardware:
         self._fail_next: str | None = None
         self._platform = PlatformInfo(
             vendor="Honor",
-            product="MAGICBOOK_X14_2024",
-            model="Honor MagicBook X14 2024",
-            cpu_model="Intel Core i5-1240P",
+            product="MRA-XXX",
+            model="Honor MagicBook Art 14",
+            cpu_model="Intel Core Ultra 5 125H",
             matched=True,
             confidence="high",
         )

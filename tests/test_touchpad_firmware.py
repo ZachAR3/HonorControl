@@ -161,6 +161,17 @@ def test_probe_fails_closed_on_wrong_dmi(tmp_path: pathlib.Path) -> None:
     assert "expected exact DMI HONOR/MRA-XXX" in probe.error
 
 
+def test_probe_fails_closed_on_wrong_vid_pid(tmp_path: pathlib.Path) -> None:
+    sysfs, dev = _fake_device(tmp_path)
+    (sysfs / "hidraw7/device/uevent").write_text(
+        "HID_ID=0018:000035CC:00009999\n",
+        encoding="utf-8",
+    )
+    probe = probe_touchpad_firmware(sysfs_root=sysfs, dev_root=dev)
+    assert probe.available is False
+    assert probe.device_found is False
+
+
 def test_apply_three_finger_drag_is_one_handshake_plus_two_reports(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -311,5 +322,43 @@ def test_apply_profile_restores_master_when_hid_write_fails(
         ]
     )
 
-    assert result == 1
+    assert result == 3
     assert attribute.read_text(encoding="ascii").strip() == "0"
+
+
+def test_touchpad_cli_uses_shared_exit_code_categories(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysfs, dev = _fake_device(tmp_path)
+    (tmp_path / "sys/class/dmi/id/product_name").write_text(
+        "UnknownBook\n", encoding="utf-8"
+    )
+    assert (
+        touchpadctl_main(["--sysfs-root", str(sysfs), "--dev-root", str(dev), "probe"])
+        == 3
+    )
+    assert touchpadctl_main(["encode", "not-a-setting", "on"]) == 2
+
+    def partial_failure(*_args, **_kwargs):
+        raise TouchpadFirmwareError(
+            "partial write",
+            reports_applied=1,
+            total_reports=2,
+        )
+
+    monkeypatch.setattr(TouchpadFirmwareTransport, "apply_setting", partial_failure)
+    assert (
+        touchpadctl_main(
+            [
+                "--sysfs-root",
+                str(sysfs),
+                "--dev-root",
+                str(dev),
+                "set",
+                "edge_volume",
+                "on",
+            ]
+        )
+        == 4
+    )

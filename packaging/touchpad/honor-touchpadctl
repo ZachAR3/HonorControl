@@ -1,5 +1,5 @@
 #!/bin/sh
-exec /usr/bin/python3 -I -c '
+exec /usr/bin/python3 -I -P -c '
 import sys
 sys.path.insert(0, "/usr/lib/honor-touchpad")
 from honor_control.cli.touchpadctl import main

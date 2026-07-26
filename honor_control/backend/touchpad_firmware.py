@@ -1,4 +1,4 @@
-"""Linux hidraw transport for the confirmed Honor touchpad output protocol."""
+"""Linux transport for a statically verified, not-yet-replayed output protocol."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class VendorCollectionCaps:
 
     @property
     def input_compatible(self) -> bool:
-        """Return whether this collection carries the confirmed input report."""
+        """Return whether this collection carries the verified input report."""
         return (
             self.found
             and self.report_id == TOUCHPAD_REPORT_ID
