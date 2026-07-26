@@ -147,9 +147,9 @@ configuration controls and are deliberately absent from the public interface.
 - Preserve logs, descriptor, DMI strings, kernel version, and partial write
   count for any physical validation failure.
 
-The supplied Python code is the executable reference. The standalone
-`../../honor_touchpad_linux.c` demonstrates the HID transaction with hidapi but
-deliberately lacks the Python implementation's descriptor and DMI validation.
+The packaged `honor-touchpadctl` Python implementation is the executable
+reference. It enforces the descriptor and DMI validation required before any
+hardware write.
 
 ## Definition of a complete Linux remake
 

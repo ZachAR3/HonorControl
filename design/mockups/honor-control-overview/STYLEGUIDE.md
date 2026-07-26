@@ -1,6 +1,6 @@
-# Honor Control UI Style Sheet
+# Honor Control UI Style Guide
 
-This is the visual source of truth for future Honor Control mockups. The product
+This is the visual source of truth for the Honor Control frontend. The product
 should feel like a small, native laptop utility: quick to scan, quiet, and direct.
 It is not an enterprise dashboard, a marketing site, or a decorative AI concept.
 
@@ -81,6 +81,8 @@ It is not an enterprise dashboard, a marketing site, or a decorative AI concept.
 
 - Performance modes use one restrained three-way segmented control:
   `Silent`, `Balanced`, `Performance`.
+- Battery charge presets use one exclusive segmented control. Selecting `Off`,
+  `Home`, `Travel`, or `Storage` always clears the previous selection.
 - Selected controls use the accent fill with high-contrast text. Unselected controls
   are transparent or surface-colored with a thin rule.
 - Sliders are thin, flat, and labeled with the current value. Avoid giant tracks.
@@ -148,24 +150,10 @@ The overview should fit in one glance and contain no more than five content sect
 Do not add new telemetry, charts, decorative summaries, or feature tiles to this
 screen. Advanced editing belongs in the relevant sidebar section.
 
-## Required behavior in mockups
+## Required product behavior
 
 - Keep the sidebar geometry and main-content alignment identical in both themes.
 - Preserve exact labels and values from the product state; do not invent capabilities.
 - Make unavailable hardware explicit with text and the warning color; never imply support.
 - Show service health in the top bar with a small status dot and text.
 - Keep the UI believable as a Qt desktop app at compact laptop-window sizes.
-
-## ImageGen prompt seed
-
-```text
-Use case: ui-mockup
-Asset type: high-fidelity native desktop laptop-control utility
-Style: compact, quiet, text-led, flat sections, thin rules, practical hierarchy
-Navigation: narrow text-only sidebar; no icons, no logo, no filled pills
-Geometry: 2–4px radii, no card grid, no gradients, no glassmorphism
-Light palette: #F2F0EA #FAF9F5 #24231F #6D6A63 #D8D4CC #C85A38 #63B239
-Dark palette: #1D1E1C #242522 #ECE8DE #A5A39B #3B3C38 #D45B37 #7CC243
-Avoid: emoji, clip-art, decorative pictograms, purple, navy, neon, AI SaaS styling,
-oversized hero areas, fake 3D, and invented telemetry
-```
