@@ -25,7 +25,7 @@ class GuiState(QObject):
     stale_changed = Signal(tuple)  # stale_domains
     operation_pending = Signal(str)  # operation_id
     operation_completed = Signal(str, object)  # operation_id, OperationResult
-    error_occurred = Signal(str)  # message
+    error_occurred = Signal(object)  # UiError
 
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +84,6 @@ class GuiState(QObject):
         self.clear_pending(operation_id)
         self.operation_completed.emit(operation_id, result)
 
-    def emit_error(self, message: str) -> None:
-        """Emit an error message."""
-        self.error_occurred.emit(message)
+    def emit_error(self, error: object) -> None:
+        """Emit a structured UiError."""
+        self.error_occurred.emit(error)

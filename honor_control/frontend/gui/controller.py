@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -31,9 +32,44 @@ from honor_control.core.models import SystemSnapshot
 log = logging.getLogger("honor_control.frontend.gui.controller")
 
 # Profile saves/applies include PPD settling, sysfs readback, and serialized
-# hardware work.  Keep the frontend deadline above the backend's normal
-# operation time so a completed operation is not reported as a GUI timeout.
-GUI_DBUS_TIMEOUT_SECONDS = 15.0
+# hardware work, and admin actions may present an interactive polkit prompt
+# (~60s for a human to authenticate).  Keep the frontend deadline above the
+# backend's polkit deadline plus operation time so a completed (or still-
+# authenticating) operation is not reported as a GUI timeout.
+GUI_DBUS_TIMEOUT_SECONDS = 90.0
+
+
+@dataclass(frozen=True)
+class UiError:
+    """Structured, user-facing error carried from the worker to the UI.
+
+    Preserves the transport error ``code`` (previously discarded as a bare
+    string) so the UI can render a polkit authorization denial differently from
+    a transient busy/timeout or a fatal API-version mismatch.
+    """
+
+    code: str
+    message: str
+    retryable: bool = False
+    fatal: bool = False
+
+    @classmethod
+    def from_client_error(cls, exc: ClientError) -> UiError:
+        retryable = exc.code in (
+            TransportError.BUSY,
+            TransportError.TIMEOUT,
+            TransportError.SERVICE_UNAVAILABLE,
+        )
+        return cls(
+            code=exc.code.value,
+            message=exc.message,
+            retryable=retryable,
+            fatal=exc.code == TransportError.API_MISMATCH,
+        )
+
+    @classmethod
+    def internal(cls, message: str) -> UiError:
+        return cls(code=TransportError.INTERNAL.value, message=message)
 
 
 class GuiWorker(QThread):
@@ -46,7 +82,7 @@ class GuiWorker(QThread):
     snapshot_ready = Signal(object)  # SystemSnapshot
     connection_changed = Signal(bool)  # connected
     protocol_mismatch = Signal(str)  # incompatible API/schema message
-    error = Signal(str)  # error message
+    error = Signal(object)  # UiError
     operation_result = Signal(str, object)  # operation_id, OperationResult
 
     def __init__(
@@ -79,7 +115,7 @@ class GuiWorker(QThread):
             pass
         except Exception as exc:  # noqa: BLE001
             log.error("worker crashed: %s", exc)
-            self.error.emit(str(exc))
+            self.error.emit(UiError.internal(str(exc)))
         finally:
             self._loop.close()
 
@@ -111,9 +147,15 @@ class GuiWorker(QThread):
                             )
             except ClientError as exc:
                 self.connection_changed.emit(False)
+                ui_error = UiError.from_client_error(exc)
                 if exc.code == TransportError.API_MISMATCH:
                     self.protocol_mismatch.emit(exc.message)
-                self.error.emit(exc.message)
+                self.error.emit(ui_error)
+                if ui_error.fatal:
+                    # An incompatible service version will not fix itself; stop
+                    # reconnecting instead of re-emitting the error forever.
+                    assert self._stop_event is not None
+                    self._stop_event.set()
             finally:
                 await self._cancel_tasks()
                 await self._client.close()
@@ -187,11 +229,11 @@ class GuiWorker(QThread):
                 self.operation_result.emit(operation_id, None)
                 raise
             except ClientError as exc:
-                self.error.emit(exc.message)
+                self.error.emit(UiError.from_client_error(exc))
                 self.operation_result.emit(operation_id, None)
             except Exception as exc:  # noqa: BLE001
                 log.error("operation %s failed: %s", operation_id, exc)
-                self.error.emit(str(exc))
+                self.error.emit(UiError.internal(str(exc)))
                 self.operation_result.emit(operation_id, None)
 
         self._spawn(_execute())
@@ -218,7 +260,7 @@ class GuiWorker(QThread):
                 if client is self._client:
                     if not client.connected:
                         self.connection_changed.emit(False)
-                    self.error.emit(exc.message)
+                    self.error.emit(UiError.from_client_error(exc))
 
         self._spawn(_do())
         return None
@@ -236,7 +278,7 @@ class GuiController(QObject):
     protocol_mismatch = Signal(str)  # incompatible API/schema message
     operation_started = Signal(str)  # operation_id
     operation_completed = Signal(str, object)  # operation_id, OperationResult
-    error = Signal(str)  # error message
+    error = Signal(object)  # UiError
 
     def __init__(
         self,
@@ -281,7 +323,7 @@ class GuiController(QObject):
         if operation_id in self._pending_ops:
             return False
         if not self._worker.submit_call(operation_id, method, *args):
-            self.error.emit("Service worker is not ready")
+            self.error.emit(UiError.internal("Service worker is not ready"))
             return False
         self._pending_ops.add(operation_id)
         self.operation_started.emit(operation_id)
@@ -297,8 +339,8 @@ class GuiController(QObject):
         self._connected = connected
         self.connection_changed.emit(connected)
 
-    def _on_error(self, message: str) -> None:
-        self.error.emit(message)
+    def _on_error(self, error: UiError) -> None:
+        self.error.emit(error)
 
     def _on_operation_result(self, operation_id: str, result: object) -> None:
         self._pending_ops.discard(operation_id)

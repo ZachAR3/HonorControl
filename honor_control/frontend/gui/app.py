@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -15,7 +16,12 @@ from PySide6.QtWidgets import QApplication
 
 from honor_control import __version__
 from honor_control.frontend.gui.design import apply_design_system
-from honor_control.frontend.single_instance import acquire_single_instance
+from honor_control.frontend.single_instance import (
+    FRONTEND_LOCK_NAME,
+    acquire_single_instance,
+    clear_frontend_handoff,
+    request_frontend_handoff,
+)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -57,9 +63,22 @@ def main(argv: list[str] | None = None) -> int:
     _apply_metadata(app)
     apply_design_system(app)
     app.setQuitOnLastWindowClosed(False)
-    instance_lock = acquire_single_instance("gui")
+    # HC-017: one per-user frontend session shared with the tray.  If the tray
+    # currently owns it, ask it to step aside and wait briefly for the lock so
+    # the GUI takes over instead of running a second icon/client.
+    request_frontend_handoff()
+    instance_lock = None
+    deadline = time.monotonic() + 3.0
+    while instance_lock is None and time.monotonic() < deadline:
+        instance_lock = acquire_single_instance(FRONTEND_LOCK_NAME)
+        if instance_lock is None:
+            time.sleep(0.1)
+    clear_frontend_handoff()
     if instance_lock is None:
-        print("honor-control-gui: another instance is already running", file=sys.stderr)
+        print(
+            "honor-control-gui: another frontend is running and did not step aside",
+            file=sys.stderr,
+        )
         return 0
     app._honor_instance_lock = instance_lock  # type: ignore[attr-defined]
 

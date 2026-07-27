@@ -239,9 +239,29 @@ class MainWindow(QMainWindow):
         self.state.connection_changed.connect(self._update_availability)
         self.state.snapshot_changed.connect(self._update_identity)
         self.state.stale_changed.connect(self._on_stale_changed)
-        self.state.error_occurred.connect(
-            lambda msg: self.statusBar().showMessage(f"Error: {msg}", 4000)
-        )
+        self.state.error_occurred.connect(self._on_ui_error)
+
+    def _on_ui_error(self, error: object) -> None:
+        """Render a structured UiError with severity-appropriate persistence.
+
+        Authorization denials and fatal errors stay visible until replaced
+        (timeout 0) with actionable guidance; transient busy/timeout errors are
+        short-lived and labeled retryable.
+        """
+        from honor_control.core.errors import TransportError
+
+        code = str(getattr(error, "code", ""))
+        message = str(getattr(error, "message", error))
+        if code == TransportError.NOT_AUTHORIZED.value:
+            self.statusBar().showMessage(
+                f"Permission denied: {message} — authenticate with PolicyKit", 0
+            )
+        elif bool(getattr(error, "fatal", False)):
+            self.statusBar().showMessage(f"Error: {message}", 0)
+        elif bool(getattr(error, "retryable", False)):
+            self.statusBar().showMessage(f"{message} (transient — retrying)", 4000)
+        else:
+            self.statusBar().showMessage(f"Error: {message}", 6000)
 
     # Navigation
 

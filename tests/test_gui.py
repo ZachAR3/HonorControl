@@ -116,7 +116,10 @@ class TestGuiController:
 
         worker = GuiWorker()
         controller = GuiController()
-        assert GUI_DBUS_TIMEOUT_SECONDS == 15.0
+        # HC-004: the frontend deadline must sit above the backend's
+        # interactive polkit deadline (~60s for a human) plus operation time.
+        assert GUI_DBUS_TIMEOUT_SECONDS == 90.0
+        assert GUI_DBUS_TIMEOUT_SECONDS > 60.0
         assert worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
         assert controller._worker._timeout == GUI_DBUS_TIMEOUT_SECONDS  # noqa: SLF001
 
@@ -157,7 +160,8 @@ class TestGuiController:
 
         assert client.connected is True
         assert connection_events == []
-        assert errors == ["temporary timeout"]
+        assert [e.message for e in errors] == ["temporary timeout"]
+        assert errors[0].retryable is True
         assert [snapshot.sequence for snapshot in snapshots] == [7]
 
 

@@ -349,8 +349,15 @@ async def cmd_touchpad_list(args: argparse.Namespace, client) -> int:
 
 
 async def cmd_touchpad_set(args: argparse.Namespace, client) -> int:
-    setting = parse_touchpad_setting(args.setting)
-    value = parse_touchpad_value(setting, args.value)
+    try:
+        setting = parse_touchpad_setting(args.setting)
+        value = parse_touchpad_value(setting, args.value)
+    except (ValueError, KeyError, TypeError) as exc:
+        # Usage/validation errors must exit 2, not fall through to the generic
+        # handler's exit 70 (reserved for wire/API/internal contract failures).
+        raise DomainException(
+            code=DomainError.INVALID_ARGUMENT, message=str(exc)
+        ) from exc
     result = await client.set_touchpad_setting(setting.value, value)
     _emit(args, result.to_dict(), f"Touchpad setting: {result.message}")
     return EXIT_OK if result.applied else EXIT_OPERATION_FAILED
@@ -359,7 +366,17 @@ async def cmd_touchpad_set(args: argparse.Namespace, client) -> int:
 async def cmd_touchpad_apply(args: argparse.Namespace, client) -> int:
     from honor_control.cli.touchpadctl import _load_profile
 
-    settings, master = _load_profile(args.profile)
+    try:
+        settings, master = _load_profile(args.profile)
+    except DomainException:
+        raise
+    except (OSError, ValueError) as exc:  # incl. tomllib.TOMLDecodeError (a ValueError)
+        # A missing/unreadable/malformed profile is a usage error (exit 2), not
+        # a protocol/internal fault (exit 70).
+        raise DomainException(
+            code=DomainError.INVALID_ARGUMENT,
+            message=f"could not load touchpad profile: {exc}",
+        ) from exc
     if master is not None:
         raise DomainException(
             code=DomainError.INVALID_ARGUMENT,
@@ -464,8 +481,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--timeout",
         type=float,
-        default=10.0,
-        help="per-call timeout in seconds (default: 10)",
+        default=90.0,
+        help="per-call timeout in seconds (default: 90; above the interactive polkit deadline)",
     )
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 

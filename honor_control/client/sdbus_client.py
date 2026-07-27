@@ -45,8 +45,10 @@ from honor_control.core.models import (
 
 log = logging.getLogger("honor_control.client.sdbus_client")
 
-#: Default per-call timeout (seconds).
-DEFAULT_TIMEOUT = 10.0
+#: Default per-call timeout (seconds).  Admin mutations may trigger an
+#: interactive polkit prompt (the authorizer allows ~60s for a human), so the
+#: client deadline must sit above that plus normal hardware operation time.
+DEFAULT_TIMEOUT = 90.0
 MAX_COALESCED_REFRESHES = 4
 
 

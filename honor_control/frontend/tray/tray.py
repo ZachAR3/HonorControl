@@ -21,7 +21,12 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from honor_control import __version__
 from honor_control.core.models import POWER_PROFILES, SystemSnapshot
 from honor_control.frontend.gui.controller import GuiController
-from honor_control.frontend.single_instance import acquire_single_instance
+from honor_control.frontend.single_instance import (
+    FRONTEND_LOCK_NAME,
+    acquire_single_instance,
+    clear_frontend_handoff,
+    frontend_handoff_requested,
+)
 
 #: Refresh interval (ms) for the tooltip + menu state.
 TRAY_REFRESH_MS = 5000
@@ -324,20 +329,39 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("Honor Control Tray")
     app.setQuitOnLastWindowClosed(False)
-    instance_lock = acquire_single_instance("tray")
+    # HC-017: share one per-user frontend lock with the GUI.  If the GUI (or
+    # another tray) owns it, the tray defers instead of running concurrently.
+    instance_lock = acquire_single_instance(FRONTEND_LOCK_NAME)
     if instance_lock is None:
         print(
-            "honor-control-tray: another instance is already running", file=sys.stderr
+            "honor-control-tray: the Honor Control frontend is already running",
+            file=sys.stderr,
         )
         return 0
     app._honor_instance_lock = instance_lock  # type: ignore[attr-defined]
+    # Drop a stale handoff flag left by a GUI that has since exited.
+    clear_frontend_handoff()
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print(
             "honor-control-tray: no system tray available yet; the icon will "
             "appear when a host registers.",
             file=sys.stderr,
         )
-    app._honor_tray = HonorTray(bus_kind=args.bus)  # type: ignore[attr-defined]
+    tray = HonorTray(bus_kind=args.bus)
+    app._honor_tray = tray  # type: ignore[attr-defined]
+
+    def _watch_handoff() -> None:
+        # The GUI asks the tray to step aside so it can take over the session.
+        if frontend_handoff_requested():
+            clear_frontend_handoff()
+            app.quit()
+
+    handoff_watcher = QTimer()
+    handoff_watcher.setInterval(400)
+    handoff_watcher.timeout.connect(_watch_handoff)
+    handoff_watcher.start()
+    app._honor_handoff_watcher = handoff_watcher  # type: ignore[attr-defined]
+    app.aboutToQuit.connect(tray.shutdown)
     return app.exec()
 
 

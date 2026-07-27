@@ -120,7 +120,11 @@ class PolkitAuthorizer:
     resolved, the call is denied.  No fallback to "active local user".
     """
 
-    def __init__(self, timeout: float = 5.0) -> None:
+    def __init__(self, timeout: float = 60.0) -> None:
+        # Interactive deadline: admin-tier actions may present a polkit password
+        # prompt, so this must be human-scale.  The previous 5s denied users who
+        # simply took longer to type their password.  Non-interactive reads never
+        # reach here (UNPRIVILEGED_METHODS return before any polkit call).
         self._timeout = timeout
 
     async def check(self, method: str, caller: CallerSubject | None) -> None:
@@ -167,19 +171,33 @@ class PolkitAuthorizer:
                 timeout=self._timeout,
             )
             if not is_authorized:
-                reason = "authentication required" if is_challenge else "denied"
+                # is_challenge means polkit wanted interactive authentication
+                # but it did not complete (user cancelled, or no agent answered);
+                # otherwise the subject was affirmatively denied.
+                reason = (
+                    "authentication was not completed (cancelled or no agent)"
+                    if is_challenge
+                    else "denied"
+                )
                 raise DomainException(
                     DomainError.NOT_AUTHORIZED,
                     f"Authorization {reason} for '{action_id}'",
                 )
         except DomainException:
             raise
-        except Exception as exc:  # noqa: BLE001
-            log.error("polkit check failed: %s", exc)
+        except TimeoutError:
             raise DomainException(
                 DomainError.NOT_AUTHORIZED,
-                "Authorization service is unavailable",
-            ) from exc
+                "Authorization timed out waiting for authentication",
+            ) from None
+        except Exception as exc:  # noqa: BLE001
+            log.error("polkit check failed: %s", exc)
+            message = (
+                "No authentication agent is available"
+                if "agent" in str(exc).lower()
+                else "Authorization service is unavailable"
+            )
+            raise DomainException(DomainError.NOT_AUTHORIZED, message) from exc
 
 
 class FakeAuthorizer:
