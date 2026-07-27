@@ -20,7 +20,7 @@ PYTEST="$ROOT/.venv/bin/pytest"
 [[ -x "$PYTEST" ]] || PYTEST="$(command -v pytest || true)"
 if [[ -z "$RUFF" || -z "$PYTEST" ]]; then
     echo "error: development tools missing; install the test extra" >&2
-    echo "       python3 -m pip install -e '$ROOT[dev]'" >&2
+    echo "       python3 -m pip install -e '${ROOT}[dev]'" >&2
     exit 1
 fi
 

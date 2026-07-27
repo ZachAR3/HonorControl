@@ -9,14 +9,32 @@
 # Does NOT touch the system Python environment (PEP 668 safe).
 #
 # Usage:
-#   sudo bash scripts/install-local.sh [--wheelhouse DIR]
+#   sudo bash scripts/install-local.sh [--wheelhouse DIR] [--enable-touchpad-firmware]
+#   sudo bash scripts/install-local.sh --rollback
+#
+# Offline installs: with --wheelhouse DIR the installer runs fully offline
+# (--no-index --find-links --no-build-isolation) and REQUIRES a SHA256SUMS
+# file in DIR; every listed artifact is verified with sha256sum -c before
+# anything is installed.
+#
+# Touchpad firmware WRITES are disabled by default (unqualified). The
+# automatic honor-touchpad-restore.service unit is neither installed nor
+# enabled unless --enable-touchpad-firmware (or
+# HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1) is set.
 set -euo pipefail
 
 DEV_MODE=false
+ROLLBACK=false
+TOUCHPAD_FIRMWARE=false
+if [[ "${HONOR_TOUCHPAD_FIRMWARE_QUALIFIED:-0}" == "1" ]]; then
+    TOUCHPAD_FIRMWARE=true
+fi
 WHEELHOUSE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dev) DEV_MODE=true ;;
+        --rollback) ROLLBACK=true ;;
+        --enable-touchpad-firmware) TOUCHPAD_FIRMWARE=true ;;
         --wheelhouse)
             [[ $# -ge 2 ]] || { echo "error: --wheelhouse requires a path" >&2; exit 2; }
             WHEELHOUSE="$2"
@@ -34,6 +52,13 @@ fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+
+# --rollback hands off to the standalone rollback script before any staging
+# or system mutation below. It atomically repoints /opt/honor-control/current
+# to the retained predecessor release and restarts the service.
+if $ROLLBACK; then
+    exec bash "$HERE/rollback.sh"
+fi
 
 INSTALL_ROOT=/opt/honor-control
 RELEASE_ID="$(date +%Y%m%d%H%M%S)-$$"
@@ -176,6 +201,21 @@ if [[ -n "$WHEELHOUSE" && ! -d "$WHEELHOUSE" ]]; then
     echo "error: wheelhouse directory does not exist: $WHEELHOUSE" >&2
     exit 2
 fi
+if [[ -n "$WHEELHOUSE" ]]; then
+    # Fully offline, hash-verified install: every artifact must be listed in
+    # SHA256SUMS and match before we touch the system.
+    if [[ ! -f "$WHEELHOUSE/SHA256SUMS" ]]; then
+        echo "error: --wheelhouse requires a SHA256SUMS file in $WHEELHOUSE" >&2
+        echo "       Generate one with:" >&2
+        echo "         (cd $WHEELHOUSE && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)" >&2
+        exit 2
+    fi
+    echo "==> Verifying wheelhouse checksums (offline install)"
+    if ! (cd "$WHEELHOUSE" && sha256sum -c SHA256SUMS); then
+        echo "error: wheelhouse checksum verification failed; refusing to install" >&2
+        exit 2
+    fi
+fi
 HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" 2>/dev/null && pwd || true)"
 if [[ ( -z "$HONOR_TOOLS_ROOT" || \
         ! -f "$HONOR_TOOLS_ROOT/pyproject.toml" ) && -z "$WHEELHOUSE" ]]; then
@@ -204,7 +244,9 @@ assert_replaceable "$ROOT/packaging/polkit/org.honorlinux.control.policy" /usr/s
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/share/applications/org.honorlinux.Control.desktop
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop
-assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
+if $TOUCHPAD_FIRMWARE; then
+    assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
+fi
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml
 
@@ -223,7 +265,10 @@ PY="$VENV_DIR/bin/python"
 echo "==> [2/7] Installing Python dependencies"
 PIP_ARGS=(--quiet)
 if [[ -n "$WHEELHOUSE" ]]; then
-    PIP_ARGS+=(--no-index --find-links "$WHEELHOUSE")
+    # --no-build-isolation stops pip from fetching build backends over the
+    # network; the wheelhouse must therefore also contain any prebuilt wheels
+    # (setuptools/wheel and the honor packages) needed for an offline install.
+    PIP_ARGS+=(--no-index --find-links "$WHEELHOUSE" --no-build-isolation)
 fi
 if [[ -n "$HONOR_TOOLS_ROOT" && -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]]; then
     mkdir -p "$STAGE/honor-tools"
@@ -270,7 +315,9 @@ install_managed "$ROOT/packaging/polkit/org.honorlinux.control.policy" /usr/shar
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/share/applications/org.honorlinux.Control.desktop 0644
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop 0644
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop 0644
-install_managed "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
+if $TOUCHPAD_FIRMWARE; then
+    install_managed "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
+fi
 install_managed "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore 0755
 install_managed "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml 0644
 install -d -m755 /usr/lib/honor-touchpad/honor_control/{core,backend,cli}
@@ -299,6 +346,14 @@ systemctl daemon-reload
 systemctl reload dbus 2>/dev/null || true
 command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database /usr/share/applications 2>/dev/null || true
+if $TOUCHPAD_FIRMWARE; then
+    echo "==> Touchpad firmware writes QUALIFIED: enabling honor-touchpad-restore.service"
+    systemctl enable honor-touchpad-restore.service 2>/dev/null || true
+else
+    # Firmware writes are unqualified by default: never leave the automatic
+    # restore unit enabled (also covers upgrades from a qualified install).
+    systemctl disable --now honor-touchpad-restore.service 2>/dev/null || true
+fi
 for module in acpi_call uinput; do
     if ! modprobe "$module" 2>/dev/null; then
         echo "warning: kernel module $module is unavailable; related features will be disabled" >&2

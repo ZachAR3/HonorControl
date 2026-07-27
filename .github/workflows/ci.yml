@@ -4,10 +4,31 @@ on:
   push:
   pull_request:
 
+# Least privilege: hosted CI only needs to read the repository.
 permissions:
   contents: read
 
+# NOTE: hosted CI runs the offline / fake-hardware gates ONLY.
+# Disposable-VM installer lifecycle tests (install / rollback / uninstall in a
+# throwaway VM) and real-hardware qualification are SEPARATE self-hosted /
+# manual gates and are intentionally NOT run here.
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ruff
+      - name: Ruff lint
+        run: ruff check honor_control tests
+      - name: Byte-compile sanity check
+        run: python -m compileall -q honor_control tests
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -15,15 +36,114 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
       - name: Install Qt runtime libraries
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1
       - run: python -m pip install --upgrade pip
+      # pytest-cov is installed here (not in pyproject) so the coverage floor
+      # tooling stays a CI concern.
+      - run: python -m pip install ".[gui,dev]" pytest-cov
+      # Branch coverage with a hard 72% floor (measured project baseline).
+      # `-m "not hardware"` selects the whole suite today because no test
+      # carries a `hardware` mark yet; it becomes meaningful once
+      # hardware-marked tests exist for the separate self-hosted hardware gate.
+      - name: Pytest with branch coverage (72% floor)
+        run: pytest -q -m "not hardware" --cov=honor_control --cov-branch --cov-fail-under=72
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ".[gui,dev]" pip-audit bandit
+      # Best effort: report dependency vulnerabilities but do not fail the gate
+      # (findings are often in transitive deps outside this repo's control).
+      - name: pip-audit (best effort)
+        run: pip-audit || echo "::warning::pip-audit reported findings or could not run"
+      # Best effort: surface medium/high bandit findings without failing the job.
+      - name: Bandit (medium/high, best effort)
+        run: bandit -r honor_control -ll || echo "::warning::bandit reported medium/high findings"
+      # Secret scanning is a HARD gate: gitleaks if present, otherwise a
+      # grep-based token/key pattern check that fails on any hit.
+      - name: Secret scan (hard gate)
+        run: |
+          if command -v gitleaks >/dev/null 2>&1; then
+            gitleaks detect --no-banner --verbose
+          else
+            echo "gitleaks unavailable; running grep-based secret scan"
+            if grep -rInE               -e 'AKIA[0-9A-Z]{16}'               -e '-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'               -e 'ghp_[0-9A-Za-z]{36}'               -e 'xox[baprs]-[0-9A-Za-z-]{10,}'               --exclude-dir=.git --exclude-dir=.github --exclude-dir=.venv               --exclude-dir=build --exclude-dir=dist               --exclude-dir='Reverse engineering' . ; then
+              echo "::error::secret scan matched a token/key pattern"
+              exit 1
+            fi
+            echo "grep secret scan: no matches"
+          fi
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: bash -n syntax check
+        run: |
+          set -e
+          for f in scripts/*.sh packaging/systemd/honor-touchpad-system-sleep; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+      # shellcheck is a HARD gate: any finding fails the job.
+      - name: shellcheck (hard gate)
+        run: shellcheck scripts/*.sh packaging/systemd/honor-touchpad-system-sleep
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install validators
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils desktop-file-utils
+      # XML well-formedness is a HARD gate.
+      - name: xmllint polkit + dbus XML (hard gate)
+        run: |
+          xmllint --noout packaging/polkit/*.policy
+          xmllint --noout packaging/dbus/*.conf
+      # Best effort / allow-unavailable: warn but do not fail when the tool is
+      # missing or the sandboxed unit references paths absent in CI.
+      - name: desktop-file-validate (allow unavailable)
+        run: |
+          if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate packaging/desktop/*.desktop ||               echo "::warning::desktop-file-validate reported issues"
+          else
+            echo "desktop-file-validate unavailable; skipping"
+          fi
+      - name: systemd-analyze verify (allow unavailable)
+        run: |
+          if command -v systemd-analyze >/dev/null 2>&1; then
+            systemd-analyze verify               packaging/systemd/honor-control.service               packaging/systemd/honor-touchpad-restore.service ||               echo "::warning::systemd-analyze verify reported issues"
+          else
+            echo "systemd-analyze unavailable; skipping"
+          fi
+      - run: python -m pip install --upgrade pip
       - run: python -m pip install ".[gui,dev]"
-      - run: ruff check honor_control tests
-      - run: pytest -q -m "not hardware"
-      - run: python -m build
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Verify artifacts contain the package (hard gate)
+        run: |
+          set -e
+          ls -l dist/
+          test "$(ls dist/*.whl | wc -l)" -ge 1 || { echo "no wheel built"; exit 1; }
+          test "$(ls dist/*.tar.gz | wc -l)" -ge 1 || { echo "no sdist built"; exit 1; }
+          python -m zipfile -l "$(ls dist/*.whl | head -n1)" | grep -q 'honor_control/'             || { echo "wheel missing honor_control package"; exit 1; }
+          tar -tzf "$(ls dist/*.tar.gz | head -n1)" | grep -q 'honor_control/'             || { echo "sdist missing honor_control package"; exit 1; }
+          echo "wheel + sdist both contain honor_control/"

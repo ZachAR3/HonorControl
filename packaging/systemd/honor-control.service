@@ -1,6 +1,6 @@
 [Unit]
 Description=Honor Control D-Bus backend service
-Documentation=https://github.com/HonorLinux/honor-control
+Documentation=https://github.com/ZachAR3/HonorControl
 After=dbus.service
 Wants=polkit.service
 StartLimitIntervalSec=60

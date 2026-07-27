@@ -2,6 +2,35 @@
 
 ## [Unreleased] - 0.2.0
 
+### Security / Release hardening
+
+- Touchpad firmware setting writes are now disabled by default behind the
+  `touchpad_firmware_writes_qualified` capability gate (default `false`);
+  probe, encode, and gesture input remain available.
+- The automatic `honor-touchpad-restore.service` unit is no longer installed
+  or enabled unless firmware writes are qualified (installer flag
+  `--enable-touchpad-firmware` / env `HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`).
+- The installer now supports a fully offline, hash-verified install:
+  `--wheelhouse DIR` requires and verifies a `SHA256SUMS` file and installs
+  with `--no-index --find-links --no-build-isolation`.
+- Added a supported rollback path (`scripts/install-local.sh --rollback` or
+  `scripts/rollback.sh`) that atomically repoints `/opt/honor-control/current`
+  to the retained predecessor release and restarts the service.
+- Added `scripts/make-release-bundle.sh` to assemble a versioned, checksummed
+  offline release bundle (wheel + sdist, packaging tree, installer scripts,
+  `SHA256SUMS`, `MANIFEST`, and a minimal `sbom.json` of pinned deps).
+- CI split into `lint`, `test`, `security`, `shell`, and `packaging` jobs:
+  branch-coverage floor (`--cov-branch --cov-fail-under=72`), shellcheck,
+  `xmllint` packaging validation, `pip-audit` / `bandit` / secret scanning,
+  and all actions pinned to full commit SHAs.
+- Removed the unhardened direct-`Exec` / `User=root` D-Bus activation
+  fallback; activation now requires systemd
+  (`SystemdService=honor-control.service`).
+- Corrected repository URLs (`HonorLinux/honor-control` to
+  `ZachAR3/HonorControl`) in the systemd unit and polkit policy, and replaced
+  the README "personally tested all" claim with a per-feature verification
+  status table.
+
 ### Fixed
 
 - Power-profile application now coordinates with PPD without masking host

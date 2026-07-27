@@ -1,5 +1,14 @@
 # Honor touchpad WMI bridge
 
+> **EXPERIMENTAL — DO NOT SHIP.** This module is an early research prototype.
+> It is **not** built or installed by the main installer
+> (`scripts/install-local.sh`), and it is **not qualified**: no load, query,
+> toggle, or restore testing has been done on real hardware. Build it only
+> **out-of-tree**, against a **supported kernel** with the matching toolchain
+> and kernel headers, and only on the exact platform it binds to
+> (`HONOR/MRA-XXX`). Treat any write through it as potentially irreversible
+> until the first on-hardware Linux call has been captured.
+
 This optional, deliberately narrow module implements only the global
 touchpad-enable method used by the updated Windows plugin. All sensitivity,
 haptic, pressure, edge, drag, mouse-like, screenshot, and recording settings
@@ -12,6 +21,14 @@ The driver binds only when both conditions match:
 
 It exposes one boolean `touchpad_enabled` attribute. There is no generic WMI,
 ACPI, EC, or raw-command interface.
+
+## Why this directory has no spaces
+
+The module was moved out of a path that contained a space. The in-tree build
+hands the kernel build system the current directory via `M=$(CURDIR)`; a space
+in `$(CURDIR)` broke that `make` invocation. This space-free location
+(`experimental/touchpad-wmi/`) fixes it — do not move the module back under a
+path containing spaces.
 
 ## One-kernel build
 

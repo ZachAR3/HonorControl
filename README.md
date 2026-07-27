@@ -8,12 +8,21 @@ D-Bus service and Qt6 GUI for managing Honor MagicBook laptops on Linux.
 verified against fake hardware in CI; real hardware testing is an
 explicit, manual pre-release gate.
 
-**Compatibility:** hardware writes are enabled only for the verified Honor
-MagicBook Art 14 (`MRA-XXX`) with a supported Intel Core Ultra/Meteor Lake
-CPU. Other Intel and AMD models are not allowlisted and receive no power,
-fan, or GPU writes. Power profiles use PPD plus standard Intel sysfs controls;
-the service does not write raw CPU MSRs or disable host power-management
-services.
+**Supported hardware matrix.** Hardware writes are enabled only on an exact
+positive platform match; there is no fallback to a default platform.
+
+| Requirement | Supported value |
+|---|---|
+| DMI vendor / product | `HONOR` / `MRA-XXX` (Honor MagicBook Art 14) |
+| CPU (required for fan writes) | Intel Core Ultra 5 125H (Meteor Lake) — exact |
+| Kernel modules | `acpi_call` (fan/EC) and `uinput` (gesture output) |
+
+AMD and all other Intel models are not allowlisted and receive **no** power,
+fan, or GPU writes. Power profiles coordinate through PPD plus standard Intel
+RAPL/`intel_pstate` sysfs controls; the service never writes raw CPU MSRs or
+disables host power-management services. No specific minimum BIOS or kernel
+version is pinned — the tested platform is a current distribution kernel that
+provides the modules above on that exact Meteor Lake SKU.
 
 - **Battery charge control:** verified (sysfs charge thresholds)
 - **Power profiles:** enabled only on the verified MRA-XXX platform (requires
@@ -86,8 +95,10 @@ GUI / Tray                    CLI
 6. **Structured results:** every mutation returns an `OperationResult`
    with `changed`, `persisted`, and `applied` booleans. Config
    persistence is never reported as hardware success.
-7. **Qt main thread is I/O-free:** all D-Bus, filesystem, subprocess,
-   and hardware I/O happens on a dedicated worker thread.
+7. **Qt main thread is I/O-free in practice:** all D-Bus, filesystem,
+   subprocess, and hardware I/O happens on a dedicated worker thread. The
+   documented exception is tiny `QSettings` reads/writes (window geometry and
+   the close-to-tray preference), which touch a small per-user config file.
 
 ## Installation
 
@@ -225,8 +236,29 @@ Linux community. In particular:
 
 ## Disclaimer
 
-This software is **AI-generated**. While I have personally tested all of
-it on my own hardware, it is provided "AS IS", without warranty of any
-kind, express or implied. I am **not responsible** for any issues, data
-loss, or hardware damage that may occur from using this product. You use
+This software is **AI-generated**. It is provided "AS IS", without warranty
+of any kind, express or implied. I am **not responsible** for any issues,
+data loss, or hardware damage that may occur from using this product. You use
 it entirely at your own risk.
+
+The features below do not all carry the same level of evidence. Some are
+exercised only against fake hardware in CI, some are reconstructed statically
+from Windows protocol captures, some have been run on the author's own
+machine, and some are disabled outright until they can be made safe. Judge the
+risk for your use case accordingly.
+
+### Feature verification status
+
+| Feature | Status | Evidence / notes |
+|---|---|---|
+| Battery charge control | `physically-verified` | sysfs charge thresholds on the author's machine |
+| Power profiles | `physically-verified` | MRA-XXX |
+| Fan control | `physically-verified` | MRA-XXX + Intel Core Ultra 5 125H |
+| Gesture input (decode + uinput) | `physically-verified` | HID report `0x0e` decode to uinput dispatch |
+| Touchpad firmware setting writes | `disabled` | pending physical Linux replay gate |
+| GPU IRQ mitigation | `disabled` | no safe restore of original IRQ/C-state values |
+
+Status labels: `physically-verified` = run on real hardware; `simulated` =
+exercised against fake hardware in CI only; `static` = statically
+reconstructed from protocol captures, not yet replayed on Linux hardware;
+`disabled` = gated off in production builds.

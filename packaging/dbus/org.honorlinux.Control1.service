@@ -1,12 +1,16 @@
 # D-Bus system-bus service activation file.
 # When a client calls a method on org.honorlinux.Control1 and nothing owns
-# the name yet, dbus-daemon starts this service via systemd (SystemdService)
+# the name yet, dbus-daemon activates it through systemd (SystemdService)
 # rather than spawning a new process — so there is exactly one instance.
+#
+# Activation REQUIRES systemd. There is deliberately no direct Exec=/User=
+# fallback: an unhardened direct-exec activation path would bypass the
+# hardened systemd unit (ProtectSystem=strict, ProtectHome=true,
+# NoNewPrivileges=true, ...). On a host without systemd, start the service
+# from its unit file manually — dbus-daemon will not auto-spawn it.
 
 [D-BUS Service]
 Name=org.honorlinux.Control1
-# systemd owns the lifecycle; no direct Exec here to avoid duplicate forks.
+# systemd owns the lifecycle; no direct Exec here to avoid duplicate forks
+# and to keep activation inside the hardened unit.
 SystemdService=honor-control.service
-# Fallback direct exec (used when systemd activation is unavailable):
-Exec=/usr/bin/honor-control-service
-User=root

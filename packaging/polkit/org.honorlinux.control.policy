@@ -14,8 +14,8 @@
 
 <policyconfig>
 
-  <vendor>HonorLinux</vendor>
-  <vendor_url>https://github.com/HonorLinux/honor-control</vendor_url>
+  <vendor>ZachAR3</vendor>
+  <vendor_url>https://github.com/ZachAR3/HonorControl</vendor_url>
 
   <!-- Charge limit (sysfs write, low-risk) — active local user -->
   <action id="org.honorlinux.control.set-charge-limit">
