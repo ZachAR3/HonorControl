@@ -2,7 +2,7 @@
 
 This is the complete contract needed to reimplement every recovered Honor
 touchpad configuration operation without the Windows Honor application.
-`../protocol.json` is the machine-readable source of truth; this document adds
+`touchpad.json` is the machine-readable source of truth; this document adds
 the ordering, discovery, failure behavior, and implementation boundaries that
 are not obvious from a command table.
 
@@ -77,7 +77,7 @@ already accepted by firmware cannot be read back transactionally.
 Write `0e f0 00 00 00 00 00 00 00`, then read the same vendor node until the
 9-byte response `0e f0 <seven bitmap bytes>` arrives or a timeout expires.
 Bitmap numbering starts at byte 2, least-significant bit first. Known bits are
-fully listed in `../protocol.json`.
+fully listed in `touchpad.json`.
 
 Only one process should read the vendor node during this query. A gesture daemon
 and diagnostic query can otherwise race for the response. Normal input reports
@@ -156,7 +156,7 @@ hardware write.
 A port is complete when:
 
 1. exact DMI and vendor collection are discovered without a hardcoded node;
-2. every report matches `../protocol.json` byte-for-byte;
+2. every report matches `touchpad.json` byte-for-byte;
 3. three-finger drag always writes both reports in order;
 4. complete validation occurs before the first write;
 5. short writes, timeouts, disconnects, and partial profiles fail visibly;

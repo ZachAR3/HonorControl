@@ -18,7 +18,7 @@ DEFAULT_GESTURE_MAPPINGS: dict[str, str] = {
     "4:2": "volumedown",
     "10:3": "leftmeta,v",
     "6": "print",
-    # Firmware input type 7 is "screen recording" (see protocol.json); Linux
+    # Firmware input type 7 is "screen recording" (see docs/protocol/touchpad.json);
     # has no universal screen-recording key, so the default chord emulates a
     # selective screenshot (Shift+Print).
     "7": "leftshift,print",

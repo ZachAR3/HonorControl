@@ -3,8 +3,8 @@
 The protocol is recovered; this runbook performs the physical validation that
 cannot run while the laptop is booted into Windows.
 
-For a clean-room implementation in another language, read `PORTING_SPEC.md`
-together with `../protocol.json`. It defines discovery, ordering, failure
+For a clean-room implementation in another language, read `../protocol/touchpad-porting-spec.md`
+together with `../protocol/touchpad.json`. It defines discovery, ordering, failure
 semantics, the input-event boundary, the master WMI ABI, and completion tests.
 
 ## 1. Read-only preflight
@@ -63,7 +63,7 @@ Restart the service afterward if it had been enabled.
 
 ## 5. Optional master switch
 
-Connect an external mouse. Follow `wmi/README.md` to build and load the module,
+Connect an external mouse. Follow `../../experimental/touchpad-wmi/README.md` to build and load the module,
 then query before writing:
 
 ```bash

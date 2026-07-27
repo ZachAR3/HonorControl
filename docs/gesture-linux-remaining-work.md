@@ -23,11 +23,11 @@ The Linux implementation consists of:
   typed hidraw transport, timeout handling, batching, and support query;
 - `honor_control/cli/touchpadctl.py`: `probe`, `encode`, `set`, `apply`,
   `support`, and `master` operations;
-- `Reverse engineering/finish-trackpad-re/linux/wmi/`: optional narrow kernel
+- `experimental/touchpad-wmi/`: optional narrow kernel
   driver for the master switch;
 - `packaging/systemd/honor-touchpad-restore.service`: boot restore plus a
   system-sleep hook for resume;
-- `Reverse engineering/finish-trackpad-re/protocol.json`: machine-readable
+- `docs/protocol/touchpad.json`: machine-readable
   protocol contract.
 
 ## Proven route
