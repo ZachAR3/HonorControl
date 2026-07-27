@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6==6.11.1"]
-dev = ["ruff", "pytest", "pytest-asyncio", "build"]
+dev = ["ruff", "pytest", "pytest-asyncio", "pytest-cov", "build"]
 
 [project.scripts]
 # Root backend service (runs under systemd as root).

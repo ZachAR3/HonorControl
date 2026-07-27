@@ -15,10 +15,13 @@ from honor_control.backend.touchpad_firmware import (
 from honor_control.core.touchpad import (
     SUPPORTED_GESTURE_BITS,
     TOUCHPAD_SETTING_SPECS,
+    TouchpadLockBusy,
     TouchpadSetting,
     encode_touchpad_setting,
     parse_touchpad_setting,
     parse_touchpad_value,
+    touchpad_firmware_lock,
+    touchpad_firmware_writes_qualified,
 )
 
 WMI_GUID = "ABBC0F5B-8EA1-11D1-A000-C90629100000"
@@ -164,6 +167,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass the inter-process touchpad lock (recovery only; unsafe "
+        "while honor-control.service is applying settings)",
+    )
+    parser.add_argument(
         "--sysfs-root",
         type=pathlib.Path,
         default=pathlib.Path("/sys/class/hidraw"),
@@ -241,8 +250,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def _run(args: argparse.Namespace) -> int:
     try:
         transport = TouchpadFirmwareTransport(
             sysfs_root=args.sysfs_root,
@@ -425,12 +433,57 @@ def main(argv: list[str] | None = None) -> int:
             print(f"honor-touchpadctl: {exc}", file=sys.stderr)
         if isinstance(exc, ValueError):
             return EXIT_USAGE
+        if isinstance(exc, (FileNotFoundError, IsADirectoryError)):
+            # A missing/invalid profile path is a usage error, not a hardware
+            # availability condition.
+            return EXIT_USAGE
         if isinstance(exc, TouchpadFirmwareError):
             return EXIT_OPERATION_FAILED if exc.reports_applied else EXIT_UNAVAILABLE
         if isinstance(exc, OSError):
             return EXIT_UNAVAILABLE
         return EXIT_OPERATION_FAILED
     return EXIT_OPERATION_FAILED
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    write_command = args.command in {"set", "master"} or (
+        args.command == "apply" and not getattr(args, "dry_run", False)
+    )
+    needs_lock = write_command or args.command == "support"
+    # HC-001: firmware setting writes are disabled until qualified; --force
+    # overrides for diagnostics/recovery.  Probe/list/encode/support stay
+    # available either way.
+    if write_command and not args.force and not touchpad_firmware_writes_qualified():
+        print(
+            "honor-touchpadctl: firmware setting writes are not qualified on "
+            "this build (probe/list/encode/support remain available). Use "
+            "--force to override for diagnostics/recovery.",
+            file=sys.stderr,
+        )
+        return EXIT_UNAVAILABLE
+    # HC-011: write/support commands take an exclusive inter-process lock so a
+    # standalone run cannot interleave with honor-control.service.  Read-only
+    # probe/list/encode (and --force recovery) skip it.
+    if not needs_lock:
+        return _run(args)
+    if args.force:
+        print(
+            "honor-touchpadctl: --force bypasses the touchpad lock; do not use "
+            "while honor-control.service is applying settings",
+            file=sys.stderr,
+        )
+        return _run(args)
+    try:
+        with touchpad_firmware_lock():
+            return _run(args)
+    except TouchpadLockBusy as exc:
+        print(
+            f"honor-touchpadctl: {exc}; is honor-control.service applying "
+            "touchpad settings? Use --force to override.",
+            file=sys.stderr,
+        )
+        return EXIT_UNAVAILABLE
 
 
 if __name__ == "__main__":

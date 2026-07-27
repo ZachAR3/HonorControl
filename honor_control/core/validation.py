@@ -377,7 +377,9 @@ LOG_MAX_LINES = 500
 
 def validate_log_lines(lines: int) -> int:
     """Validate a recent-logs line count (1-500)."""
-    if not isinstance(lines, int):
+    # Reject bool explicitly (bool is an int subclass) to honor the module's
+    # no-silent-coercion charter, matching the other integer validators.
+    if isinstance(lines, bool) or not isinstance(lines, int):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
             "Lines must be an integer",

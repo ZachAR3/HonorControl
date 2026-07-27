@@ -360,3 +360,29 @@ class TestSystemSnapshot:
         assert snap.schema_version == SCHEMA_VERSION
         assert snap.sequence == 0
         assert snap.battery == BatterySnapshot()
+
+
+class TestTouchpadFirmwareLock:
+    """HC-011: the advisory firmware lock excludes concurrent writers."""
+
+    def test_lock_reports_busy_while_held_then_releases(self, tmp_path) -> None:
+        from honor_control.core.touchpad import (
+            TouchpadLockBusy,
+            touchpad_firmware_lock,
+        )
+
+        lock_path = str(tmp_path / "touchpad.lock")
+        with touchpad_firmware_lock(lock_path):
+            with pytest.raises(TouchpadLockBusy):
+                with touchpad_firmware_lock(lock_path):
+                    pass
+        # Released when the outer block exits: re-acquire now succeeds.
+        with touchpad_firmware_lock(lock_path):
+            pass
+
+    def test_lock_degrades_when_path_unwritable(self, monkeypatch) -> None:
+        from honor_control.core.touchpad import touchpad_firmware_lock
+
+        # An uncreatable lock path (unprivileged /run) must not fail the op.
+        with touchpad_firmware_lock("/proc/definitely-not-writable/x.lock"):
+            pass

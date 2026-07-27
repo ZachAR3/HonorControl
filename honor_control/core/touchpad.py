@@ -13,8 +13,11 @@ The output protocol has not yet been wire-captured or replayed on Linux hardware
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -44,6 +47,60 @@ def touchpad_firmware_writes_qualified() -> bool:
     production path can write unqualified reports.
     """
     return os.environ.get(_FIRMWARE_QUALIFIED_ENV, "").strip() == "1"
+
+
+#: Environment override for the inter-process touchpad firmware lock path
+#: (tests point this at a temporary file).
+TOUCHPAD_LOCK_ENV: Final = "HONOR_CONTROL_TOUCHPAD_LOCK"
+_DEFAULT_TOUCHPAD_LOCK: Final = "/run/honor-control/touchpad.lock"
+
+
+class TouchpadLockBusy(RuntimeError):
+    """The touchpad firmware lock is held by another writer."""
+
+
+@contextlib.contextmanager
+def touchpad_firmware_lock(
+    path: str | None = None, *, blocking: bool = False
+) -> Iterator[None]:
+    """Serialize exclusive access to the touchpad firmware endpoint (HC-011).
+
+    The root service holds this while applying/querying firmware settings and
+    the standalone ``honor-touchpadctl`` write/support commands take it too, so
+    two writers cannot interleave multi-report operations.  Read-only
+    probe/list/encode callers need not take it.
+    """
+    lock_path = path or os.environ.get(TOUCHPAD_LOCK_ENV) or _DEFAULT_TOUCHPAD_LOCK
+    directory = os.path.dirname(lock_path)
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o640)
+    except OSError:
+        # The lock is advisory/best-effort: if it cannot be created (e.g. an
+        # unprivileged environment without a writable /run), proceed unlocked
+        # rather than failing the operation.  In production both the root
+        # service and the root CLI can always create it.
+        yield
+        return
+    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(fd, flags)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise TouchpadLockBusy(
+            "touchpad firmware is busy (held by another writer)"
+        ) from exc
+    except OSError:
+        os.close(fd)
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 class TouchpadSetting(StrEnum):

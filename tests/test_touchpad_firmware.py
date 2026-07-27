@@ -27,6 +27,12 @@ from honor_control.core.touchpad import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _qualify_firmware_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module exercises the (gated) firmware write path directly."""
+    monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
+
+
 VENDOR_DESCRIPTOR = bytes.fromhex(
     # Usage Page (Vendor 0xff00), Usage 1, Application collection
     "06 00 ff 09 01 a1 01 "
@@ -362,3 +368,22 @@ def test_touchpad_cli_uses_shared_exit_code_categories(
         )
         == 4
     )
+
+
+def test_touchpadctl_write_is_gated_when_unqualified(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HC-001: without the qualification flag, write commands refuse; --force
+    and probe/encode remain available."""
+    monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
+    sysfs, dev = _fake_device(tmp_path)
+    base = ["--sysfs-root", str(sysfs), "--dev-root", str(dev)]
+
+    # Unqualified write is refused (unavailable), hardware untouched.
+    assert touchpadctl_main([*base, "set", "sensitivity", "high"]) == 3
+
+    # Read-only encode still works.
+    assert touchpadctl_main(["encode", "sensitivity", "high"]) == 0
+
+    # --force overrides the gate (diagnostics/recovery).
+    assert touchpadctl_main([*base, "--force", "set", "sensitivity", "high"]) == 0

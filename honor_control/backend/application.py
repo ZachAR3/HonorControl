@@ -76,8 +76,10 @@ from honor_control.core.models import (
 )
 from honor_control.core.touchpad import (
     SUPPORTED_GESTURE_BITS,
+    TouchpadLockBusy,
     parse_touchpad_setting,
     parse_touchpad_value,
+    touchpad_firmware_lock,
     touchpad_firmware_writes_qualified,
 )
 from honor_control.core.validation import (
@@ -290,7 +292,15 @@ class ApplicationService:
 
     @_serialized_mutation
     async def reload(self) -> OperationResult:
-        """Reload config and reconcile only supported runtime transitions."""
+        """Reload config and reconcile only supported runtime transitions.
+
+        Contract: fan mode, gesture runtime, and power profile changes are
+        reconciled to hardware.  Battery thresholds and touchpad firmware
+        settings are loaded into desired state but NOT re-applied on reload
+        (touchpad writes stay gated behind HC-001 qualification); the result
+        ``details`` reports those domains as ``loaded_not_applied`` so callers
+        never assume hardware convergence for them.
+        """
         config_loaded = False
         try:
             previous = self._config.state
@@ -356,6 +366,14 @@ class ApplicationService:
                         applied = True
                     else:
                         failures.append(power_result.message)
+
+            # Battery thresholds and touchpad firmware settings are loaded into
+            # desired state but intentionally not re-applied to hardware here.
+            # Surface that explicitly instead of implying convergence.
+            if previous.battery != current.battery:
+                details["battery"] = "loaded_not_applied"
+            if previous.touchpad != current.touchpad:
+                details["touchpad"] = "loaded_not_applied"
 
             await self._refresh_all()
             if failures:
@@ -1315,6 +1333,23 @@ class ApplicationService:
                 ),
                 sequence=self._snapshots.sequence,
             )
+        try:
+            with touchpad_firmware_lock():
+                return await self._apply_touchpad_settings_unlocked(settings)
+        except TouchpadLockBusy:
+            return OperationResult.unavailable(
+                code="touchpad_busy",
+                message=(
+                    "Touchpad firmware is busy (standalone honor-touchpadctl "
+                    "holds the device); retry shortly"
+                ),
+                sequence=self._snapshots.sequence,
+            )
+
+    async def _apply_touchpad_settings_unlocked(
+        self, settings: dict[str, int]
+    ) -> OperationResult:
+        """Validate and apply one profile; the caller holds the device lock."""
         if not isinstance(settings, dict) or not settings:
             raise DomainException(
                 DomainError.INVALID_ARGUMENT,
@@ -1440,6 +1475,17 @@ class ApplicationService:
     @_serialized_mutation
     async def query_touchpad_support(self) -> dict[str, Any]:
         """Query capabilities while holding exclusive ownership of the reader."""
+        try:
+            with touchpad_firmware_lock():
+                return await self._query_touchpad_support_unlocked()
+        except TouchpadLockBusy:
+            raise DomainException(
+                DomainError.BUSY,
+                "Touchpad firmware is busy (standalone honor-touchpadctl holds "
+                "the device)",
+            ) from None
+
+    async def _query_touchpad_support_unlocked(self) -> dict[str, Any]:
         restart_runtime = bool(
             self._gesture_runtime is not None
             and self._config.state.gestures.daemon_enabled
@@ -1566,6 +1612,8 @@ class ApplicationService:
     async def get_debug_bundle(self) -> dict[str, Any]:
         """Return a bounded, redacted JSON-serializable debug bundle."""
         snap = self._snapshots.snapshot
+        stuck = self._queue.stuck_info()
+        rollback = self._power_recovery_detail.get("rollback", {})
         return {
             "api_version": snap.api_version,
             "schema_version": snap.schema_version,
@@ -1585,6 +1633,31 @@ class ApplicationService:
                 for name, c in snap.capabilities.items()
             },
             "stale_domains": list(snap.stale_domains),
+            # HC-020: bounded recovery/observability context so incidents can be
+            # diagnosed from the bundle alone (no unbounded payloads).
+            "recovery": {
+                "hardware_queue_stuck": stuck is not None,
+                "stuck_command": stuck.name if stuck is not None else "",
+                "stuck_seconds": round(self._queue.poisoned_duration(), 1),
+                "fan_fail_safe_error": self._fan_fail_safe_error,
+                "fan_restore_pending": self._fan_restore_pending,
+                "power_recovery_required": self._power_recovery_required,
+                "power_rollback": {
+                    "profile": self._power_recovery_detail.get("profile", ""),
+                    "attempted": bool(rollback.get("attempted")),
+                    "ok": bool(rollback.get("ok")),
+                }
+                if self._power_recovery_required
+                else {},
+                "controller_restart_counts": dict(self._supervisor.restart_counts()),
+            },
+            "config": {
+                "valid": self._config.valid,
+                "last_error": self._config.last_error,
+                "unknown_keys": list(self._config.unknown_keys),
+            },
+            "touchpad_firmware_writes_qualified": touchpad_firmware_writes_qualified(),
+            "ac_online": snap.power.ac_online,
         }
 
     async def get_recent_logs(self, lines: int) -> list[str]:
