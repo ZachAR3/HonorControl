@@ -13,6 +13,7 @@ The output protocol has not yet been wire-captured or replayed on Linux hardware
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,6 +27,23 @@ TOUCHPAD_VENDOR_USAGE_PAGE: Final = 0xFF00
 TOUCHPAD_VENDOR_USAGE: Final = 0x0001
 TOUCHPAD_REPORT_ID: Final = 0x0E
 TOUCHPAD_REPORT_BYTES: Final = 9
+
+#: Environment flag that qualifies touchpad firmware setting writes for
+#: production.  Such writes have no readback or rollback and have not passed
+#: the documented physical Linux replay gate, so they stay disabled unless an
+#: explicit, reviewed hardware qualification record exists.  Probe, descriptor
+#: inspection, dry-run encoding, and gesture input are unaffected.
+_FIRMWARE_QUALIFIED_ENV: Final = "HONOR_TOUCHPAD_FIRMWARE_QUALIFIED"
+
+
+def touchpad_firmware_writes_qualified() -> bool:
+    """Return True only if firmware writes were explicitly qualified.
+
+    Reads ``HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`` (matching the installer's
+    ``--enable-touchpad-firmware`` flag).  Defaults to False so that no
+    production path can write unqualified reports.
+    """
+    return os.environ.get(_FIRMWARE_QUALIFIED_ENV, "").strip() == "1"
 
 
 class TouchpadSetting(StrEnum):

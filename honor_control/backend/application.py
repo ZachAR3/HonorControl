@@ -78,6 +78,7 @@ from honor_control.core.touchpad import (
     SUPPORTED_GESTURE_BITS,
     parse_touchpad_setting,
     parse_touchpad_value,
+    touchpad_firmware_writes_qualified,
 )
 from honor_control.core.validation import (
     thresholds_for_mode,
@@ -1296,6 +1297,7 @@ class ApplicationService:
             "report_id": probe.report_id if probe.report_id is not None else -1,
             "input_report_bytes": probe.input_report_bytes,
             "output_report_bytes": probe.output_report_bytes,
+            "firmware_writes_qualified": touchpad_firmware_writes_qualified(),
             "error": probe.error,
         }
 
@@ -1304,6 +1306,15 @@ class ApplicationService:
         self, settings: dict[str, int]
     ) -> OperationResult:
         """Validate and apply a profile, persisting only accepted writes."""
+        if not touchpad_firmware_writes_qualified():
+            return OperationResult.unavailable(
+                code="touchpad_firmware_unqualified",
+                message=(
+                    "Touchpad firmware writes are not qualified on this build; "
+                    "probe/encode remain available"
+                ),
+                sequence=self._snapshots.sequence,
+            )
         if not isinstance(settings, dict) or not settings:
             raise DomainException(
                 DomainError.INVALID_ARGUMENT,
@@ -1829,6 +1840,7 @@ class ApplicationService:
                     mappings=self._gesture_entries(),
                     wmi_transport_present=wmi_transport_present(),
                     firmware_settings_supported=firmware_probe.available,
+                    firmware_writes_qualified=touchpad_firmware_writes_qualified(),
                     firmware_settings=dict(self._config.state.touchpad.settings),
                     last_error=status.last_error or probe.error,
                 )
@@ -1841,6 +1853,7 @@ class ApplicationService:
                     ges,
                     daemon_enabled=self._config.state.gestures.daemon_enabled,
                     mappings=self._gesture_entries(entries),
+                    firmware_writes_qualified=touchpad_firmware_writes_qualified(),
                     firmware_settings=dict(self._config.state.touchpad.settings),
                 )
             await self._snapshots.update("gestures", ges)

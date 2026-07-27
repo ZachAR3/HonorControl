@@ -241,6 +241,70 @@ class TestHonorToolsAdapterGpuGate:
         assert result["restored"] is False
         assert "not implemented" in result["error"]
 
+    def test_apply_is_fail_closed_without_restore(self, tmp_path, monkeypatch) -> None:
+        """HC-014: the adapter itself refuses the irreversible GPU write.
+
+        Even with honor-tools importable, apply must fail closed at the adapter
+        until a verified restore exists — safety cannot depend on every caller
+        remembering to check capability writability first.
+        """
+
+        def boom_apply(*args, **kwargs):
+            raise AssertionError("apply_irq_fix must never run")
+
+        honor_module = types.ModuleType("honor")
+        honor_module.__path__ = []  # type: ignore[attr-defined]
+        gpu_module = types.ModuleType("honor.gpu")
+        gpu_module.apply_irq_fix = boom_apply  # type: ignore[attr-defined]
+        config_module = types.ModuleType("honor.config")
+        config_module.Config = object  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "honor", honor_module)
+        monkeypatch.setitem(sys.modules, "honor.gpu", gpu_module)
+        monkeypatch.setitem(sys.modules, "honor.config", config_module)
+
+        result = HonorToolsAdapter(root_path=tmp_path).apply_gpu_mitigation()
+        assert result["restored"] is False
+        assert "disabled" in result["error"]
+
+
+class TestAcOnlineDecoding:
+    """HC-003: AC 'online' must decode as a strict tri-state (0/1/None)."""
+
+    def test_read_ac_online_is_strict_tri_state(self, tmp_path) -> None:
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+        supply = tmp_path / "supply"
+        supply.mkdir()
+        (supply / "online").write_text("1", encoding="utf-8")
+        assert adapter._read_ac_online(supply) is True  # noqa: SLF001
+        (supply / "online").write_text("0", encoding="utf-8")
+        assert adapter._read_ac_online(supply) is False  # noqa: SLF001
+        for bad in ("2", "garbage", ""):
+            (supply / "online").write_text(bad, encoding="utf-8")
+            assert adapter._read_ac_online(supply) is None  # noqa: SLF001
+        assert adapter._read_ac_online(None) is None  # noqa: SLF001
+        (supply / "online").unlink()
+        assert adapter._read_ac_online(supply) is None  # noqa: SLF001
+
+    def test_battery_ac_read_failure_is_unknown_not_battery(self, tmp_path) -> None:
+        supplies = tmp_path / "sys/class/power_supply"
+        battery = supplies / "BAT1"
+        mains = supplies / "AC"
+        battery.mkdir(parents=True)
+        mains.mkdir(parents=True)
+        for name, value in {
+            "type": "Battery",
+            "status": "Charging",
+            "charge_control_end_threshold": "80",
+            "charge_control_start_threshold": "75",
+        }.items():
+            (battery / name).write_text(value, encoding="utf-8")
+        (mains / "type").write_text("Mains", encoding="utf-8")
+        # Deliberately no 'online' file: the read fails, which must surface as
+        # "unknown" (None), never as a false "on battery" (False).
+        snapshot = HonorToolsAdapter(root_path=tmp_path).read_battery()
+        assert snapshot.available is True
+        assert snapshot.ac_online is None
+
 
 class TestHonorToolsAdapterFilesystem:
     def test_discovers_rpm_sensor_outside_temperature_hwmon(self, tmp_path) -> None:

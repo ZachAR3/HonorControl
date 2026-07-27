@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import logging
 import signal
+from typing import Any
 
 from honor_control import __version__
 from honor_control.backend.application import ApplicationService
@@ -40,8 +41,12 @@ from honor_control.contract import BUS_NAME
 
 log = logging.getLogger("honor_control.backend.service")
 
+# Bound the emergency fan-auto restore (run as ExecStopPost and on escalation)
+# so a hung EC call cannot wedge shutdown; kept under the unit's TimeoutStopSec.
+EMERGENCY_FAN_RESTORE_TIMEOUT_SECONDS = 8
 
-async def _serve(use_session_bus: bool = False, state_path: str | None = None) -> None:
+
+async def _serve(use_session_bus: bool = False, state_path: str | None = None) -> int:
     """Export the D-Bus interface, publish the bus name, and run forever."""
     import sdbus
     from sdbus import request_default_bus_name_async
@@ -60,6 +65,8 @@ async def _serve(use_session_bus: bool = False, state_path: str | None = None) -
 
     sdbus.set_default_bus(bus)
     loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    escalated = False
 
     # Compose the application.
     config = ConfigStore(state_path=state_path) if state_path else ConfigStore()
@@ -79,6 +86,19 @@ async def _serve(use_session_bus: bool = False, state_path: str | None = None) -
         supervisor=supervisor,
         gesture_runtime=gesture_runtime,
     )
+
+    def _on_stuck_escalation() -> None:
+        # HC-002: a permanently wedged hardware call cannot be cancelled.  Stop
+        # accepting work and exit nonzero so systemd's Restart=on-failure brings
+        # up a fresh process (ExecStopPost restores stock fan auto on the way
+        # out) instead of leaving a healthy-looking, indefinitely read-only
+        # service.
+        nonlocal escalated
+        escalated = True
+        log.critical("hardware queue wedged; escalating for service restart")
+        stop_event.set()
+
+    app.set_stuck_escalation(_on_stuck_escalation)
 
     def unsubscribe() -> None:
         """No-op until the snapshot signal subscription is installed."""
@@ -103,8 +123,6 @@ async def _serve(use_session_bus: bool = False, state_path: str | None = None) -
         log.info("acquired bus name %s", BUS_NAME)
         log.info("honor-control-service v%s ready", __version__)
 
-        stop_event = asyncio.Event()
-
         def _signal_handler() -> None:
             log.info("received stop signal")
             stop_event.set()
@@ -125,6 +143,7 @@ async def _serve(use_session_bus: bool = False, state_path: str | None = None) -
         # any in-flight serialized mutation to finish.
         bus.close()
         await app.shutdown()
+    return 1 if escalated else 0
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -161,17 +180,28 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     if args.restore_fan_auto:
-        hardware = HonorToolsAdapter()
-        platform = hardware.detect_platform()
-        if platform.matched and not hardware.set_fan_auto():
-            log.error("emergency fan-auto restore failed")
+        # Bound the emergency restore so a hung EC call cannot wedge shutdown.
+        def _restore_alarm(signum: int, frame: Any) -> None:
+            raise TimeoutError("emergency fan-auto restore timed out")
+
+        signal.signal(signal.SIGALRM, _restore_alarm)
+        signal.alarm(EMERGENCY_FAN_RESTORE_TIMEOUT_SECONDS)
+        try:
+            hardware = HonorToolsAdapter()
+            platform = hardware.detect_platform()
+            if platform.matched and not hardware.set_fan_auto():
+                log.error("emergency fan-auto restore failed")
+                return 1
+            return 0
+        except TimeoutError:
+            log.error("emergency fan-auto restore timed out")
             return 1
-        return 0
+        finally:
+            signal.alarm(0)
     try:
-        asyncio.run(_serve(args.session_bus, args.state_path))
+        return asyncio.run(_serve(args.session_bus, args.state_path))
     except KeyboardInterrupt:
         return 0
-    return 0
 
 
 if __name__ == "__main__":

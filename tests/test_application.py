@@ -203,7 +203,10 @@ class TestBatteryMutation:
 class TestTouchpadFirmwareMutation:
     """Verify typed touchpad writes and desired-state persistence."""
 
-    def test_apply_profile_persists_only_after_acceptance(self, tmp_path) -> None:
+    def test_apply_profile_persists_only_after_acceptance(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
 
@@ -220,7 +223,8 @@ class TestTouchpadFirmwareMutation:
             "three_finger_drag": 1,
         }
 
-    def test_invalid_profile_never_reaches_hardware(self, tmp_path) -> None:
+    def test_invalid_profile_never_reaches_hardware(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
         before = len(
@@ -255,6 +259,7 @@ class TestTouchpadFirmwareMutation:
     def test_partial_profile_persists_only_completed_settings(
         self, tmp_path, monkeypatch
     ) -> None:
+        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
         completed = TouchpadApplyResult(
@@ -283,6 +288,38 @@ class TestTouchpadFirmwareMutation:
         assert result.status == OperationStatus.PARTIAL
         assert result.persisted is True
         assert svc.config_store.state.touchpad.settings == {"sensitivity": 1}
+
+    def test_firmware_writes_gated_unqualified_by_default(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """HC-001: unqualified builds refuse writes but keep probe available."""
+        monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        result = asyncio.run(svc.apply_touchpad_settings({"sensitivity": 1}))
+        assert result.status == OperationStatus.UNAVAILABLE
+        assert result.code == "touchpad_firmware_unqualified"
+        assert not [
+            entry
+            for entry in svc._hw.call_log  # noqa: SLF001
+            if entry[0] == "apply_touchpad_settings"
+        ]
+        probe = asyncio.run(svc.probe_touchpad_firmware())
+        assert probe["firmware_writes_qualified"] is False
+
+    def test_firmware_writes_enabled_by_qualification_flag(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """HC-001: the qualification flag re-enables the (gated) write path."""
+        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        probe = asyncio.run(svc.probe_touchpad_firmware())
+        assert probe["firmware_writes_qualified"] is True
+        result = asyncio.run(svc.apply_touchpad_settings({"sensitivity": 1}))
+        assert result.status == OperationStatus.SUCCESS
 
 
 class TestPowerMutation:
@@ -1336,5 +1373,81 @@ class TestLifecycle:
             with pytest.raises(DomainException) as closing:
                 await svc.set_auto_switch(True)
             assert str(closing.value.code) == "unavailable"
+
+        asyncio.run(scenario())
+
+
+class TestSafetyRecoveryHealth:
+    """HC-002/005/006: durable recovery faults and wedge escalation."""
+
+    def test_wedged_queue_escalates_and_reports_stuck(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import threading
+
+        from honor_control.backend.command_queue import CommandTimeoutError
+
+        monkeypatch.setattr(
+            "honor_control.backend.application.QUEUE_STUCK_ESCALATION_SECONDS", 0.0
+        )
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+        escalated: list[bool] = []
+        svc.set_stuck_escalation(lambda: escalated.append(True))
+        release = threading.Event()
+
+        def block_forever() -> None:
+            release.wait()
+
+        async def scenario() -> None:
+            with pytest.raises(CommandTimeoutError):
+                await svc.queue.run("wedge", block_forever, timeout=0.05)
+            assert svc.queue.stuck_info() is not None
+            await svc._refresh_service_health()  # noqa: SLF001
+            snap = await svc.get_snapshot()
+            assert snap.service.hardware_queue_stuck is True
+            assert snap.service.stuck_command == "wedge"
+            assert snap.service.overall == "degraded"
+            assert escalated == [True]
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            release.set()
+
+    def test_fan_fail_safe_degrades_overall_health(self, tmp_path) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        async def scenario() -> None:
+            svc._fan_fail_safe_error = "sensor lost"  # noqa: SLF001
+            await svc._refresh_service_health()  # noqa: SLF001
+            snap = await svc.get_snapshot()
+            assert snap.service.overall == "degraded"
+            assert snap.service.fan_recovery_required is True
+            assert "fan: sensor lost" in snap.service.last_fault
+
+        asyncio.run(scenario())
+
+    def test_power_rollback_failure_latches_then_reconcile_clears(
+        self, tmp_path
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        async def scenario() -> None:
+            svc._record_power_rollback_failure(  # noqa: SLF001
+                "balanced",
+                {"rollback": {"attempted": True, "ok": False}, "observed": {}},
+            )
+            assert svc._power_recovery_required is True  # noqa: SLF001
+            await svc._refresh_service_health()  # noqa: SLF001
+            snap = await svc.get_snapshot()
+            assert snap.service.power_recovery_required is True
+            assert snap.service.overall == "degraded"
+
+            result = await svc.reconcile_power()
+            assert result.status == OperationStatus.SUCCESS
+            assert svc._power_recovery_required is False  # noqa: SLF001
 
         asyncio.run(scenario())
