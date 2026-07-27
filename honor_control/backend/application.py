@@ -54,7 +54,11 @@ from honor_control.backend.hardware import HardwarePort, verify_power_definition
 from honor_control.backend.snapshot_store import SnapshotStore
 from honor_control.backend.supervisor import RuntimeSupervisor
 from honor_control.backend.touchpad_firmware import TouchpadFirmwareError
-from honor_control.core.errors import DomainError, DomainException
+from honor_control.core.errors import (
+    ControllerState,
+    DomainError,
+    DomainException,
+)
 from honor_control.core.gestures import DEFAULT_GESTURE_MAPPINGS, GESTURE_NAMES
 from honor_control.core.models import (
     POWER_PROFILE_NAMES,
@@ -94,6 +98,15 @@ FAN_RECOVERY_WAIT_SECONDS = 10.0
 FAN_CURVE_POLL_SECONDS = 2.0
 AUTO_SWITCH_POLL_SECONDS = 2.0
 AUTO_SWITCH_MAX_RETRY_SECONDS = 60.0
+# AC/battery transitions (which apply a power profile and may run a root hook)
+# require this many consecutive consistent AC observations, so one glitchy
+# sysfs read can never switch profiles.  "Unknown" AC never triggers a change.
+AUTO_SWITCH_CONFIRM_READS = 2
+AUTO_SWITCH_UNKNOWN_LOG_SECONDS = 60.0
+# A hardware command that stays poisoned (wedged) beyond this deadline triggers
+# a service restart, because a non-cancellable call that never returns would
+# otherwise leave the service permanently read-only (BUSY) with no self-heal.
+QUEUE_STUCK_ESCALATION_SECONDS = 60.0
 
 
 def _serialized_mutation(method):
@@ -165,11 +178,25 @@ class ApplicationService:
         self._fan_restore_pending = False
         self._fan_restore_task: asyncio.Task[bool] | None = None
         self._last_auto_script_status = "Not run"
+        self._power_recovery_required = False
+        self._power_recovery_detail: dict[str, Any] = {}
+        self._stuck_escalated = False
+        self._on_stuck_escalation: Callable[[], None] | None = None
         self._supervisor.register(
             "manual_fan_ttl", self._manual_fan_expiry, self._restore_fan_auto
         )
         if self._gesture_runtime is not None:
             self._supervisor.register("gesture_daemon", self._gesture_runtime.run)
+
+    def set_stuck_escalation(self, callback: Callable[[], None]) -> None:
+        """Register the service-level escalation callback.
+
+        Invoked once when the hardware command queue has stayed wedged past
+        ``QUEUE_STUCK_ESCALATION_SECONDS``.  The service uses it to drop the
+        bus name and exit nonzero so systemd restarts the unit (running the
+        emergency fan-auto restore on the way out).
+        """
+        self._on_stuck_escalation = callback
 
     @property
     def snapshots(self) -> SnapshotStore:
@@ -501,6 +528,7 @@ class ApplicationService:
             )
         if result.get("error"):
             await self._refresh_power()
+            self._record_power_rollback_failure(name, result)
             return OperationResult.failed(
                 code="power_apply_failed",
                 message=str(result["error"]),
@@ -568,6 +596,10 @@ class ApplicationService:
                         "final_observed": observed,
                     },
                 )
+            # A fully converged, verified apply resolves any prior recovery
+            # fault and re-enables automatic switching/hooks.
+            self._power_recovery_required = False
+            self._power_recovery_detail = {}
             return OperationResult.success(
                 message=f"Profile '{name}' applied",
                 changed=True,
@@ -578,6 +610,7 @@ class ApplicationService:
             )
 
         await self._refresh_power()
+        self._record_power_rollback_failure(name, result)
         return OperationResult.partial(
             code="power_partial_apply",
             message="Partial apply: "
@@ -588,6 +621,64 @@ class ApplicationService:
             applied=False,
             sequence=self._snapshots.sequence,
             details=result,
+        )
+
+    def _record_power_rollback_failure(self, name: str, result: dict[str, Any]) -> None:
+        """Latch a durable fault when both apply and rollback fail.
+
+        A multi-resource power transaction (PPD/RAPL/EPP/governor/turbo) whose
+        rollback also fails can leave the machine in an unrecognized mixed
+        state.  That must not disappear when the initiating response goes away:
+        it is retained here, surfaced in service health, and blocks automatic
+        switching until an explicit reconcile converges.
+        """
+        rollback = result.get("rollback")
+        if (
+            isinstance(rollback, dict)
+            and rollback.get("attempted")
+            and not rollback.get("ok")
+        ):
+            self._power_recovery_required = True
+            self._power_recovery_detail = {
+                "profile": name,
+                "rollback": rollback,
+                "observed": result.get("observed", {}),
+            }
+            log.error(
+                "power apply and rollback both failed for '%s'; recovery required",
+                name,
+            )
+
+    @_serialized_mutation
+    async def reconcile_power(self) -> OperationResult:
+        """Re-apply a known profile to clear an unresolved power-recovery fault.
+
+        Re-reads and re-applies the desired (or built-in ``balanced``) profile
+        with full verification and clears ``power_recovery_required`` only on
+        complete convergence.  Suppressed auto-switching and hooks resume once
+        the fault clears.
+        """
+        profiles = self._config.state.power.profiles
+        target = self._config.state.power.profile
+        if target not in profiles:
+            target = "balanced"
+        result = await self._apply_power_profile(target, persist_desired=False)
+        if result.applied and not self._power_recovery_required:
+            return OperationResult.success(
+                message=f"Power reconciled to '{target}'",
+                changed=True,
+                persisted=False,
+                applied=True,
+                sequence=self._snapshots.sequence,
+                details=result.details,
+            )
+        return OperationResult.partial(
+            code="power_recovery_unresolved",
+            message="Power state could not be reconciled; recovery still required",
+            persisted=False,
+            applied=result.applied,
+            sequence=self._snapshots.sequence,
+            details=result.details,
         )
 
     @_serialized_mutation
@@ -1380,19 +1471,35 @@ class ApplicationService:
             result = await self._queue.run(
                 "gpu_restore", self._hw.restore_gpu_mitigation
             )
-        if result.get("error") and not result.get("restored"):
+        if result.get("error"):
+            # Any error means the mitigation was not positively applied —
+            # including the rolled-back case (``restored=True``), which must
+            # never be reported as success.
             return OperationResult.failed(
                 code="gpu_mitigation_failed",
                 message=str(result["error"]),
                 sequence=self._snapshots.sequence,
                 details=result,
             )
-        await self._config.update(
-            lambda s: replace(
-                s,
-                gpu=GpuState(mitigation_enabled=enabled),
+        try:
+            await self._config.update(
+                lambda s: replace(
+                    s,
+                    gpu=GpuState(mitigation_enabled=enabled),
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001
+            # Applied on hardware but persistence failed: report the partial
+            # state honestly instead of raising an unstructured internal error.
+            await self._refresh_gpu()
+            return OperationResult.partial(
+                code="gpu_applied_not_persisted",
+                message=f"GPU mitigation applied but not persisted: {exc}",
+                applied=True,
+                persisted=False,
+                sequence=self._snapshots.sequence,
+                details=result,
+            )
         await self._refresh_gpu()
         return OperationResult.success(
             message=f"GPU mitigation {'enabled' if enabled else 'restored'}",
@@ -1820,29 +1927,56 @@ class ApplicationService:
     async def _refresh_service_health(self) -> None:
         dependency_ok = self._hw.check_dependency()
         controller_health = self._supervisor.health
+        # A controller in any fault state (failed, or a stop that timed out / a
+        # cleanup that raised) must degrade the service — never report a clean
+        # "stopped" while an unresolved fault is outstanding.
+        fault_states = {
+            ControllerState.FAILED.value,
+            ControllerState.STOP_TIMEOUT.value,
+            ControllerState.CLEANUP_FAILED.value,
+        }
         controller_failed = any(
-            health.state.value == "failed" for health in controller_health.values()
+            health.state.value in fault_states for health in controller_health.values()
         )
         gesture_not_ready = bool(
             self._config.state.gestures.daemon_enabled
             and self._gesture_runtime is not None
             and not self._gesture_runtime.status.running
         )
+        stuck = self._queue.stuck_info()
+        hardware_queue_stuck = stuck is not None
+        stuck_command = stuck.name if stuck is not None else ""
+        fan_recovery_required = bool(
+            self._fan_fail_safe_error or self._fan_restore_pending
+        )
+        power_recovery_required = self._power_recovery_required
         degraded = (
             not self._config.valid
             or not dependency_ok
             or bool(self._snapshots.snapshot.stale_domains)
             or controller_failed
             or gesture_not_ready
+            or hardware_queue_stuck
+            or fan_recovery_required
+            or power_recovery_required
         )
-        controller_fault = next(
-            (
-                health.last_fault
-                for health in controller_health.values()
-                if health.last_fault
-            ),
-            "",
+        fault_parts: list[str] = []
+        if self._config.last_error:
+            fault_parts.append(self._config.last_error)
+        fault_parts.extend(
+            health.last_fault
+            for health in controller_health.values()
+            if health.last_fault
         )
+        if self._fan_fail_safe_error:
+            fault_parts.append(f"fan: {self._fan_fail_safe_error}")
+        if power_recovery_required:
+            fault_parts.append("power: rollback failed, recovery required")
+        if hardware_queue_stuck:
+            fault_parts.append(
+                f"hardware queue stuck on '{stuck_command}' "
+                f"for {self._queue.poisoned_duration():.0f}s"
+            )
         health = ServiceHealth(
             version=__version__,
             uptime=int(time.time() - self._start_time),
@@ -1851,9 +1985,32 @@ class ApplicationService:
             dependency_ok=dependency_ok,
             config_valid=self._config.valid,
             stale_domains=self._snapshots.snapshot.stale_domains,
-            last_fault=self._config.last_error or controller_fault,
+            last_fault="; ".join(fault_parts),
+            hardware_queue_stuck=hardware_queue_stuck,
+            stuck_command=stuck_command,
+            fan_recovery_required=fan_recovery_required,
+            power_recovery_required=power_recovery_required,
+            controller_restart_counts=dict(self._supervisor.restart_counts()),
         )
         await self._snapshots.update("service", health)
+        # HC-002 escalation: a permanently wedged hardware call must not leave a
+        # healthy-looking, indefinitely read-only service.  After a bounded
+        # deadline, ask the service layer to drop the bus name and exit nonzero
+        # so systemd restarts the unit (and runs the emergency fan-auto
+        # restore), because the still-running call cannot be cancelled.
+        if (
+            hardware_queue_stuck
+            and not self._stuck_escalated
+            and self._queue.poisoned_duration() >= QUEUE_STUCK_ESCALATION_SECONDS
+            and self._on_stuck_escalation is not None
+        ):
+            self._stuck_escalated = True
+            log.critical(
+                "hardware queue wedged on '%s' for %.0fs; escalating for restart",
+                stuck_command,
+                self._queue.poisoned_duration(),
+            )
+            self._on_stuck_escalation()
 
     async def _refresh_loop(self) -> None:
         while True:
@@ -1866,6 +2023,9 @@ class ApplicationService:
         failed_key: tuple[bool, str, str, str, str] | None = None
         failure_count = 0
         retry_at = 0.0
+        pending_ac: bool | None = None
+        pending_count = 0
+        unknown_ac_logged_at = 0.0
         while True:
             await asyncio.sleep(AUTO_SWITCH_POLL_SECONDS)
             state = self._config.state.power.auto_switch
@@ -1874,6 +2034,12 @@ class ApplicationService:
                 last_policy = None
                 failed_key = None
                 failure_count = 0
+                pending_ac = None
+                pending_count = 0
+                continue
+            if self._power_recovery_required:
+                # Do not auto-switch (or run hooks) while a failed power
+                # rollback has left an unresolved mixed state.
                 continue
             await self._refresh_power()
             ac = self._snapshots.snapshot.power.ac_online
@@ -1883,7 +2049,29 @@ class ApplicationService:
                 state.on_ac_script,
                 state.on_battery_script,
             )
-            if ac is None or (ac == last_ac and policy == last_policy):
+            if ac is None:
+                # AC state unknown (read failure or disappearance): never treat
+                # this as "on battery".  Skip the transition; keep last state.
+                pending_ac = None
+                pending_count = 0
+                now = time.monotonic()
+                if now - unknown_ac_logged_at >= AUTO_SWITCH_UNKNOWN_LOG_SECONDS:
+                    unknown_ac_logged_at = now
+                    log.warning(
+                        "auto-switch: AC state unreadable; skipping transition"
+                    )
+                continue
+            unknown_ac_logged_at = 0.0
+            if ac != pending_ac:
+                # First sighting of a new AC state: require confirmation before
+                # acting so a single glitchy read cannot switch profiles/hooks.
+                pending_ac = ac
+                pending_count = 1
+                continue
+            pending_count += 1
+            if pending_count < AUTO_SWITCH_CONFIRM_READS:
+                continue
+            if ac == last_ac and policy == last_policy:
                 continue
             key = (ac, *policy)
             if key == failed_key and time.monotonic() < retry_at:

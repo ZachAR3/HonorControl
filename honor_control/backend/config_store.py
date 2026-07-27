@@ -11,7 +11,10 @@ The store loads into a fresh immutable model, fully validates, then swaps
 the active snapshot.  A malformed file leaves the last-known-good state
 active and marks service health degraded.  Saves are atomic: write a
 same-directory temp file, ``flush`` + ``fsync``, mode ``0640``,
-``os.replace``, then fsync the directory.
+``os.replace``, then fsync the directory.  Older ``schema_version`` files
+are upgraded by an ordered migration pipeline (after snapshotting the
+original to ``<state>.premigration``); unknown keys are reported to
+diagnostics but never fail a load.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import shutil
 import tempfile
 import threading
 import tomllib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -51,6 +55,9 @@ log = logging.getLogger("honor_control.backend.config_store")
 
 #: Current state schema version.
 STATE_SCHEMA_VERSION = 3
+
+#: Suffix for the pre-migration snapshot of an older state file.
+PREMIGRATION_SUFFIX = ".premigration"
 
 #: Default state file path.
 DEFAULT_STATE_PATH = "/var/lib/honor-control/state.toml"
@@ -182,17 +189,227 @@ def _state_to_dict(state: ServiceState) -> dict[str, Any]:
     return d
 
 
-def _state_from_dict(data: dict[str, Any]) -> ServiceState:
+# ---------------------------------------------------------------------------
+# Ordered schema migrations (HC-012)
+# ---------------------------------------------------------------------------
+
+
+def _migrate_1_to_2(data: dict[str, Any]) -> dict[str, Any]:
+    """Schema 1 -> 2: introduce the GPU mitigation table.
+
+    v1 documents predate ``[gpu]``; add it (disabled) so later steps and
+    the current-schema validator see a complete document.
+    """
+    migrated = dict(data)
+    gpu = migrated.get("gpu")
+    gpu = dict(gpu) if isinstance(gpu, dict) else {}
+    gpu.setdefault("mitigation_enabled", False)
+    migrated["gpu"] = gpu
+    migrated["schema_version"] = 2
+    return migrated
+
+
+def _migrate_2_to_3(data: dict[str, Any]) -> dict[str, Any]:
+    """Schema 2 -> 3: introduce the touchpad firmware desired-state table.
+
+    v2 documents predate ``[touchpad]``; add an empty settings table so the
+    firmware desired state starts from a known-empty baseline rather than
+    implicitly acquiring current defaults during parsing.
+    """
+    migrated = dict(data)
+    touchpad = migrated.get("touchpad")
+    touchpad = dict(touchpad) if isinstance(touchpad, dict) else {}
+    touchpad.setdefault("settings", {})
+    migrated["touchpad"] = touchpad
+    migrated["schema_version"] = 3
+    return migrated
+
+
+#: Ordered registry: key ``N`` holds the step upgrading schema N to N+1.
+_SCHEMA_MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    1: _migrate_1_to_2,
+    2: _migrate_2_to_3,
+}
+
+
+def _apply_migrations(data: dict[str, Any], source_version: int) -> dict[str, Any]:
+    """Run the ordered migration chain from ``source_version`` to current.
+
+    Each step takes a raw dict and returns the transformed dict with
+    ``schema_version`` bumped by one; the result is structurally validated
+    after every step.  Raises :class:`DomainException` naming the source
+    version when the chain is incomplete or a step produces an invalid
+    document — callers must not fall back to current defaults in that case.
+    """
+    version = source_version
+    while version < STATE_SCHEMA_VERSION:
+        step = _SCHEMA_MIGRATIONS.get(version)
+        if step is None:
+            raise DomainException(
+                DomainError.UNSUPPORTED,
+                f"No migration path from schema {source_version} to "
+                f"{STATE_SCHEMA_VERSION} (no step for schema {version})",
+            )
+        migrated = step(data)
+        if not isinstance(migrated, dict):
+            raise DomainException(
+                DomainError.INTERNAL,
+                f"Migration step for schema {version} returned a non-table "
+                f"document ({type(migrated).__name__})",
+            )
+        expected = version + 1
+        got = migrated.get("schema_version")
+        if isinstance(got, bool) or not isinstance(got, int) or got != expected:
+            raise DomainException(
+                DomainError.INTERNAL,
+                f"Migration step for schema {version} produced "
+                f"schema_version {got!r}, expected {expected}",
+            )
+        data = migrated
+        version = expected
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Unknown-key reporting (HC-012)
+# ---------------------------------------------------------------------------
+
+#: Allowed keys of the document root and of every fixed-schema table.
+_KNOWN_TABLE_KEYS: dict[str, frozenset[str]] = {
+    "": frozenset(
+        {"schema_version", "battery", "power", "fan", "gestures", "touchpad", "gpu"}
+    ),
+    "battery": frozenset({"end_threshold", "start_threshold", "mode"}),
+    "power": frozenset({"profile", "auto_switch", "profiles"}),
+    "power.auto_switch": frozenset(
+        {"enabled", "on_ac", "on_battery", "on_ac_script", "on_battery_script"}
+    ),
+    "fan": frozenset({"mode", "curves"}),
+    "gestures": frozenset({"mappings", "daemon_enabled"}),
+    "touchpad": frozenset({"settings"}),
+    "gpu": frozenset({"mitigation_enabled"}),
+}
+
+#: Allowed keys inside entries of dynamically-keyed tables.  (``fan.curves``
+#: and ``touchpad.settings`` hold scalars, so their keys are not checked.)
+_KNOWN_ENTRY_KEYS: dict[str, frozenset[str]] = {
+    "power.profiles": frozenset(
+        {
+            "label",
+            "description",
+            "pl1_uw",
+            "pl2_uw",
+            "governor",
+            "epp",
+            "ppd_profile",
+            "turbo_enabled",
+            "max_perf_pct",
+        }
+    ),
+    "gestures.mappings": frozenset({"enabled", "mapping"}),
+}
+
+
+def _find_unknown_keys(data: dict[str, Any]) -> list[str]:
+    """Return exact dotted paths of keys absent from the current schema.
+
+    Unknown keys never fail parsing (callers warn instead), but they are
+    surfaced so typos in persisted hardware state stay diagnosable.
+    """
+    unknown: list[str] = []
+
+    def walk(table: Any, path: str) -> None:
+        if not isinstance(table, dict):
+            return
+        allowed = _KNOWN_TABLE_KEYS.get(path)
+        if allowed is not None:
+            for key in table:
+                if isinstance(key, str) and key not in allowed:
+                    unknown.append(f"{path}.{key}" if path else key)
+        for key, value in table.items():
+            if not isinstance(key, str):
+                continue
+            child = f"{path}.{key}" if path else key
+            if child in _KNOWN_TABLE_KEYS:
+                walk(value, child)
+            elif child in _KNOWN_ENTRY_KEYS:
+                walk_entries(value, child)
+
+    def walk_entries(table: Any, path: str) -> None:
+        if not isinstance(table, dict):
+            return
+        allowed = _KNOWN_ENTRY_KEYS[path]
+        for name, entry in table.items():
+            if not isinstance(entry, dict):
+                continue
+            for key in entry:
+                if isinstance(key, str) and key not in allowed:
+                    unknown.append(f"{path}.{name}.{key}")
+
+    walk(data, "")
+    return unknown
+
+
+def _state_from_dict(
+    data: dict[str, Any],
+    unknown_keys: list[str] | None = None,
+) -> ServiceState:
     """Parse a dict into a validated ServiceState.
 
-    Unknown keys are ignored within the current schema. Invalid values raise
-    :class:`DomainException`.
+    Older schema versions are upgraded by the ordered migration pipeline
+    before parsing; a failed migration raises :class:`DomainException`
+    naming the source schema version instead of silently adopting current
+    defaults.  Unknown keys never fail a parse: when ``unknown_keys`` is
+    supplied they are collected there as exact dotted paths.  Invalid
+    values raise :class:`DomainException`.
     """
     if not isinstance(data, dict):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,
             "State document must be a TOML table",
         )
+
+    schema_version = data.get("schema_version", 1)
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+    ):
+        raise DomainException(
+            DomainError.INVALID_ARGUMENT,
+            f"Invalid schema_version: {schema_version!r}",
+        )
+    if schema_version > STATE_SCHEMA_VERSION:
+        raise DomainException(
+            DomainError.UNSUPPORTED,
+            f"State schema {schema_version} is newer than supported schema "
+            f"{STATE_SCHEMA_VERSION}",
+        )
+    if schema_version < STATE_SCHEMA_VERSION:
+        try:
+            migrated = _apply_migrations(data, schema_version)
+            return _parse_current_schema(migrated, unknown_keys)
+        except DomainException as exc:
+            raise DomainException(
+                exc.code,
+                f"State migration from schema {schema_version} to "
+                f"{STATE_SCHEMA_VERSION} failed: {exc.message}",
+                detail=exc.detail,
+            ) from exc
+    return _parse_current_schema(data, unknown_keys)
+
+
+def _parse_current_schema(
+    data: dict[str, Any],
+    unknown_keys: list[str] | None = None,
+) -> ServiceState:
+    """Parse a current-schema document into a validated ServiceState.
+
+    Unknown keys are collected into ``unknown_keys`` (when supplied) as
+    exact dotted paths; invalid values raise :class:`DomainException`.
+    """
+    if unknown_keys is not None:
+        unknown_keys.extend(_find_unknown_keys(data))
 
     def table(parent: dict[str, Any], key: str) -> dict[str, Any]:
         value = parent.get(key, {})
@@ -229,24 +446,6 @@ def _state_from_dict(data: dict[str, Any]) -> ServiceState:
                 f"'{key}' must be a string",
             )
         return value
-
-    schema_version = data.get("schema_version", 1)
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version < 1
-    ):
-        raise DomainException(
-            DomainError.INVALID_ARGUMENT,
-            f"Invalid schema_version: {schema_version!r}",
-        )
-    if schema_version > STATE_SCHEMA_VERSION:
-        raise DomainException(
-            DomainError.UNSUPPORTED,
-            f"State schema {schema_version} is newer than supported schema "
-            f"{STATE_SCHEMA_VERSION}",
-        )
-    # Future: apply ordered migration functions for old schema versions.
 
     # Battery
     bat_data = table(data, "battery")
@@ -383,6 +582,7 @@ class ConfigStore:
         self._state: ServiceState = default_state()
         self._valid = True
         self._last_error = ""
+        self._unknown_keys: list[str] = []
         self._has_loaded = False
 
     @property
@@ -399,6 +599,11 @@ class ConfigStore:
     def last_error(self) -> str:
         """Return the last load/save error (empty when valid)."""
         return self._last_error
+
+    @property
+    def unknown_keys(self) -> list[str]:
+        """Dotted paths of unknown keys seen during the last successful load."""
+        return list(self._unknown_keys)
 
     @property
     def state_path(self) -> pathlib.Path:
@@ -425,36 +630,131 @@ class ConfigStore:
         return self._load(allow_backup=False)
 
     def _load(self, *, allow_backup: bool) -> ServiceState:
-        """Load one candidate, optionally using the startup backup."""
+        """Load one candidate, optionally using the startup backup.
+
+        Never raises: every inspection step (primary existence/read/parse,
+        and each backup step independently) degrades to an invalid store
+        with a clear ``last_error`` so service composition can report
+        health instead of aborting on an inaccessible state directory.
+        """
         try:
             if not self._state_path.exists():
                 log.info("state file %s missing; using defaults", self._state_path)
                 self._state = default_state()
                 self._valid = True
                 self._last_error = ""
+                self._unknown_keys = []
                 return self._state
             data = self._read_toml(self._state_path)
-            self._state = _state_from_dict(data)
+            self._maybe_backup_premigration(data)
+            unknown: list[str] = []
+            self._state = _state_from_dict(data, unknown)
             self._valid = True
             self._last_error = ""
+            self._unknown_keys = unknown
+            if unknown:
+                log.warning(
+                    "state file %s contains unknown keys: %s",
+                    self._state_path,
+                    ", ".join(unknown),
+                )
             log.info("loaded state from %s", self._state_path)
         except Exception as exc:  # noqa: BLE001
             log.error("state load failed: %s", exc)
             self._valid = False
             self._last_error = str(exc)
+            self._unknown_keys = []
             # A fresh process has no in-memory last-known-good state. Recover
             # the bounded backup only during initial load, while retaining
             # degraded health so the primary still requires attention.
-            backup = self._state_path.with_suffix(".toml.bak")
-            if allow_backup and backup.exists():
-                try:
-                    self._state = _state_from_dict(self._read_toml(backup))
-                    log.warning("recovered state from %s", backup)
-                except Exception as backup_exc:  # noqa: BLE001
-                    log.error("state backup load failed: %s", backup_exc)
+            if allow_backup:
+                self._recover_backup()
         finally:
             self._has_loaded = True
         return self._state
+
+    def _recover_backup(self) -> None:
+        """Recover the startup ``.bak``; never raises.
+
+        Each backup inspection step (existence check, read, parse) is
+        guarded separately so an inaccessible backup degrades to the
+        already-recorded primary error instead of raising a second
+        exception out of service composition.
+        """
+        backup = self._state_path.with_suffix(".toml.bak")
+        try:
+            backup_exists = backup.exists()
+        except Exception as exc:  # noqa: BLE001
+            log.error("state backup check failed for %s: %s", backup, exc)
+            return
+        if not backup_exists:
+            return
+        try:
+            backup_data = self._read_toml(backup)
+        except Exception as exc:  # noqa: BLE001
+            log.error("state backup read failed for %s: %s", backup, exc)
+            return
+        unknown: list[str] = []
+        try:
+            self._state = _state_from_dict(backup_data, unknown)
+        except Exception as backup_exc:  # noqa: BLE001
+            log.error("state backup load failed: %s", backup_exc)
+            return
+        self._unknown_keys = unknown
+        if unknown:
+            log.warning(
+                "state backup %s contains unknown keys: %s",
+                backup,
+                ", ".join(unknown),
+            )
+        log.warning("recovered state from %s", backup)
+
+    def _maybe_backup_premigration(self, data: dict[str, Any]) -> None:
+        """Snapshot the original file before upgrading an older schema.
+
+        Best-effort: a failed snapshot is logged but does not fail the load;
+        the migration itself still validates and degrades the store when it
+        cannot produce a current-schema document.
+        """
+        version = data.get("schema_version", 1)
+        if isinstance(version, bool) or not isinstance(version, int):
+            return
+        if not 1 <= version < STATE_SCHEMA_VERSION:
+            return
+        dest = self._state_path.with_name(self._state_path.name + PREMIGRATION_SUFFIX)
+        try:
+            self._safe_copy(self._state_path, dest)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("pre-migration backup of %s failed: %s", dest, exc)
+        else:
+            log.info("wrote pre-migration backup %s (schema %s)", dest, version)
+
+    def _safe_copy(self, source: pathlib.Path, dest: pathlib.Path) -> None:
+        """Copy ``source`` to ``dest`` with the atomic-save discipline."""
+        payload = source.read_bytes()
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{dest.name}.",
+            suffix=".tmp",
+            dir=dest.parent,
+        )
+        tmp = pathlib.Path(tmp_name)
+        try:
+            os.fchmod(fd, 0o640)
+            with os.fdopen(fd, "wb") as fh:
+                fd = -1  # ownership transferred to the file object
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(str(tmp), str(dest))
+            self._fsync_dir(dest.parent)
+        except Exception:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     async def update(self, mutator) -> ServiceState:
         """Apply ``mutator(current_state) -> new_state`` atomically.
@@ -555,7 +855,8 @@ class ConfigStore:
     def import_state_dict(self, data: dict[str, Any]) -> ServiceState:
         """Validate and adopt a state dict (used by the import command)."""
         with self._io_lock:
-            state = _state_from_dict(data)
+            unknown: list[str] = []
+            state = _state_from_dict(data, unknown)
             _validate_state(state)
             try:
                 self._save_atomic(state)
@@ -568,6 +869,12 @@ class ConfigStore:
                     detail=str(exc),
                 ) from exc
             self._state = state
+            self._unknown_keys = unknown
+            if unknown:
+                log.warning(
+                    "imported state contains unknown keys: %s",
+                    ", ".join(unknown),
+                )
             return state
 
 

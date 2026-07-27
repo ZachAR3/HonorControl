@@ -44,6 +44,21 @@ class CommandTimeoutError(DomainException):
 
 
 @dataclass(frozen=True)
+class StuckCommandInfo:
+    """Observability record for a hardware command that outlived its deadline.
+
+    A non-cancellable call that timed out (or was cancelled) keeps running on
+    the worker thread and poisons the queue until it actually returns.  This
+    record exposes *what* is wedged and *for how long*, without changing the
+    poison-until-complete semantics.
+    """
+
+    name: str
+    started_at: float
+    timed_out_at: float
+
+
+@dataclass(frozen=True)
 class _WorkItem(Generic[T]):
     loop: asyncio.AbstractEventLoop
     future: asyncio.Future[T]
@@ -64,6 +79,7 @@ class HardwareCommandQueue:
         self._requests: queue.Queue[_WorkItem[Any] | object] = queue.Queue()
         self._running: dict[str, float] = {}
         self._timed_out_future: asyncio.Future[Any] | None = None
+        self._stuck: StuckCommandInfo | None = None
         self._closed = False
         self._thread = threading.Thread(
             target=self._worker,
@@ -76,6 +92,28 @@ class HardwareCommandQueue:
     def pending_timeout_completion(self) -> asyncio.Future[Any] | None:
         """Return the command whose late completion currently poisons the queue."""
         return self._timed_out_future
+
+    def stuck_info(self) -> StuckCommandInfo | None:
+        """Return the stuck command record while the queue is poisoned.
+
+        The record is returned only while a timed-out/cancelled call is still
+        incomplete on the worker thread.  Once the poisoned future completes
+        (or the queue is shut down) this returns ``None``.
+        """
+        info = self._stuck
+        if info is None:
+            return None
+        poisoned = self._timed_out_future
+        if poisoned is None or poisoned.done():
+            return None
+        return info
+
+    def poisoned_duration(self) -> float:
+        """Seconds elapsed since the current poison started, or 0.0 if not stuck."""
+        info = self.stuck_info()
+        if info is None:
+            return 0.0
+        return max(0.0, time.monotonic() - info.timed_out_at)
 
     async def run(
         self,
@@ -107,6 +145,7 @@ class HardwareCommandQueue:
                         "A timed-out hardware command is still running",
                     )
                 self._timed_out_future = None
+                self._stuck = None
 
             correlation_id = str(uuid.uuid4())[:8]
             start = time.monotonic()
@@ -132,6 +171,11 @@ class HardwareCommandQueue:
                 future.add_done_callback(self._consume_abandoned_completion)
                 recovery_future = self._queue_timeout_recovery(loop, timeout_recovery)
                 self._timed_out_future = recovery_future or future
+                self._stuck = StuckCommandInfo(
+                    name=name,
+                    started_at=start,
+                    timed_out_at=time.monotonic(),
+                )
                 raise CommandTimeoutError(
                     name,
                     timeout,
@@ -142,6 +186,11 @@ class HardwareCommandQueue:
                     future.add_done_callback(self._consume_abandoned_completion)
                     self._timed_out_future = (
                         self._queue_timeout_recovery(loop, timeout_recovery) or future
+                    )
+                    self._stuck = StuckCommandInfo(
+                        name=name,
+                        started_at=start,
+                        timed_out_at=time.monotonic(),
                     )
                 raise
             except Exception:
@@ -231,6 +280,7 @@ class HardwareCommandQueue:
         if self._closed:
             return
         self._closed = True
+        self._stuck = None
         self._requests.put_nowait(_STOP)
         if wait:
             self._thread.join(timeout=max(0.0, timeout))

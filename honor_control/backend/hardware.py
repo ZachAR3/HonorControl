@@ -1144,9 +1144,7 @@ class HonorToolsAdapter:
                 available=True,
                 capacity_percent=self._read_int(self._battery_path / "capacity"),
                 status=battery_status,
-                ac_online=self._read_int(self._ac_path / "online") == 1
-                if self._ac_path
-                else None,
+                ac_online=self._read_ac_online(self._ac_path),
                 observed_end=end,
                 observed_start=start,
                 desired_end=end,
@@ -1256,9 +1254,7 @@ class HonorToolsAdapter:
                 and status["no_turbo"] is not None
                 and status["max_perf_pct"] is not None
             )
-            ac_online = None
-            if self._ac_path is not None:
-                ac_online = self._read_int(self._ac_path / "online") == 1
+            ac_online = self._read_ac_online(self._ac_path)
             return PowerSnapshot(
                 available=complete,
                 observed_summary=status,
@@ -1634,16 +1630,14 @@ class HonorToolsAdapter:
             return GpuSnapshot(available=False, last_error=str(exc))
 
     def apply_gpu_mitigation(self) -> dict[str, Any]:
-        self._require_honor()
-        plat = self._require_platform()
-        try:
-            from honor.config import Config
-            from honor.gpu import apply_irq_fix
-
-            cfg = Config()
-            return apply_irq_fix(cfg, plat)
-        except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
+        # Fail closed at the adapter.  The GPU IRQ mitigation is an irreversible
+        # write and honor-tools provides no verified restore (see
+        # restore_gpu_mitigation).  Refusing here means safety does not depend
+        # on every caller remembering to check capability writability first.
+        return {
+            "error": "GPU mitigation writes are disabled: no verified restore exists",
+            "restored": False,
+        }
 
     def restore_gpu_mitigation(self) -> dict[str, Any]:
         # The honor-tools package does not provide a restore function.
@@ -1658,6 +1652,25 @@ class HonorToolsAdapter:
             return int(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             return None
+
+    @staticmethod
+    def _read_ac_online(ac_path: pathlib.Path | None) -> bool | None:
+        """Decode a power-supply ``online`` attribute as a strict tri-state.
+
+        Return ``True`` only for an exact ``1`` and ``False`` only for an exact
+        ``0``.  A missing AC source, a read/parse failure, or any other value
+        returns ``None`` ("unknown") so callers never mistake a transient sysfs
+        failure for a genuine "on battery" observation and trigger a profile
+        transition or root hook by accident.
+        """
+        if ac_path is None:
+            return None
+        raw = HonorToolsAdapter._read_int(ac_path / "online")
+        if raw == 1:
+            return True
+        if raw == 0:
+            return False
+        return None
 
     @staticmethod
     def _write_int(path: pathlib.Path, value: int) -> bool:

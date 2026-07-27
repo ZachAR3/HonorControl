@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import pathlib
 
 import pytest
 
+from honor_control.backend import config_store as config_store_module
 from honor_control.backend.config_store import (
     STATE_SCHEMA_VERSION,
     BatteryState,
@@ -298,3 +300,203 @@ class TestConfigStoreNoHomeAccess:
         asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "travel")))
         home = pathlib.Path.home()
         assert not str(tmp_state_path).startswith(str(home))
+
+
+class TestConfigStoreMigration:
+    """HC-012: ordered schema migrations and strict old-document handling."""
+
+    @staticmethod
+    def _v1_document() -> dict:
+        """Golden schema-version-1 document (predates gpu and touchpad)."""
+        return {
+            "schema_version": 1,
+            "battery": {"end_threshold": 80, "start_threshold": 75, "mode": "travel"},
+            "power": {
+                "profile": "balanced",
+                "auto_switch": {
+                    "enabled": False,
+                    "on_ac": "balanced",
+                    "on_battery": "silent",
+                    "on_ac_script": "",
+                    "on_battery_script": "",
+                },
+                "profiles": {},
+            },
+            "fan": {"mode": "stock", "curves": {}},
+            "gestures": {"mappings": {}, "daemon_enabled": False},
+        }
+
+    def test_v1_file_migrates_to_current(self, tmp_state_path: pathlib.Path) -> None:
+        tmp_state_path.write_text(_toml_dump(self._v1_document()), encoding="utf-8")
+
+        store = ConfigStore(state_path=tmp_state_path)
+        state = store.load()
+
+        assert store.valid is True
+        assert store.last_error == ""
+        assert state.schema_version == STATE_SCHEMA_VERSION
+        assert state.battery.end_threshold == 80
+        assert state.battery.start_threshold == 75
+        assert state.battery.mode == "travel"
+        # The migration steps supplied the tables introduced after v1.
+        assert state.gpu.mitigation_enabled is False
+        assert state.touchpad.settings == {}
+        # The original older file was snapshotted before migrating.
+        premigration = tmp_state_path.with_name(
+            tmp_state_path.name + config_store_module.PREMIGRATION_SUFFIX
+        )
+        assert premigration.exists()
+        assert "schema_version = 1" in premigration.read_text(encoding="utf-8")
+
+    def test_v2_document_migrates_in_memory(self) -> None:
+        data = self._v1_document()
+        data["schema_version"] = 2
+        data["gpu"] = {"mitigation_enabled": True}
+
+        state = _state_from_dict(data)
+
+        assert state.schema_version == STATE_SCHEMA_VERSION
+        assert state.gpu.mitigation_enabled is True
+        assert state.touchpad.settings == {}
+
+    def test_current_version_file_is_not_snapshotted(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+        asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "home")))
+
+        reloaded = ConfigStore(state_path=tmp_state_path)
+        state = reloaded.load()
+
+        premigration = tmp_state_path.with_name(
+            tmp_state_path.name + config_store_module.PREMIGRATION_SUFFIX
+        )
+        assert not premigration.exists()
+        assert reloaded.valid is True
+        assert state.battery.end_threshold == 80
+
+    def test_failed_migration_keeps_store_invalid(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        data = self._v1_document()
+        # Structurally migratable, but the migrated document can never
+        # satisfy current validation: must not silently adopt defaults.
+        data["battery"] = {"end_threshold": 10, "start_threshold": 90, "mode": "home"}
+        tmp_state_path.write_text(_toml_dump(data), encoding="utf-8")
+
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+
+        assert store.valid is False
+        assert "schema 1" in store.last_error
+        # The pre-migration snapshot of the original file still exists.
+        premigration = tmp_state_path.with_name(
+            tmp_state_path.name + config_store_module.PREMIGRATION_SUFFIX
+        )
+        assert premigration.exists()
+
+    def test_missing_migration_step_is_rejected(self, monkeypatch) -> None:
+        monkeypatch.delitem(config_store_module._SCHEMA_MIGRATIONS, 2)
+
+        with pytest.raises(DomainException) as excinfo:
+            _state_from_dict(self._v1_document())
+
+        message = str(excinfo.value)
+        assert "schema 1" in message
+        assert "migration" in message.lower()
+
+
+class TestConfigStoreUnknownKeys:
+    """HC-012: unknown keys warn and surface, but never fail a valid load."""
+
+    def test_unknown_keys_are_surfaced_not_fatal(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        data = _state_to_dict(default_state())
+        data["power"]["unknown_key"] = "foobar"
+        data["bogus_section"] = {"nested": 1}
+        tmp_state_path.write_text(_toml_dump(data), encoding="utf-8")
+
+        store = ConfigStore(state_path=tmp_state_path)
+        state = store.load()
+
+        assert store.valid is True
+        assert state == default_state()
+        assert "power.unknown_key" in store.unknown_keys
+        assert "bogus_section" in store.unknown_keys
+
+    def test_unknown_keys_inside_dynamic_entries(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        data = _state_to_dict(default_state())
+        data["power"]["profiles"]["balanced"]["typo_field"] = 5
+        tmp_state_path.write_text(_toml_dump(data), encoding="utf-8")
+
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+
+        assert store.valid is True
+        assert "power.profiles.balanced.typo_field" in store.unknown_keys
+
+    def test_clean_file_reports_no_unknown_keys(
+        self, tmp_state_path: pathlib.Path
+    ) -> None:
+        store = ConfigStore(state_path=tmp_state_path)
+        store.load()
+        asyncio.run(store.update(lambda s: _set_battery(s, 80, 75, "home")))
+
+        reloaded = ConfigStore(state_path=tmp_state_path)
+        reloaded.load()
+
+        assert reloaded.valid is True
+        assert reloaded.unknown_keys == []
+
+
+class TestConfigStoreBackupRecovery:
+    """HC-013: backup inspection failures must degrade, not raise."""
+
+    def test_backup_exists_check_permission_error(
+        self, tmp_state_path: pathlib.Path, monkeypatch
+    ) -> None:
+        tmp_state_path.write_text("not valid toml {{{{", encoding="utf-8")
+
+        real_exists = pathlib.Path.exists
+
+        def guarded_exists(self, *args, **kwargs):
+            if self.name.endswith(".toml.bak"):
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "exists", guarded_exists)
+
+        store = ConfigStore(state_path=tmp_state_path)
+        state = store.load()  # must not raise a second exception
+
+        assert store.valid is False
+        assert store.last_error
+        assert state == default_state()
+
+    def test_backup_read_permission_error(
+        self, tmp_state_path: pathlib.Path, monkeypatch
+    ) -> None:
+        tmp_state_path.write_text("not valid toml {{{{", encoding="utf-8")
+        tmp_state_path.with_suffix(".toml.bak").write_text(
+            _toml_dump(_state_to_dict(default_state())), encoding="utf-8"
+        )
+
+        real_open = builtins.open
+
+        def guarded_open(file, *args, **kwargs):
+            if str(file).endswith(".toml.bak"):
+                raise PermissionError(13, "Permission denied", str(file))
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", guarded_open)
+
+        store = ConfigStore(state_path=tmp_state_path)
+        state = store.load()  # must not raise a second exception
+
+        assert store.valid is False
+        assert store.last_error
+        assert state == default_state()

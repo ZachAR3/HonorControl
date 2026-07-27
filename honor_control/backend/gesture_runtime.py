@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from honor_control.backend.touchpad_firmware import discover_touchpad_input
+from honor_control.core.errors import DomainException
 from honor_control.core.gestures import (
     DEFAULT_GESTURE_MAPPINGS,
     KEY_CODES,
@@ -70,6 +71,8 @@ class GestureRuntimeStatus:
     reports_seen: int = 0
     gestures_emitted: int = 0
     last_error: str = ""
+    #: Reports dropped because of a malformed mapping/emit (session survived).
+    skipped: int = 0
 
 
 def discover_touchpad(
@@ -195,17 +198,22 @@ class GestureRuntime:
         sysfs_root: pathlib.Path = pathlib.Path("/sys/class/hidraw"),
         dev_root: pathlib.Path = pathlib.Path("/dev"),
         retry_seconds: float = 2.0,
+        max_retry_seconds: float = 30.0,
+        stable_session_seconds: float = 5.0,
     ) -> None:
         self._mappings_provider = mappings_provider
         self._sysfs_root = sysfs_root
         self._dev_root = dev_root
         self._retry_seconds = retry_seconds
+        self._max_retry_seconds = max(max_retry_seconds, retry_seconds)
+        self._stable_session_seconds = stable_session_seconds
         self._status = GestureRuntimeStatus()
         self._hid_fd: int | None = None
         self._uinput_fd: int | None = None
         self._session_done: asyncio.Future[None] | None = None
         self._last_report: bytes | None = None
         self._last_report_at = 0.0
+        self._retry_backoff = retry_seconds
 
     @property
     def status(self) -> GestureRuntimeStatus:
@@ -218,9 +226,17 @@ class GestureRuntime:
         )
 
     async def run(self) -> None:
-        """Run until cancelled, reconnecting after removal or transient errors."""
+        """Run until cancelled, reconnecting after removal or I/O failures.
+
+        Consecutive sessions that fail quickly back off exponentially from
+        ``retry_seconds`` up to ``max_retry_seconds``; a session that ran for
+        at least ``stable_session_seconds`` (and a clean stop) resets the
+        backoff so an ordinary unplug/replug stays responsive.
+        """
+        self._retry_backoff = self._retry_seconds
         try:
             while True:
+                session_started = time.monotonic()
                 try:
                     await self._run_session()
                 except asyncio.CancelledError:
@@ -238,14 +254,32 @@ class GestureRuntime:
                         running=False,
                         last_error=str(exc),
                     )
-                await asyncio.sleep(self._retry_seconds)
+                delay = self._next_retry_delay(time.monotonic() - session_started)
+                await asyncio.sleep(delay)
         finally:
             self._close_session()
+            self._retry_backoff = self._retry_seconds
             self._status = replace(
                 self._status,
                 running=False,
                 uinput_ready=False,
             )
+
+    def _next_retry_delay(self, session_seconds: float) -> float:
+        """Compute the reconnect delay after a session ended.
+
+        A session that survived at least ``stable_session_seconds`` counts as
+        healthy and resets the delay to ``retry_seconds``.  Otherwise the delay
+        doubles on every consecutive quick failure, capped at
+        ``max_retry_seconds``, so a persistent open/I/O fault cannot churn the
+        session at a fixed high rate.
+        """
+        if session_seconds >= self._stable_session_seconds:
+            self._retry_backoff = self._retry_seconds
+            return self._retry_seconds
+        delay = self._retry_backoff
+        self._retry_backoff = min(self._retry_backoff * 2.0, self._max_retry_seconds)
+        return delay
 
     async def _run_session(self) -> None:
         device = discover_touchpad(
@@ -328,17 +362,27 @@ class GestureRuntime:
                 continue
             try:
                 tokens = validate_key_combo(combo)
+                codes = [KEY_CODES[token] for token in tokens]
+            except (DomainException, KeyError, TypeError, ValueError) as exc:
+                # Tampered/malformed mapping: drop this report only.  The
+                # session and the uinput device must stay alive so every
+                # other gesture keeps working.
+                self._skip_report(combo, exc)
+                continue
+            try:
                 if self._uinput_fd is None:
                     raise OSError(errno.ENODEV, "uinput device is closed")
-                emit_key_combo(self._uinput_fd, [KEY_CODES[token] for token in tokens])
-                self._status = replace(
-                    self._status,
-                    gestures_emitted=self._status.gestures_emitted + 1,
-                    last_error="",
-                )
-            except Exception as exc:  # noqa: BLE001
+                emit_key_combo(self._uinput_fd, codes)
+            except OSError as exc:
+                # Genuine I/O failure (uinput write/ioctl): end the session
+                # so run() reconnects with a fresh device.
                 self._fail_session(exc)
                 return
+            self._status = replace(
+                self._status,
+                gestures_emitted=self._status.gestures_emitted + 1,
+                last_error="",
+            )
 
     def _mapping_for(self, keys: tuple[str, str]) -> str:
         configured = self._mappings_provider()
@@ -354,7 +398,17 @@ class GestureRuntime:
                 return default
         return ""
 
+    def _skip_report(self, combo: str, exc: Exception) -> None:
+        """Record a per-report mapping/emit failure without ending the session."""
+        log.warning("skipping gesture report, unusable mapping %r: %s", combo, exc)
+        self._status = replace(
+            self._status,
+            skipped=self._status.skipped + 1,
+            last_error=str(exc),
+        )
+
     def _fail_session(self, exc: BaseException) -> None:
+        """End the session for genuine I/O failures (read/write/EOF/create)."""
         if self._session_done is not None and not self._session_done.done():
             self._session_done.set_exception(exc)
 

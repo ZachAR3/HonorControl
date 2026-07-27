@@ -383,6 +383,7 @@ class GesturesSnapshot:
     mappings: tuple[GestureEntry, ...] = field(default_factory=tuple)
     wmi_transport_present: bool = False
     firmware_settings_supported: bool = False
+    firmware_writes_qualified: bool = False
     firmware_settings: dict[str, int] = field(default_factory=dict)
     last_error: str = ""
 
@@ -422,6 +423,15 @@ class ServiceHealth:
     config_valid: bool = True
     stale_domains: tuple[str, ...] = field(default_factory=tuple)
     last_fault: str = ""
+    # Durable safety-recovery signals: these keep the overall status degraded
+    # until the underlying incident is resolved, so a failed fan stock-auto
+    # restoration, a failed power rollback, or a wedged hardware queue can
+    # never coexist with an "healthy" service report.
+    hardware_queue_stuck: bool = False
+    stuck_command: str = ""
+    fan_recovery_required: bool = False
+    power_recovery_required: bool = False
+    controller_restart_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

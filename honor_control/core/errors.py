@@ -60,13 +60,22 @@ class CapabilityStatus(StrEnum):
 
 
 class ControllerState(StrEnum):
-    """Lifecycle state of a background controller."""
+    """Lifecycle state of a background controller.
+
+    ``STOP_TIMEOUT`` and ``CLEANUP_FAILED`` are *fault* states: a controller
+    that ignored cancellation or whose cleanup raised must never be reported
+    as a clean ``STOPPED``.  Health aggregation treats them as degraded so an
+    unresolved stop/cleanup failure stays visible (and is not silently
+    overwritten by a later transition).
+    """
 
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
     STOPPING = "stopping"
     FAILED = "failed"
+    STOP_TIMEOUT = "stop_timeout"
+    CLEANUP_FAILED = "cleanup_failed"
 
 
 class TransportError(StrEnum):

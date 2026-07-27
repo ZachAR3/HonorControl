@@ -108,6 +108,11 @@ def _service_to_dict(snap: SystemSnapshot) -> dict[str, Any]:
         "config_valid": snap.service.config_valid,
         "stale_domains": list(snap.service.stale_domains),
         "last_fault": snap.service.last_fault,
+        "hardware_queue_stuck": snap.service.hardware_queue_stuck,
+        "stuck_command": snap.service.stuck_command,
+        "fan_recovery_required": snap.service.fan_recovery_required,
+        "power_recovery_required": snap.service.power_recovery_required,
+        "controller_restart_counts": dict(snap.service.controller_restart_counts),
     }
 
 
@@ -225,6 +230,7 @@ def _gestures_to_dict(snap: SystemSnapshot) -> dict[str, Any]:
         ],
         "wmi_transport_present": ges.wmi_transport_present,
         "firmware_settings_supported": ges.firmware_settings_supported,
+        "firmware_writes_qualified": ges.firmware_writes_qualified,
         "firmware_settings": dict(ges.firmware_settings),
         "last_error": ges.last_error,
     }

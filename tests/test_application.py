@@ -446,6 +446,9 @@ class TestPowerMutation:
         self, tmp_path, monkeypatch
     ) -> None:
         _allow_test_hook(monkeypatch)
+        monkeypatch.setattr(
+            "honor_control.backend.application.AUTO_SWITCH_POLL_SECONDS", 0.05
+        )
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -454,7 +457,9 @@ class TestPowerMutation:
             await svc.configure_auto_switch(
                 True, "performance", "silent", "/usr/bin/true", ""
             )
-            await asyncio.sleep(2.1)
+            # Several polls: the transition requires AUTO_SWITCH_CONFIRM_READS
+            # consistent AC observations before it applies (HC-003 debounce).
+            await asyncio.sleep(0.3)
             snapshot = await svc.get_snapshot()
             assert snapshot.power.applied_profile == "performance"
             assert (
@@ -464,7 +469,8 @@ class TestPowerMutation:
                 name == "apply_power_profile"
                 for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
             )
-            await asyncio.sleep(2.1)
+            assert calls >= 1
+            await asyncio.sleep(0.3)
             assert (
                 sum(
                     name == "apply_power_profile"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -184,6 +185,48 @@ class TestCommandQueue:
             asyncio.run(q.run("after-shutdown", lambda: None))
         assert unavailable.value.code == DomainError.UNAVAILABLE
 
+    def test_stuck_command_is_observable_until_release(self) -> None:
+        q = HardwareCommandQueue()
+        release = threading.Event()
+
+        def blocked() -> str:
+            release.wait()
+            return "late"
+
+        async def scenario() -> None:
+            with pytest.raises(CommandTimeoutError):
+                await q.run("stuck-call", blocked, timeout=0.05)
+            await asyncio.sleep(0.005)
+            info = q.stuck_info()
+            assert info is not None
+            assert info.name == "stuck-call"
+            assert info.timed_out_at >= info.started_at
+            assert q.poisoned_duration() > 0
+            with pytest.raises(DomainException) as busy:
+                await q.run("while-stuck", lambda: 1)
+            assert busy.value.code == DomainError.BUSY
+            # Release the wedged call; the poison must clear on completion.
+            release.set()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2
+            while q.stuck_info() is not None:
+                assert loop.time() < deadline, "poison never cleared"
+                await asyncio.sleep(0.01)
+            assert q.poisoned_duration() == 0.0
+            assert await q.run("after-stuck", lambda: 7) == 7
+
+        asyncio.run(scenario())
+        q.shutdown()
+
+    def test_successful_command_leaves_no_stuck_record(self) -> None:
+        q = HardwareCommandQueue()
+        assert q.stuck_info() is None
+        assert q.poisoned_duration() == 0.0
+        assert asyncio.run(q.run("ok", lambda: 1)) == 1
+        assert q.stuck_info() is None
+        assert q.poisoned_duration() == 0.0
+        q.shutdown()
+
 
 class TestSupervisor:
     """Verify controller lifecycle and health."""
@@ -275,3 +318,120 @@ class TestSupervisor:
         sup.register("test", start_func)
         health = sup.check_health()
         assert health["test"] == "stopped"
+
+    def test_stop_timeout_is_a_fault_and_blocks_duplicate_start(self) -> None:
+        sup = RuntimeSupervisor()
+        give_up = False
+        cancellations = 0
+
+        async def stubborn() -> None:
+            nonlocal cancellations
+            while not give_up:
+                try:
+                    await asyncio.sleep(0.02)
+                except asyncio.CancelledError:
+                    cancellations += 1
+
+        async def scenario() -> None:
+            nonlocal give_up
+            sup.register("stubborn", stubborn)
+            assert await sup.start("stubborn") is True
+            await asyncio.sleep(0)
+            await sup.stop("stubborn", timeout=0.05)
+            assert sup.get_health("stubborn").state == ControllerState.STOP_TIMEOUT
+            assert cancellations >= 1
+            # A duplicate start must be refused while the task is alive.
+            assert await sup.start("stubborn") is False
+            assert sup.get_health("stubborn").state == ControllerState.STOP_TIMEOUT
+            # Let the wedged task exit; then a fresh start is allowed again
+            # and a clean stop reports STOPPED.
+            give_up = True
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2
+            while not await sup.start("stubborn"):
+                assert loop.time() < deadline, "stuck task never released"
+                await asyncio.sleep(0.01)
+            await sup.stop("stubborn", timeout=1)
+            assert sup.get_health("stubborn").state == ControllerState.STOPPED
+
+        asyncio.run(scenario())
+
+    def test_cleanup_failure_is_not_a_clean_stop(self) -> None:
+        sup = RuntimeSupervisor()
+
+        async def start_func() -> None:
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                pass
+
+        async def bad_cleanup() -> None:
+            raise RuntimeError("cleanup exploded")
+
+        async def scenario() -> None:
+            sup.register("bad", start_func, bad_cleanup)
+            await sup.start("bad")
+            await asyncio.sleep(0)
+            await sup.stop("bad", timeout=1)
+            assert sup.get_health("bad").state == ControllerState.CLEANUP_FAILED
+            assert "cleanup exploded" in sup.get_health("bad").last_fault
+
+        asyncio.run(scenario())
+
+    def test_restart_policy_is_bounded(self) -> None:
+        sup = RuntimeSupervisor()
+        attempts = 0
+
+        async def always_crashes() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("boom")
+
+        async def scenario() -> None:
+            sup.register(
+                "flaky",
+                always_crashes,
+                restart=True,
+                max_restarts=2,
+                backoff_seconds=0.01,
+            )
+            assert await sup.start("flaky") is True
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2
+            while attempts < 3 or (
+                sup.get_health("flaky").state != ControllerState.FAILED
+            ):
+                assert loop.time() < deadline, (
+                    f"restart budget not exhausted (attempts={attempts}, "
+                    f"state={sup.get_health('flaky').state})"
+                )
+                await asyncio.sleep(0.01)
+
+        asyncio.run(scenario())
+        assert attempts == 3  # initial run + 2 restarts
+        assert sup.restart_counts()["flaky"] == 2
+        assert sup.get_health("flaky").state == ControllerState.FAILED
+
+    def test_no_restart_policy_stays_failed(self) -> None:
+        sup = RuntimeSupervisor()
+        attempts = 0
+
+        async def crashes_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("dead")
+
+        async def scenario() -> None:
+            sup.register("plain", crashes_once)
+            assert await sup.start("plain") is True
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2
+            while sup.get_health("plain").state != ControllerState.FAILED:
+                assert loop.time() < deadline, "crash not recorded"
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)  # grace period: no restart may happen
+
+        asyncio.run(scenario())
+        assert attempts == 1
+        assert sup.restart_counts()["plain"] == 0
+        assert sup.get_health("plain").state == ControllerState.FAILED

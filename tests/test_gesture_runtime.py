@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
 import os
 import pathlib
 import struct
@@ -11,6 +13,7 @@ from honor_control.backend.config_store import GestureMappingState
 from honor_control.backend.gesture_runtime import (
     EV_KEY,
     UI_DEV_CREATE,
+    UI_DEV_DESTROY,
     UI_DEV_SETUP,
     GestureRuntime,
     create_uinput_device,
@@ -148,3 +151,162 @@ def test_runtime_debounces_duplicate_reports() -> None:
                 os.close(fd)
 
     asyncio.run(exercise())
+
+
+def test_runtime_skips_bad_mapping_without_tearing_down_session(monkeypatch) -> None:
+    destroyed: list[int] = []
+    real_ioctl = fcntl.ioctl
+
+    def spy_ioctl(fd: int, request: int, *args: object) -> int:
+        if request == UI_DEV_DESTROY:
+            destroyed.append(fd)
+        return real_ioctl(fd, request, *args)
+
+    monkeypatch.setattr("fcntl.ioctl", spy_ioctl)
+
+    async def exercise() -> None:
+        runtime = GestureRuntime(
+            lambda: {
+                "3:1": GestureMappingState(
+                    enabled=True, mapping="definitely_not_a_key"
+                ),
+                "3:2": GestureMappingState(enabled=True, mapping="leftmeta,x"),
+            }
+        )
+        hid_read, hid_write = os.pipe2(os.O_NONBLOCK)
+        event_read, event_write = os.pipe2(os.O_NONBLOCK)
+        runtime._hid_fd = hid_read  # noqa: SLF001
+        runtime._uinput_fd = event_write  # noqa: SLF001
+        session_done = asyncio.get_running_loop().create_future()
+        runtime._session_done = session_done  # noqa: SLF001
+        try:
+            # Report 3:1 carries a permanently invalid chord: it must be
+            # skipped per-report without ending the session.
+            os.write(hid_write, b"\x0e\x03\x01\x00\x00\x00\x00\x00\x00")
+            runtime._read_ready()  # noqa: SLF001
+            assert not session_done.done()
+            assert runtime.status.skipped == 1
+            assert runtime.status.gestures_emitted == 0
+            assert "definitely_not_a_key" in runtime.status.last_error
+            assert runtime._uinput_fd == event_write  # noqa: SLF001
+            assert destroyed == []
+
+            # A subsequent valid report still emits: the session survived and
+            # no uinput destroy/recreate happened for the bad report.
+            os.write(hid_write, b"\x0e\x03\x02\x00\x00\x00\x00\x00\x00")
+            runtime._read_ready()  # noqa: SLF001
+            assert not session_done.done()
+            assert os.read(event_read, 4096)
+            assert runtime.status.reports_seen == 2
+            assert runtime.status.gestures_emitted == 1
+            assert runtime.status.skipped == 1
+            assert destroyed == []
+        finally:
+            runtime._hid_fd = None  # noqa: SLF001
+            runtime._uinput_fd = None  # noqa: SLF001
+            for fd in (hid_read, hid_write, event_read, event_write):
+                os.close(fd)
+
+    asyncio.run(exercise())
+
+
+def test_runtime_eof_still_fails_session() -> None:
+    async def exercise() -> None:
+        runtime = GestureRuntime(lambda: {})
+        hid_read, hid_write = os.pipe2(os.O_NONBLOCK)
+        runtime._hid_fd = hid_read  # noqa: SLF001
+        runtime._session_done = asyncio.get_running_loop().create_future()  # noqa: SLF001
+        os.close(hid_write)  # EOF on the next read: simulates device unplug
+        try:
+            runtime._read_ready()  # noqa: SLF001
+            assert runtime._session_done.done()  # noqa: SLF001
+            exc = runtime._session_done.exception()  # noqa: SLF001
+            assert isinstance(exc, OSError)
+            assert exc.errno == errno.ENODEV
+        finally:
+            runtime._hid_fd = None  # noqa: SLF001
+            os.close(hid_read)
+
+    asyncio.run(exercise())
+
+
+def test_runtime_uinput_write_error_still_fails_session() -> None:
+    async def exercise() -> None:
+        runtime = GestureRuntime(
+            lambda: {"3:1": GestureMappingState(enabled=True, mapping="leftmeta,x")}
+        )
+        hid_read, hid_write = os.pipe2(os.O_NONBLOCK)
+        event_read, event_write = os.pipe2(os.O_NONBLOCK)
+        os.close(event_read)  # uinput writes now fail with EPIPE
+        runtime._hid_fd = hid_read  # noqa: SLF001
+        runtime._uinput_fd = event_write  # noqa: SLF001
+        runtime._session_done = asyncio.get_running_loop().create_future()  # noqa: SLF001
+        try:
+            os.write(hid_write, b"\x0e\x03\x01\x00\x00\x00\x00\x00\x00")
+            runtime._read_ready()  # noqa: SLF001
+            assert runtime._session_done.done()  # noqa: SLF001
+            exc = runtime._session_done.exception()  # noqa: SLF001
+            assert isinstance(exc, OSError)
+        finally:
+            runtime._hid_fd = None  # noqa: SLF001
+            runtime._uinput_fd = None  # noqa: SLF001
+            for fd in (hid_read, hid_write, event_write):
+                os.close(fd)
+
+    asyncio.run(exercise())
+
+
+def test_reconnect_backoff_grows_and_is_capped() -> None:
+    runtime = GestureRuntime(
+        lambda: {},
+        retry_seconds=2.0,
+        max_retry_seconds=30.0,
+        stable_session_seconds=5.0,
+    )
+    delays = [runtime._next_retry_delay(0.1) for _ in range(6)]  # noqa: SLF001
+    assert delays == [2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+    # A session that ran long enough resets the backoff...
+    assert runtime._next_retry_delay(10.0) == 2.0  # noqa: SLF001
+    assert runtime._next_retry_delay(0.1) == 2.0  # noqa: SLF001
+    # ...while a short-lived session keeps growing it.
+    assert runtime._next_retry_delay(4.0) == 4.0  # noqa: SLF001
+
+
+def test_run_retries_failed_sessions_with_growing_backoff(monkeypatch) -> None:
+    runtime = GestureRuntime(
+        lambda: {},
+        retry_seconds=2.0,
+        max_retry_seconds=30.0,
+    )
+    attempts = 0
+
+    async def failing_session() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise OSError(errno.EIO, "injected I/O failure")
+
+    monkeypatch.setattr(runtime, "_run_session", failing_session)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    async def exercise() -> None:
+        try:
+            await runtime.run()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("run() should propagate cancellation")
+
+    asyncio.run(exercise())
+    assert attempts == 3
+    assert sleeps == [2.0, 4.0, 8.0]
+    assert runtime.status.running is False
+    assert "injected I/O failure" in runtime.status.last_error
+    # A clean stop resets the backoff for the next run().
+    assert runtime._retry_backoff == 2.0  # noqa: SLF001
