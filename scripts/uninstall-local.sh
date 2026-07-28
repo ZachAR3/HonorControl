@@ -102,7 +102,9 @@ LEGACY_RULE=/etc/udev/rules.d/99-honor-power.rules
 if [[ -f "$LEGACY_BACKUP" ]]; then
     if [[ ! -e "$LEGACY_RULE" ]]; then
         install -D -m 0644 "$LEGACY_BACKUP" "$LEGACY_RULE"
-        command -v udevadm >/dev/null 2>&1 && udevadm control --reload-rules || true
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+        fi
     else
         echo "warning: preserving legacy-rule backup because $LEGACY_RULE exists" >&2
     fi
@@ -123,8 +125,9 @@ fi
 echo "==> Reloading systemd"
 systemctl daemon-reload
 systemctl reload dbus 2>/dev/null || true
-command -v update-desktop-database >/dev/null 2>&1 && \
+if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
 
 echo
 echo "Done. honor-control has been removed."

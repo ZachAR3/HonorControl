@@ -129,8 +129,9 @@ cleanup() {
         if $LEGACY_REMOVED && [[ -f "$LEGACY_BACKUP" ]] && \
             [[ ! -e "$LEGACY_HONOR_POWER_RULE" ]]; then
             install -D -m 0644 "$LEGACY_BACKUP" "$LEGACY_HONOR_POWER_RULE"
-            command -v udevadm >/dev/null 2>&1 && \
+            if command -v udevadm >/dev/null 2>&1; then
                 udevadm control --reload-rules 2>/dev/null || true
+            fi
         fi
         if $WAS_ACTIVE && [[ -n "$OLD_RELEASE" && -d "$OLD_RELEASE" ]]; then
             systemctl daemon-reload 2>/dev/null || true
@@ -260,7 +261,10 @@ if [[ -n "$WHEELHOUSE" ]]; then
     HONOR_CONTROL_WHEEL="${HONOR_CONTROL_WHEELS[0]}"
     HONOR_TOOLS_WHEEL="${HONOR_TOOLS_WHEELS[0]}"
 fi
-HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" 2>/dev/null && pwd || true)"
+HONOR_TOOLS_ROOT=""
+if [[ -d "$ROOT/../honor-tools" ]]; then
+    HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" && pwd)"
+fi
 if [[ ( -z "$HONOR_TOOLS_ROOT" || \
         ! -f "$HONOR_TOOLS_ROOT/pyproject.toml" ) && -z "$WHEELHOUSE" ]]; then
     echo "error: honor-tools 0.1.0 is not published on the package index" >&2
@@ -397,8 +401,9 @@ done
 echo "==> [7/7] Reloading services"
 systemctl daemon-reload
 systemctl reload dbus 2>/dev/null || true
-command -v update-desktop-database >/dev/null 2>&1 && \
+if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
 if $TOUCHPAD_FIRMWARE; then
     echo "==> Touchpad firmware writes QUALIFIED: enabling honor-touchpad-restore.service"
     systemctl enable honor-touchpad-restore.service 2>/dev/null || true
@@ -435,7 +440,9 @@ if [[ -f "$LEGACY_HONOR_POWER_RULE" ]] && \
     fi
     rm -f "$LEGACY_HONOR_POWER_RULE"
     LEGACY_REMOVED=true
-    command -v udevadm >/dev/null 2>&1 && udevadm control --reload-rules || true
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+    fi
 fi
 
 MANIFEST="$RELEASE_DIR/installed-files.sha256"

@@ -17,8 +17,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
           cache: pip
@@ -36,8 +36,8 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -57,10 +57,10 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
           cache: pip
@@ -72,11 +72,13 @@ jobs:
         run: bandit -r honor_control -ll
       - name: Gitleaks full-history gate
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: bash -n syntax check
@@ -93,8 +95,8 @@ jobs:
   packaging:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
           cache: pip
@@ -108,22 +110,30 @@ jobs:
       - name: desktop-file-validate
         run: desktop-file-validate packaging/desktop/*.desktop
       - name: systemd-analyze verify
-        run: systemd-analyze verify packaging/systemd/*.service
+        run: |
+          # The units intentionally use stable /usr/bin entry points installed
+          # by install-local.sh. Provide inert stubs so verification checks the
+          # unit definitions without depending on a system-wide CI install.
+          sudo install -m 0755 /bin/true /usr/bin/honor-control-service
+          sudo install -m 0755 /bin/true /usr/bin/honor-touchpadctl
+          trap 'sudo rm -f /usr/bin/honor-control-service /usr/bin/honor-touchpadctl' EXIT
+          systemd-analyze verify packaging/systemd/*.service
       - run: python -m pip install --upgrade pip
       - run: python -m pip install ".[gui,dev]" "build==1.5.1" "setuptools==83.0.0" "wheel==0.47.0"
       - name: Build wheel + sdist reproducibly
         run: |
           set -e
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
           export PYTHONHASHSEED=0 TZ=UTC
           python -m build --no-isolation --outdir dist/first
-          bash scripts/normalize-sdist.sh dist/first/*.tar.gz "$SOURCE_DATE_EPOCH"
+          bash scripts/normalize-sdist.sh ./dist/first/*.tar.gz "$SOURCE_DATE_EPOCH"
           rm -rf build honor_control.egg-info
           python -m build --no-isolation --outdir dist/second
-          bash scripts/normalize-sdist.sh dist/second/*.tar.gz "$SOURCE_DATE_EPOCH"
+          bash scripts/normalize-sdist.sh ./dist/second/*.tar.gz "$SOURCE_DATE_EPOCH"
           diff -u \
-            <(cd dist/first && sha256sum * | sed 's#  #  #') \
-            <(cd dist/second && sha256sum * | sed 's#  #  #')
+            <(cd dist/first && sha256sum -- * | sed 's#  #  #') \
+            <(cd dist/second && sha256sum -- * | sed 's#  #  #')
       - name: Verify artifacts contain the package (hard gate)
         run: |
           set -e
