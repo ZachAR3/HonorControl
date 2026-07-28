@@ -282,6 +282,11 @@ class RuntimeSupervisor:
 
     async def stop_all(self, timeout: float = 5.0) -> None:
         """Stop all controllers in reverse registration order."""
+        # Cancel pending crash-restart backoffs first so teardown is
+        # deterministic and a backoff cannot respawn a controller mid-shutdown.
+        for task in list(self._pending_restarts):
+            task.cancel()
+        self._pending_restarts.clear()
         names = list(self._controllers.keys())
         for name in reversed(names):
             await self.stop(name, timeout=timeout)

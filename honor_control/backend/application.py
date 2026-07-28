@@ -232,8 +232,15 @@ class ApplicationService:
 
     async def start_background(self) -> None:
         """Start service-owned monitors after initial state is published."""
-        self._supervisor.register("refresh", self._refresh_loop)
-        self._supervisor.register("auto_switch", self._auto_switch_loop)
+        # refresh and auto_switch should keep running; an unexpected crash is
+        # recovered by a bounded restart policy rather than silently killing
+        # state refresh or AC/battery switching forever.  fan_curve is left
+        # without restart: it owns an intentional 3-strike fail-safe disable
+        # that must not be resurrected by the supervisor.
+        self._supervisor.register("refresh", self._refresh_loop, restart=True)
+        self._supervisor.register(
+            "auto_switch", self._auto_switch_loop, restart=True
+        )
         self._supervisor.register(
             "fan_curve", self._fan_curve_loop, self._restore_fan_auto
         )

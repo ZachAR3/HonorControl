@@ -77,7 +77,7 @@ class HonorTray(QObject):
         self.tray.activated.connect(self._on_activated)
         self.controller.snapshot_received.connect(self._on_snapshot)
         self.controller.connection_changed.connect(self._set_online)
-        self.controller.error.connect(self._notify)
+        self.controller.error.connect(self._on_error)
         self.controller.operation_completed.connect(self._on_operation)
         self._set_online(False)
 
@@ -288,6 +288,14 @@ class HonorTray(QObject):
     def _notify(self, message: str) -> None:
         self.tray.showMessage(
             "Honor Control", message, QSystemTrayIcon.MessageIcon.Information, 2000
+        )
+
+    def _on_error(self, error: object) -> None:
+        # The controller emits a structured UiError (HC-015); surface its
+        # message as a warning so authorization denials and faults are visible.
+        message = str(getattr(error, "message", error))
+        self.tray.showMessage(
+            "Honor Control", message, QSystemTrayIcon.MessageIcon.Warning, 4000
         )
 
     def _quit(self) -> None:
