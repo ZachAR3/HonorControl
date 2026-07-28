@@ -55,15 +55,24 @@ def private_bus_address(monkeypatch: pytest.MonkeyPatch):
     address = proc.stdout.readline().strip()
     if not address or proc.poll() is not None:
         proc.kill()
+        proc.wait()
+        proc.stdout.close()
+        assert proc.stderr is not None
+        proc.stderr.close()
         pytest.skip("could not start a private D-Bus daemon")
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", address)
-    yield address
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        yield address
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+        assert proc.stderr is not None
+        proc.stderr.close()
 
 
 async def _connect_with_retry(attempts: int = 100, delay: float = 0.1) -> SdbusClient:
@@ -74,7 +83,11 @@ async def _connect_with_retry(attempts: int = 100, delay: float = 0.1) -> SdbusC
     """
     last: Exception | None = None
     for _ in range(attempts):
-        client = SdbusClient(bus_kind="session", timeout=30.0)
+        client = SdbusClient(
+            bus_kind="session",
+            timeout=30.0,
+            read_timeout=30.0,
+        )
         try:
             await client.connect()
             return client

@@ -17,7 +17,7 @@ OBJECT_PATH = "/org/honorlinux/Control1"
 API_VERSION = 1
 
 #: Snapshot schema version. Increment when snapshot field semantics change.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # -- Interface names ----------------------------------------------------------
 

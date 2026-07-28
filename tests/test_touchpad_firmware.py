@@ -286,6 +286,7 @@ def test_apply_profile_cli_writes_hid_and_verifies_master(
             str(dev),
             "--wmi-root",
             str(wmi_root),
+            "--allow-unqualified",
             "apply",
             str(profile),
         ]
@@ -323,6 +324,7 @@ def test_apply_profile_restores_master_when_hid_write_fails(
             str(dev),
             "--wmi-root",
             str(wmi_root),
+            "--allow-unqualified",
             "apply",
             str(profile),
         ]
@@ -361,6 +363,7 @@ def test_touchpad_cli_uses_shared_exit_code_categories(
                 str(sysfs),
                 "--dev-root",
                 str(dev),
+                "--allow-unqualified",
                 "set",
                 "edge_volume",
                 "on",
@@ -373,8 +376,8 @@ def test_touchpad_cli_uses_shared_exit_code_categories(
 def test_touchpadctl_write_is_gated_when_unqualified(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """HC-001: without the qualification flag, write commands refuse; --force
-    and probe/encode remain available."""
+    """HC-001: writes require qualification or a deliberate diagnostic
+    override, while probe/encode remain available."""
     monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
     sysfs, dev = _fake_device(tmp_path)
     base = ["--sysfs-root", str(sysfs), "--dev-root", str(dev)]
@@ -385,5 +388,9 @@ def test_touchpadctl_write_is_gated_when_unqualified(
     # Read-only encode still works.
     assert touchpadctl_main(["encode", "sensitivity", "high"]) == 0
 
-    # --force overrides the gate (diagnostics/recovery).
-    assert touchpadctl_main([*base, "--force", "set", "sensitivity", "high"]) == 0
+    assert (
+        touchpadctl_main(
+            [*base, "--allow-unqualified", "set", "sensitivity", "high"]
+        )
+        == 0
+    )

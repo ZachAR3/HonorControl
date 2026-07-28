@@ -378,6 +378,29 @@ class TestSupervisor:
 
         asyncio.run(scenario())
 
+    def test_cleanup_timeout_is_not_a_clean_stop(self) -> None:
+        sup = RuntimeSupervisor()
+
+        async def start_func() -> None:
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                pass
+
+        async def hanging_cleanup() -> None:
+            await asyncio.sleep(100)
+
+        async def scenario() -> None:
+            sup.register("slow-cleanup", start_func, hanging_cleanup)
+            await sup.start("slow-cleanup")
+            await asyncio.sleep(0)
+            await sup.stop("slow-cleanup", timeout=0.01)
+            health = sup.get_health("slow-cleanup")
+            assert health.state == ControllerState.CLEANUP_FAILED
+            assert "cleanup did not finish" in health.last_fault
+
+        asyncio.run(scenario())
+
     def test_restart_policy_is_bounded(self) -> None:
         sup = RuntimeSupervisor()
         attempts = 0

@@ -28,6 +28,7 @@ from honor_control.core.gestures import (
     TOUCHPAD_VENDOR_ID,
     gesture_keys_from_report,
 )
+from honor_control.core.touchpad import touchpad_firmware_lock
 from honor_control.core.validation import validate_key_combo
 
 log = logging.getLogger("honor_control.backend.gesture_runtime")
@@ -238,7 +239,11 @@ class GestureRuntime:
             while True:
                 session_started = time.monotonic()
                 try:
-                    await self._run_session()
+                    # The reader owns the vendor hidraw endpoint for the whole
+                    # session. Firmware writes/support queries must stop this
+                    # runtime before taking the same cross-process lock.
+                    with touchpad_firmware_lock():
+                        await self._run_session()
                 except asyncio.CancelledError:
                     raise
                 except PermissionError as exc:

@@ -1,220 +1,103 @@
 # Honor Control
 
-D-Bus service and Qt6 GUI for managing Honor MagicBook laptops on Linux.
+Honor Control is a Linux system service and Qt 6 desktop app for managing
+supported Honor MagicBook laptops.
 
-## Status
+The project is currently alpha software. Test hardware changes carefully and
+keep a recovery path available.
 
-**Alpha.** This software is under active development. Features are
-verified against fake hardware in CI; real hardware testing is an
-explicit, manual pre-release gate.
+## Supported hardware
 
-**Supported hardware matrix.** Hardware writes are enabled only on an exact
-positive platform match; there is no fallback to a default platform.
+Hardware writes require an exact platform match:
 
-| Requirement | Supported value |
-|---|---|
-| DMI vendor / product | `HONOR` / `MRA-XXX` (Honor MagicBook Art 14) |
-| CPU (required for fan writes) | Intel Core Ultra 5 125H (Meteor Lake) — exact |
-| Kernel modules | `acpi_call` (fan/EC) and `uinput` (gesture output) |
+- DMI vendor/product: `HONOR` / `MRA-XXX` (MagicBook Art 14)
+- Fan control CPU: Intel Core Ultra 5 125H
+- Kernel modules: `acpi_call` for fan control and `uinput` for gestures
 
-AMD and all other Intel models are not allowlisted and receive **no** power,
-fan, or GPU writes. Power profiles coordinate through PPD plus standard Intel
-RAPL/`intel_pstate` sysfs controls; the service never writes raw CPU MSRs or
-disables host power-management services. No specific minimum BIOS or kernel
-version is pinned — the tested platform is a current distribution kernel that
-provides the modules above on that exact Meteor Lake SKU.
+Other models remain read-only. GPU mitigation and unqualified touchpad firmware
+writes are disabled.
 
-- **Battery charge control:** verified (sysfs charge thresholds)
-- **Power profiles:** enabled only on the verified MRA-XXX platform (requires
-  working PPD, Intel RAPL/intel_pstate sysfs controls, and exact readback)
-- **Fan control:** enabled only on verified MRA-XXX hardware with a valid CPU
-  temperature sensor (EC writes via `acpi_call`)
-- **Touchpad gesture actions:** input decoder and Linux uinput dispatcher
-  implemented; typed firmware settings are available through D-Bus and the
-  standalone `honor-touchpadctl` transport
-- **GPU mitigation:** disabled until its original IRQ/C-state values can be
-  captured and restored reliably
-- **Firmware setting writes:** implemented for the descriptor-verified vendor
-  HID collection on exact DMI `HONOR/MRA-XXX`; Linux on-hardware replay remains
-  the final validation step
+## Features
 
-See [touchpad protocol and Linux validation](docs/gesture-linux-remaining-work.md) for
-the statically verified protocol, Windows capture procedure, and implementation
-gate. The output direction still requires Linux hardware replay.
+- Battery charge thresholds and presets
+- Power profiles and AC/battery switching
+- Stock, manual, and curve-based fan control
+- Touchpad gesture mapping and firmware settings
+- GUI, integrated tray, tray-only process, and CLI
+- D-Bus API with polkit authorization
+- Atomic configuration and structured diagnostics
 
-## Architecture
+## Install
 
-```
-GUI / Tray                    CLI
-    │ intents + snapshots       │ command + structured output
-    ▼                           ▼
- Qt AppController worker     async D-Bus client
-           └──────────┬──────────┘
-                      ▼
-           org.honorlinux.Control1
-           typed contract + timeouts
-                      │
-              D-Bus interface layer
-        caller capture → polkit → error mapping
-                      │
-                      ▼
-               ApplicationService
-   use cases + state transitions + lifecycle policy
-        ┌─────────────┼────────────────────┐
-        ▼             ▼                    ▼
-    ConfigStore   SnapshotStore      RuntimeSupervisor
- atomic desired   sequence+events   refresh/fan/power/gesture
-        └─────────────┼────────────────────┘
-                      ▼
-         serialized HardwareCommandQueue
-                      │
-         HonorToolsAdapter + safe OS probes
-                      │
-             sysfs / EC / uinput / PPD
-
-  ConfigStore: /var/lib/honor-control/state.toml
-  Per-user GUI settings: QSettings
-```
-
-### Safety invariants
-
-1. **One hardware owner:** only the root system service may instantiate
-   `HonorToolsAdapter`. Frontends depend only on the D-Bus client
-   protocol.
-2. **Unknown hardware cannot write:** a positive platform match
-   (recognized DMI vendor/product) is required before any EC/fan/GPU
-   write. No fallback to a default platform.
-3. **Polkit fails closed:** missing sender, credentials, or polkit
-   unavailability denies the call. No "active local user" fallback.
-4. **Serialized mutations:** all hardware mutations go through one daemon
-   worker and a global async lock. A timed-out, non-cancellable hardware call
-   poisons the queue until it actually returns.
-5. **Desired/applied/observed are separate:** persisted user intent,
-   last successfully applied state, and live hardware observation never
-   overwrite one another.
-6. **Structured results:** every mutation returns an `OperationResult`
-   with `changed`, `persisted`, and `applied` booleans. Config
-   persistence is never reported as hardware success.
-7. **Qt main thread is I/O-free in practice:** all D-Bus, filesystem,
-   subprocess, and hardware I/O happens on a dedicated worker thread. The
-   documented exception is tiny `QSettings` reads/writes (window geometry and
-   the close-to-tray preference), which touch a small per-user config file.
-
-## Installation
+`honor-tools` 0.1.0 must be available at `../honor-tools`, or supplied as a
+wheel in an offline release bundle.
 
 ```bash
-# Clone and install (creates an isolated versioned venv under /opt/honor-control,
-# symlinks entry points to /usr/bin, installs systemd/D-Bus/polkit files)
 git clone git@github.com:ZachAR3/HonorControl.git
 cd HonorControl
 sudo bash scripts/install-local.sh
-
-# Enable and start the service
 sudo systemctl enable --now honor-control.service
 ```
 
-`honor-tools` 0.1.0 is not published on PyPI. The installer therefore requires
-its source tree at `../honor-tools` (the standard HonorTools workspace layout),
-or a wheel supplied with `--wheelhouse DIR`. It fails before changing system
-files when neither source is available.
-
-The installer removes the stock `honor-tools` power-supply udev hook because
-it directly rewrites CPU EPP after calling `powerprofilesctl`, which conflicts
-with KDE's power-profiles-daemon slider. Honor Control owns AC/battery
-switching instead; PPD remains enabled for KDE.
-
-To uninstall:
+Touchpad firmware writes require completed hardware validation and an explicit
+qualified install:
 
 ```bash
-sudo bash scripts/uninstall-local.sh            # keep state
-sudo bash scripts/uninstall-local.sh --purge     # remove state too
+sudo bash scripts/install-local.sh --enable-touchpad-firmware
 ```
 
-For development, use the fake session-bus service without installing it as root:
+Build a complete offline bundle with:
 
 ```bash
-scripts/dev-run-service.sh
-scripts/dev-run-gui.sh --bus session
+bash scripts/make-release-bundle.sh
 ```
 
-## Usage
+The bundle must be signed before distribution. Its installer verifies the
+bundle and exact wheelhouse contents before changing the system.
 
-### CLI
+Rollback and removal:
 
 ```bash
-honorctl status                    # overall status
-honorctl battery thresholds 80 75  # set charge thresholds
-honorctl battery mode home         # apply charge mode preset
-honorctl power profile balanced     # apply power profile
-honorctl power save compile --pl1 30 --pl2 45 \
-  --epp balance_performance --max-perf 90
-honorctl power auto-switch on --on-ac compile --on-battery silent
-honorctl fan stock                 # restore stock auto mode
-honorctl fan curve "40000:0,95000:100"  # set fan curve
-honorctl fan manual 50 --ttl 300   # manual fan speed with TTL
-honorctl gestures batch on         # enable all gestures
-honorctl gestures daemon on        # start HID-to-uinput dispatch
-honorctl gpu enable                # reports unavailable until restore is safe
-honorctl diagnostics checks        # run diagnostic checks
-honorctl diagnostics export -o bundle.json  # export debug bundle
-honorctl reload                    # reload config
+sudo bash scripts/rollback.sh
+sudo bash scripts/uninstall-local.sh
+sudo bash scripts/uninstall-local.sh --purge
 ```
 
-The GUI power page includes the three built-in profiles (Silent, Balanced,
-Performance), editable PL1/PL2 wattage, governor, EPP, PPD mode, turbo and
-maximum-performance settings, additional custom profiles, and explicit
-AC/battery profile and script-hook selection. The fan page provides a
-click/drag graphical curve editor.
-
-Install transition hooks in a root-owned location before selecting them, for
-example:
+## Use
 
 ```bash
-sudo install -D -o root -g root -m 0755 my-ac-hook \
-  /usr/local/libexec/honor-control-ac-hook
+honor-control-gui
+honor-control-tray
+honorctl status
+honorctl battery thresholds 80 75
+honorctl power profile balanced
+honorctl fan stock
+honorctl diagnostics checks
 ```
 
-### GUI
-
-```bash
-honor-control-gui        # GUI + integrated system tray
-honor-control-tray       # optional tray-only process
-```
-
-`honor-touchpadctl` is a root-only diagnostic that talks to hidraw directly.
-Do not run its write commands while `honor-control.service` is applying
-touchpad settings; normal GUI and `honorctl` operations should use the daemon.
-
-Closing the GUI window hides it to the tray by default. Left-click the tray
-icon to restore the existing window; its menu provides quick power-profile,
-charge-limit, gesture-daemon, and touchpad controls. Use **Quit** from the File
-or tray menu to exit. This behavior can be disabled on the Settings page.
+The standalone `honor-touchpadctl` tool accesses hidraw directly. Prefer the
+GUI or `honorctl` for normal operation.
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run the offline/fake-hardware test suite
+python -m pip install -e ".[gui,dev]"
 pytest
-
-# Run lint
 ruff check honor_control tests
-
-# Run the service on the session bus (FakeHardware, no root)
-python -m honor_control.backend.service --session-bus
-
-# Run the GUI against the session bus
-honor-control-gui --bus session
+scripts/dev-run-service.sh
+scripts/dev-run-gui.sh --bus session
 ```
 
-## Configuration
+The development service uses fake hardware on the session bus.
 
-- `/var/lib/honor-control/state.toml` — service-owned desired state
-  (battery thresholds, power profile, fan curves, touchpad firmware settings,
-  gesture mappings, GPU mitigation). Atomic, versioned, validated.
-- `QSettings` — window geometry and close-to-tray preference only.
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Safety model](docs/safety.md)
+- [Hardware support](docs/hardware-support.md)
+- [D-Bus API](docs/dbus-api.md)
+- [Development](docs/development.md)
+- [Touchpad validation](docs/hardware-validation/touchpad-linux.md)
 
 ## License
 
@@ -222,43 +105,7 @@ GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-This project builds on research and prior work from the Honor MagicBook
-Linux community. In particular:
-
-- **[honor-magicbook-art-touchpad-gestures](https://github.com/MadhiasM/honor-magicbook-art-touchpad-gestures)**
-  by [MadhiasM](https://github.com/MadhiasM) (GPL-3.0) — the touchpad
-  HID report `0x0e` gesture decoder and uinput dispatch approach that
-  informed this project's gesture runtime.
-- **[art14-fan-daemon](https://github.com/mark-herbert42/art14-fan-daemon)**
-  by [mark-herbert42](https://github.com/mark-herbert42) — the documented
-  EC ACPI call sequences (`_SB.PC00.LPCB.H_EC.WTER ...`) used for fan
-  control on the Honor MagicBook Art 14.
-
-## Disclaimer
-
-This software is **AI-generated**. It is provided "AS IS", without warranty
-of any kind, express or implied. I am **not responsible** for any issues,
-data loss, or hardware damage that may occur from using this product. You use
-it entirely at your own risk.
-
-The features below do not all carry the same level of evidence. Some are
-exercised only against fake hardware in CI, some are reconstructed statically
-from Windows protocol captures, some have been run on the author's own
-machine, and some are disabled outright until they can be made safe. Judge the
-risk for your use case accordingly.
-
-### Feature verification status
-
-| Feature | Status | Evidence / notes |
-|---|---|---|
-| Battery charge control | `physically-verified` | sysfs charge thresholds on the author's machine |
-| Power profiles | `physically-verified` | MRA-XXX |
-| Fan control | `physically-verified` | MRA-XXX + Intel Core Ultra 5 125H |
-| Gesture input (decode + uinput) | `physically-verified` | HID report `0x0e` decode to uinput dispatch |
-| Touchpad firmware setting writes | `disabled` | pending physical Linux replay gate |
-| GPU IRQ mitigation | `disabled` | no safe restore of original IRQ/C-state values |
-
-Status labels: `physically-verified` = run on real hardware; `simulated` =
-exercised against fake hardware in CI only; `static` = statically
-reconstructed from protocol captures, not yet replayed on Linux hardware;
-`disabled` = gated off in production builds.
+Touchpad gesture work builds on
+[honor-magicbook-art-touchpad-gestures](https://github.com/MadhiasM/honor-magicbook-art-touchpad-gestures).
+Fan-control research builds on
+[art14-fan-daemon](https://github.com/mark-herbert42/art14-fan-daemon).

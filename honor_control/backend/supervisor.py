@@ -268,6 +268,8 @@ class RuntimeSupervisor:
                 pass
             except TimeoutError:
                 log.warning("supervisor: '%s' cleanup timed out", name)
+                health.last_fault = f"cleanup did not finish within {timeout:.1f}s"
+                cleanup_failed = True
             except Exception as exc:  # noqa: BLE001
                 log.error("supervisor: '%s' cleanup failed: %s", name, exc)
                 health.last_fault = str(exc)

@@ -359,6 +359,18 @@ class TestConfigStoreMigration:
         assert state.gpu.mitigation_enabled is True
         assert state.touchpad.settings == {}
 
+    def test_v3_document_adds_power_recovery_marker(self) -> None:
+        data = _state_to_dict(default_state())
+        data["schema_version"] = 3
+        data["power"].pop("recovery_required")
+        data["power"].pop("recovery_profile")
+
+        state = _state_from_dict(data)
+
+        assert state.schema_version == STATE_SCHEMA_VERSION
+        assert state.power.recovery_required is False
+        assert state.power.recovery_profile == ""
+
     def test_current_version_file_is_not_snapshotted(
         self, tmp_state_path: pathlib.Path
     ) -> None:
@@ -408,9 +420,9 @@ class TestConfigStoreMigration:
 
 
 class TestConfigStoreUnknownKeys:
-    """HC-012: unknown keys warn and surface, but never fail a valid load."""
+    """HC-012: unknown hardware-state keys fail closed."""
 
-    def test_unknown_keys_are_surfaced_not_fatal(
+    def test_unknown_keys_make_store_invalid(
         self, tmp_state_path: pathlib.Path
     ) -> None:
         data = _state_to_dict(default_state())
@@ -419,14 +431,13 @@ class TestConfigStoreUnknownKeys:
         tmp_state_path.write_text(_toml_dump(data), encoding="utf-8")
 
         store = ConfigStore(state_path=tmp_state_path)
-        state = store.load()
+        store.load()
 
-        assert store.valid is True
-        assert state == default_state()
-        assert "power.unknown_key" in store.unknown_keys
-        assert "bogus_section" in store.unknown_keys
+        assert store.valid is False
+        assert "power.unknown_key" in store.last_error
+        assert "bogus_section" in store.last_error
 
-    def test_unknown_keys_inside_dynamic_entries(
+    def test_unknown_keys_inside_dynamic_entries_are_rejected(
         self, tmp_state_path: pathlib.Path
     ) -> None:
         data = _state_to_dict(default_state())
@@ -436,8 +447,8 @@ class TestConfigStoreUnknownKeys:
         store = ConfigStore(state_path=tmp_state_path)
         store.load()
 
-        assert store.valid is True
-        assert "power.profiles.balanced.typo_field" in store.unknown_keys
+        assert store.valid is False
+        assert "power.profiles.balanced.typo_field" in store.last_error
 
     def test_clean_file_reports_no_unknown_keys(
         self, tmp_state_path: pathlib.Path

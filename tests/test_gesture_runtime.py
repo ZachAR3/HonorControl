@@ -9,6 +9,8 @@ import os
 import pathlib
 import struct
 
+import pytest
+
 from honor_control.backend.config_store import GestureMappingState
 from honor_control.backend.gesture_runtime import (
     EV_KEY,
@@ -22,6 +24,7 @@ from honor_control.backend.gesture_runtime import (
     probe_gesture_environment,
 )
 from honor_control.core.gestures import gesture_keys_from_report
+from honor_control.core.touchpad import TouchpadLockBusy, touchpad_firmware_lock
 
 VENDOR_DESCRIPTOR = bytes.fromhex(
     "06 00 ff 09 01 a1 01 85 0e 75 08 95 08 81 02 91 02 c0"
@@ -310,3 +313,26 @@ def test_run_retries_failed_sessions_with_growing_backoff(monkeypatch) -> None:
     assert "injected I/O failure" in runtime.status.last_error
     # A clean stop resets the backoff for the next run().
     assert runtime._retry_backoff == 2.0  # noqa: SLF001
+
+
+def test_running_reader_holds_cross_process_firmware_lock(monkeypatch) -> None:
+    runtime = GestureRuntime(lambda: {})
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+
+        async def active_session() -> None:
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(runtime, "_run_session", active_session)
+        task = asyncio.create_task(runtime.run())
+        await started.wait()
+        with pytest.raises(TouchpadLockBusy):
+            with touchpad_firmware_lock():
+                pass
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())

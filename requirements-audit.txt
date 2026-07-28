@@ -1,0 +1,4 @@
+# Published runtime dependencies audited by CI. honor-tools 0.1.0 is supplied
+# as a separately reviewed local wheel and is not available from PyPI.
+sdbus==0.14.2
+PySide6==6.11.1

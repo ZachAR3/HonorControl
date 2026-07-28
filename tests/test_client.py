@@ -28,10 +28,12 @@ from honor_control.core.errors import TransportError
 from honor_control.core.models import (
     BatterySnapshot,
     BatteryStatusKind,
+    GesturesSnapshot,
     OperationResult,
     OperationStatus,
     PowerProfileEntry,
     PowerSnapshot,
+    ServiceHealth,
     SystemSnapshot,
 )
 
@@ -228,12 +230,20 @@ class TestDecodeSnapshot:
         data = snapshot_to_vardict(
             SystemSnapshot(
                 sequence=9,
+                service=ServiceHealth(
+                    hardware_queue_stuck=True,
+                    stuck_command="fan_read",
+                    fan_recovery_required=True,
+                    power_recovery_required=True,
+                    controller_restart_counts={"refresh": 2},
+                ),
                 battery=BatterySnapshot(
                     available=True,
                     capacity_percent=72,
                     status=BatteryStatusKind.DISCHARGING,
                 ),
                 power=PowerSnapshot(available=True, applied_profile="balanced"),
+                gestures=GesturesSnapshot(firmware_writes_qualified=True),
             )
         )
         snap = _decode_snapshot(data)
@@ -241,6 +251,12 @@ class TestDecodeSnapshot:
         assert snap.battery.capacity_percent == 72
         assert str(snap.battery.status) == "discharging"
         assert snap.power.applied_profile == "balanced"
+        assert snap.service.hardware_queue_stuck is True
+        assert snap.service.stuck_command == "fan_read"
+        assert snap.service.fan_recovery_required is True
+        assert snap.service.power_recovery_required is True
+        assert snap.service.controller_restart_counts == {"refresh": 2}
+        assert snap.gestures.firmware_writes_qualified is True
 
     def test_decode_editable_power_profile(self) -> None:
         profile = PowerProfileEntry(
@@ -351,6 +367,36 @@ class TestSdbusClientSubscriptions:
             await client.close()
 
         asyncio.run(scenario())
+
+
+class TestSdbusClientTimeouts:
+    def test_reads_and_mutations_use_separate_deadlines(self, monkeypatch) -> None:
+        client = SdbusClient(timeout=90.0, read_timeout=4.0)
+        observed: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def record_wait_for(awaitable, *, timeout):
+            observed.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        async def method(*_args):
+            return 1
+
+        client._proxy = SimpleNamespace(  # noqa: SLF001
+            GetApiVersion=method,
+            SetProfile=method,
+        )
+        monkeypatch.setattr(
+            "honor_control.client.sdbus_client.asyncio.wait_for",
+            record_wait_for,
+        )
+
+        async def scenario() -> None:
+            await client._call_method("GetApiVersion")  # noqa: SLF001
+            await client._call_method("SetProfile", "balanced")  # noqa: SLF001
+
+        asyncio.run(scenario())
+        assert observed == [4.0, 90.0]
 
 
 class TestSdbusClientHandshake:

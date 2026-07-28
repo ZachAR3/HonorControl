@@ -54,7 +54,7 @@ from honor_control.core.validation import (
 log = logging.getLogger("honor_control.backend.config_store")
 
 #: Current state schema version.
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 #: Suffix for the pre-migration snapshot of an older state file.
 PREMIGRATION_SUFFIX = ".premigration"
@@ -124,6 +124,8 @@ class PowerState:
     profiles: dict[str, PowerProfileState] = field(
         default_factory=default_power_profiles
     )
+    recovery_required: bool = False
+    recovery_profile: str = ""
 
 
 @dataclass(frozen=True)
@@ -225,10 +227,23 @@ def _migrate_2_to_3(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def _migrate_3_to_4(data: dict[str, Any]) -> dict[str, Any]:
+    """Schema 3 -> 4: persist unresolved power rollback recovery."""
+    migrated = dict(data)
+    power = migrated.get("power")
+    power = dict(power) if isinstance(power, dict) else {}
+    power.setdefault("recovery_required", False)
+    power.setdefault("recovery_profile", "")
+    migrated["power"] = power
+    migrated["schema_version"] = 4
+    return migrated
+
+
 #: Ordered registry: key ``N`` holds the step upgrading schema N to N+1.
 _SCHEMA_MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
+    3: _migrate_3_to_4,
 }
 
 
@@ -280,7 +295,15 @@ _KNOWN_TABLE_KEYS: dict[str, frozenset[str]] = {
         {"schema_version", "battery", "power", "fan", "gestures", "touchpad", "gpu"}
     ),
     "battery": frozenset({"end_threshold", "start_threshold", "mode"}),
-    "power": frozenset({"profile", "auto_switch", "profiles"}),
+    "power": frozenset(
+        {
+            "profile",
+            "auto_switch",
+            "profiles",
+            "recovery_required",
+            "recovery_profile",
+        }
+    ),
     "power.auto_switch": frozenset(
         {"enabled", "on_ac", "on_battery", "on_ac_script", "on_battery_script"}
     ),
@@ -313,8 +336,8 @@ _KNOWN_ENTRY_KEYS: dict[str, frozenset[str]] = {
 def _find_unknown_keys(data: dict[str, Any]) -> list[str]:
     """Return exact dotted paths of keys absent from the current schema.
 
-    Unknown keys never fail parsing (callers warn instead), but they are
-    surfaced so typos in persisted hardware state stay diagnosable.
+    Unknown keys fail parsing because a typo in desired hardware state could
+    otherwise be replaced silently by a default.
     """
     unknown: list[str] = []
 
@@ -359,9 +382,8 @@ def _state_from_dict(
     Older schema versions are upgraded by the ordered migration pipeline
     before parsing; a failed migration raises :class:`DomainException`
     naming the source schema version instead of silently adopting current
-    defaults.  Unknown keys never fail a parse: when ``unknown_keys`` is
-    supplied they are collected there as exact dotted paths.  Invalid
-    values raise :class:`DomainException`.
+    defaults. Unknown keys and invalid values raise
+    :class:`DomainException`.
     """
     if not isinstance(data, dict):
         raise DomainException(
@@ -405,11 +427,16 @@ def _parse_current_schema(
 ) -> ServiceState:
     """Parse a current-schema document into a validated ServiceState.
 
-    Unknown keys are collected into ``unknown_keys`` (when supplied) as
-    exact dotted paths; invalid values raise :class:`DomainException`.
+    Unknown keys and invalid values raise :class:`DomainException`.
     """
+    unknown = _find_unknown_keys(data)
     if unknown_keys is not None:
-        unknown_keys.extend(_find_unknown_keys(data))
+        unknown_keys.extend(unknown)
+    if unknown:
+        raise DomainException(
+            DomainError.INVALID_ARGUMENT,
+            f"Unknown state key(s): {', '.join(unknown)}",
+        )
 
     def table(parent: dict[str, Any], key: str) -> dict[str, Any]:
         value = parent.get(key, {})
@@ -490,6 +517,8 @@ def _parse_current_schema(
             on_battery_script=string(as_data, "on_battery_script", ""),
         ),
         profiles=profiles,
+        recovery_required=boolean(pw_data, "recovery_required", False),
+        recovery_profile=string(pw_data, "recovery_profile", ""),
     )
 
     # Fan
@@ -948,6 +977,20 @@ def _validate_state(state: ServiceState) -> None:
                 f"Max performance percentage out of range for '{name}'",
             )
     validate_power_profile(state.power.profile, profile_names)
+    if not isinstance(state.power.recovery_required, bool):
+        raise DomainException(
+            DomainError.INVALID_ARGUMENT,
+            "Power recovery flag must be a boolean",
+        )
+    if (
+        not isinstance(state.power.recovery_profile, str)
+        or len(state.power.recovery_profile) > 64
+        or "\0" in state.power.recovery_profile
+    ):
+        raise DomainException(
+            DomainError.INVALID_ARGUMENT,
+            "Invalid power recovery profile",
+        )
     if not isinstance(state.power.auto_switch.enabled, bool):
         raise DomainException(
             DomainError.INVALID_ARGUMENT,

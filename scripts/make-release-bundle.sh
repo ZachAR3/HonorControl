@@ -1,90 +1,205 @@
 #!/usr/bin/env bash
-# Assemble a versioned, hash-verified, offline release bundle.
-#
-# The bundle contains everything needed for a fully offline install on a
-# supported host: the honor_control wheel + sdist (built with python -m build),
-# the packaging tree, the install/uninstall/rollback scripts, a SHA256SUMS over
-# every artifact, a MANIFEST (version / git commit / date), and a minimal
-# sbom.json of the pinned dependencies. A drop-in directory is provided for the
-# separately-reviewed honor-tools wheel.
-#
-# EXTERNAL STEPS (not performed here): obtaining the reviewed honor-tools 0.1.0
-# wheel, and signing/publishing the bundle. This script only assembles and
-# checksums the artifacts it can build locally.
+# Build a complete, platform-specific offline release bundle.
 #
 # Usage:
-#   bash scripts/make-release-bundle.sh [OUTPUT_DIR]
+#   bash scripts/make-release-bundle.sh [OUTPUT_DIR] [--honor-tools-wheel FILE]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT"
+OUTPUT_DIR=""
+HONOR_TOOLS_WHEEL=""
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --honor-tools-wheel)
+            [[ $# -ge 2 ]] || {
+                echo "error: --honor-tools-wheel requires a file" >&2
+                exit 2
+            }
+            HONOR_TOOLS_WHEEL="$2"
+            shift
+            ;;
+        --*)
+            echo "error: unknown option: $1" >&2
+            exit 2
+            ;;
+        *)
+            [[ -z "$OUTPUT_DIR" ]] || {
+                echo "error: only one output directory may be supplied" >&2
+                exit 2
+            }
+            OUTPUT_DIR="$1"
+            ;;
+    esac
+    shift
+done
+
+cd "$ROOT"
+if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+    echo "error: release bundles require a clean Git worktree" >&2
+    exit 2
+fi
 VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' pyproject.toml | head -n1)"
-if [[ -z "$VERSION" ]]; then
+[[ -n "$VERSION" ]] || {
     echo "error: could not read version from pyproject.toml" >&2
     exit 2
-fi
-GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-BUNDLE="${1:-dist/release/honor-control-$VERSION}"
+}
+GIT_COMMIT="$(git rev-parse --verify HEAD)"
+SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+BUILD_DATE="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+BUNDLE="${OUTPUT_DIR:-dist/release/honor-control-$VERSION}"
+BUNDLE="$(realpath -m -- "$BUNDLE")"
+ROOT_REAL="$(realpath -- "$ROOT")"
+USER_HOME="$(realpath -- "${HOME:?}")"
 
-echo "==> Assembling release bundle for honor-control $VERSION"
-echo "    commit: $GIT_COMMIT"
-echo "    date:   $BUILD_DATE"
-echo "    output: $BUNDLE"
-
-rm -rf "$BUNDLE"
-install -d -m 0755 "$BUNDLE/wheelhouse" "$BUNDLE/honor-tools" "$BUNDLE/scripts"
-
-echo "==> [1/6] Building honor_control wheel + sdist"
-if ! python3 -c "import build" 2>/dev/null; then
-    echo "error: python -m build requires the build package (pip install build)" >&2
+case "$BUNDLE" in
+    /|"$ROOT_REAL"|"$USER_HOME")
+        echo "error: unsafe release output path: $BUNDLE" >&2
+        exit 2
+        ;;
+esac
+if [[ -e "$BUNDLE" || -L "$BUNDLE" ]]; then
+    echo "error: release output already exists; refusing to overwrite: $BUNDLE" >&2
     exit 2
 fi
-python3 -m build --outdir "$BUNDLE/wheelhouse" >/dev/null
+if ! python3 -m build --version >/dev/null 2>&1; then
+    echo "error: install the Python build frontend (python3 -m pip install build)" >&2
+    exit 2
+fi
+if ! python3 -c '
+import importlib.metadata as metadata
+raise SystemExit(
+    metadata.version("setuptools") != "83.0.0"
+    or metadata.version("wheel") != "0.47.0"
+)
+'; then
+    echo "error: reproducible builds require setuptools 83.0.0 and wheel 0.47.0" >&2
+    exit 2
+fi
 
-echo "==> [2/6] Copying packaging tree and installer scripts"
+if [[ -n "$HONOR_TOOLS_WHEEL" ]]; then
+    HONOR_TOOLS_WHEEL="$(realpath -- "$HONOR_TOOLS_WHEEL")"
+    [[ -f "$HONOR_TOOLS_WHEEL" ]] || {
+        echo "error: honor-tools wheel not found: $HONOR_TOOLS_WHEEL" >&2
+        exit 2
+    }
+    [[ "$(basename "$HONOR_TOOLS_WHEEL")" == honor_tools-0.1.0-*.whl ]] || {
+        echo "error: expected a reviewed honor_tools-0.1.0 wheel" >&2
+        exit 2
+    }
+else
+    HONOR_TOOLS_ROOT="$(realpath -m -- "$ROOT/../honor-tools")"
+    [[ -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]] || {
+        echo "error: provide --honor-tools-wheel or place reviewed source at" >&2
+        echo "       $ROOT/../honor-tools" >&2
+        exit 2
+    }
+fi
+
+echo "==> Building honor-control $VERSION offline bundle"
+echo "    commit: $GIT_COMMIT"
+echo "    output: $BUNDLE"
+COMPLETE=false
+install -d -m 0755 "$BUNDLE/wheelhouse" "$BUNDLE/scripts"
+BUILD_ROOT="$(mktemp -d /tmp/honor-control-release-build.XXXXXX)"
+cleanup() {
+    rm -rf -- "$BUILD_ROOT"
+    if [[ "$COMPLETE" == false ]]; then
+        rm -rf -- "$BUNDLE"
+    fi
+}
+trap cleanup EXIT
+
+# Fixed timestamps and a pinned build backend make repeated builds of the same
+# commit byte-for-byte reproducible.
+export SOURCE_DATE_EPOCH PYTHONHASHSEED=0 TZ=UTC LC_ALL=C
+install -d -m 0755 "$BUILD_ROOT/honor-control"
+install -m 0644 pyproject.toml README.md LICENSE "$BUILD_ROOT/honor-control/"
+cp -a honor_control tests "$BUILD_ROOT/honor-control/"
+python3 -m build --no-isolation \
+    --outdir "$BUNDLE/wheelhouse" "$BUILD_ROOT/honor-control"
+shopt -s nullglob
+APP_SDISTS=("$BUNDLE/wheelhouse"/honor_control-*.tar.gz)
+shopt -u nullglob
+[[ ${#APP_SDISTS[@]} -eq 1 ]] || {
+    echo "error: expected exactly one honor-control source distribution" >&2
+    exit 2
+}
+bash "$HERE/normalize-sdist.sh" "${APP_SDISTS[0]}" "$SOURCE_DATE_EPOCH"
+
+if [[ -n "$HONOR_TOOLS_WHEEL" ]]; then
+    install -m 0644 "$HONOR_TOOLS_WHEEL" "$BUNDLE/wheelhouse/"
+else
+    cp -a "$HONOR_TOOLS_ROOT" "$BUILD_ROOT/honor-tools"
+    rm -rf -- \
+        "$BUILD_ROOT/honor-tools/build" \
+        "$BUILD_ROOT/honor-tools/honor_tools.egg-info"
+    python3 -m build --no-isolation --wheel \
+        --outdir "$BUNDLE/wheelhouse" "$BUILD_ROOT/honor-tools"
+fi
+
+# Resolve all runtime and GUI dependencies to wheels now. Installation never
+# reaches a package index and never runs a build backend.
+python3 -m pip download \
+    --dest "$BUNDLE/wheelhouse" \
+    --only-binary=:all: \
+    "sdbus==0.14.2" \
+    "PySide6==6.11.1"
+
+# Exercise the same wheel-only install path used by the system installer in a
+# brand-new virtual environment before publishing any manifest.
+python3 -m venv "$BUILD_ROOT/verify-venv"
+"$BUILD_ROOT/verify-venv/bin/pip" install --quiet \
+    --no-index \
+    --find-links "$BUNDLE/wheelhouse" \
+    "honor-tools==0.1.0" \
+    "honor-control[gui]==$VERSION"
+"$BUILD_ROOT/verify-venv/bin/python" -m pip check
+"$BUILD_ROOT/verify-venv/bin/python" -c \
+    'import honor_control, honor, sdbus, PySide6'
+for command in \
+    honor-control-service honorctl honor-touchpadctl \
+    honor-control-gui honor-control-tray; do
+    test -x "$BUILD_ROOT/verify-venv/bin/$command"
+done
+
 cp -a packaging "$BUNDLE/packaging"
-install -m 0755 scripts/install-local.sh scripts/uninstall-local.sh scripts/rollback.sh "$BUNDLE/scripts/"
+cp -a honor_control "$BUNDLE/honor_control"
+find "$BUNDLE/honor_control" -type d -name __pycache__ -prune -exec rm -rf {} +
+install -m 0644 pyproject.toml README.md LICENSE "$BUNDLE/"
+install -m 0755 \
+    scripts/install-local.sh \
+    scripts/uninstall-local.sh \
+    scripts/rollback.sh \
+    "$BUNDLE/scripts/"
 
-echo "==> [3/6] Creating honor-tools drop-in inbox"
-cat > "$BUNDLE/honor-tools/README.txt" <<'NOTE'
-Drop the REVIEWED honor-tools 0.1.0 wheel into the sibling wheelhouse/
-directory, then regenerate the checksums before distributing:
-
-  cd <bundle>/wheelhouse && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
-  cd <bundle> && find . -type f ! -path ./SHA256SUMS -printf "%P\n" \
-    | LC_ALL=C sort | while read -r f; do sha256sum "$f"; done > SHA256SUMS
-
-Obtaining and reviewing the honor-tools wheel is an EXTERNAL step; this
-bundle ships without it.
-NOTE
-
-echo "==> [4/6] Writing sbom.json (pinned dependencies)"
 cat > "$BUNDLE/sbom.json" <<'JSON'
 {
-  "bomFormat": "honor-control-minimal-sbom",
-  "specVersion": "1.0",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
   "metadata": {
-    "component": { "name": "honor-control", "type": "application" }
+    "component": {"type": "application", "name": "honor-control"}
   },
   "components": [
-    { "type": "library", "name": "sdbus",      "version": "0.14.2", "purl": "pkg:pypi/sdbus@0.14.2",      "scope": "runtime" },
-    { "type": "library", "name": "PySide6",    "version": "6.11.1", "purl": "pkg:pypi/pyside6@6.11.1",    "scope": "runtime" },
-    { "type": "library", "name": "setuptools", "version": "83.0.0", "purl": "pkg:pypi/setuptools@83.0.0", "scope": "build" },
-    { "type": "library", "name": "wheel",      "version": "0.47.0", "purl": "pkg:pypi/wheel@0.47.0",      "scope": "build" }
+    {"type": "library", "name": "honor-tools", "version": "0.1.0"},
+    {"type": "library", "name": "sdbus", "version": "0.14.2"},
+    {"type": "library", "name": "PySide6", "version": "6.11.1"}
   ]
 }
 JSON
 
-echo "==> [5/6] Writing MANIFEST and wheelhouse checksums"
-# Checksums for the offline wheelhouse (consumed by install-local.sh --wheelhouse).
 (
     cd "$BUNDLE/wheelhouse"
-    sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
+    find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' |
+        LC_ALL=C sort |
+        while IFS= read -r artifact; do
+            sha256sum -- "$artifact"
+        done > "$BUILD_ROOT/wheelhouse.SHA256SUMS"
+    mv "$BUILD_ROOT/wheelhouse.SHA256SUMS" SHA256SUMS
 )
-# MANIFEST records provenance plus the artifact list (paths relative to bundle).
+
 (
     cd "$BUNDLE"
     {
@@ -92,28 +207,23 @@ echo "==> [5/6] Writing MANIFEST and wheelhouse checksums"
         echo "version=$VERSION"
         echo "git_commit=$GIT_COMMIT"
         echo "date=$BUILD_DATE"
+        echo "source_date_epoch=$SOURCE_DATE_EPOCH"
         echo "python=$(python3 --version 2>&1)"
-        echo ""
+        echo
         echo "# artifacts"
-        find . -type f ! -path ./SHA256SUMS ! -path ./MANIFEST -printf "%P\n" | LC_ALL=C sort
+        find . -type f ! -path ./SHA256SUMS ! -path ./MANIFEST -printf "%P\n" |
+            LC_ALL=C sort
     } > MANIFEST
+    find . -type f ! -path ./SHA256SUMS -printf '%P\n' |
+        LC_ALL=C sort |
+        while IFS= read -r artifact; do
+            sha256sum -- "$artifact"
+        done > "$BUILD_ROOT/bundle.SHA256SUMS"
+    mv "$BUILD_ROOT/bundle.SHA256SUMS" SHA256SUMS
+    sha256sum --strict -c SHA256SUMS >/dev/null
 )
 
-echo "==> [6/6] Writing top-level SHA256SUMS over all artifacts"
-(
-    cd "$BUNDLE"
-    find . -type f ! -path ./SHA256SUMS -printf "%P\n" | LC_ALL=C sort \
-        | while read -r f; do sha256sum "$f"; done > SHA256SUMS
-)
-
-echo ""
-echo "==> Release bundle assembled at: $BUNDLE"
-echo ""
-echo "EXTERNAL STEPS (not performed by this script):"
-echo "  1. Obtain the REVIEWED honor-tools 0.1.0 wheel, drop it into"
-echo "     $BUNDLE/wheelhouse/ , and regenerate the checksums (see"
-echo "     $BUNDLE/honor-tools/README.txt)."
-echo "  2. Sign and publish the bundle (for example, GPG-sign SHA256SUMS)."
-echo ""
-echo "Offline install on a supported host:"
-echo "  sudo bash scripts/install-local.sh --wheelhouse $BUNDLE/wheelhouse"
+COMPLETE=true
+echo "==> Complete offline bundle assembled at $BUNDLE"
+echo "    Sign SHA256SUMS before distribution."
+echo "    Install with: sudo bash scripts/install-local.sh --wheelhouse wheelhouse"

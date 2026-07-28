@@ -1133,7 +1133,10 @@ class TestGestureMutation:
         names = [name for name, _args, _kwargs in hardware.call_log]
         assert "set_gesture_mapping" not in names
 
-    def test_daemon_lifecycle_is_persisted_and_observable(self, tmp_path) -> None:
+    def test_daemon_lifecycle_is_persisted_and_observable(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         runtime = _StubGestureRuntime()
         svc = ApplicationService(
             FakeHardware(),
@@ -1147,6 +1150,9 @@ class TestGestureMutation:
             assert result.applied is True
             assert svc.config_store.state.gestures.daemon_enabled is True
             assert (await svc.get_snapshot()).gestures.daemon_running is True
+            applied = await svc.apply_touchpad_settings({"sensitivity": 1})
+            assert applied.status == OperationStatus.SUCCESS
+            assert runtime.status.running is True
             result = await svc.set_gesture_daemon_enabled(False)
             assert result.applied is True
             assert (await svc.get_snapshot()).gestures.daemon_running is False
@@ -1436,11 +1442,19 @@ class TestSafetyRecoveryHealth:
         asyncio.run(svc.initialize())
 
         async def scenario() -> None:
-            svc._record_power_rollback_failure(  # noqa: SLF001
+            await svc._record_power_rollback_failure(  # noqa: SLF001
                 "balanced",
                 {"rollback": {"attempted": True, "ok": False}, "observed": {}},
             )
             assert svc._power_recovery_required is True  # noqa: SLF001
+            assert svc.config_store.state.power.recovery_required is True
+            persisted = ConfigStore(svc.config_store.state_path).load()
+            assert persisted.power.recovery_required is True
+            assert persisted.power.recovery_profile == "balanced"
+            restarted = _make_service(tmp_path)
+            await restarted.initialize()
+            assert restarted._power_recovery_required is True  # noqa: SLF001
+            await restarted.shutdown()
             await svc._refresh_service_health()  # noqa: SLF001
             snap = await svc.get_snapshot()
             assert snap.service.power_recovery_required is True
@@ -1449,5 +1463,6 @@ class TestSafetyRecoveryHealth:
             result = await svc.reconcile_power()
             assert result.status == OperationStatus.SUCCESS
             assert svc._power_recovery_required is False  # noqa: SLF001
+            assert svc.config_store.state.power.recovery_required is False
 
         asyncio.run(scenario())

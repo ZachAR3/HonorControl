@@ -11,7 +11,7 @@ Object path: `/org/honorlinux/Control1`
 | Method | Signature | Description |
 |---|---|---|
 | `GetApiVersion` | `() -> u` | D-Bus API version (currently 1) |
-| `GetSchemaVersion` | `() -> u` | Snapshot schema version (currently 4) |
+| `GetSchemaVersion` | `() -> u` | Snapshot schema version (currently 5) |
 | `GetSnapshot` | `() -> a{sv}` | Current system snapshot |
 | `RunChecks` | `() -> a{sv}` | Run diagnostic checks |
 

@@ -98,7 +98,7 @@ honor_control/
 ├── backend/
 │   ├── service.py               # argument parsing, composition, signal shutdown
 │   ├── application.py           # async use cases; no D-Bus or Qt imports
-│   ├── config_store.py          # versioned load/atomic save; forward-compatible field defaults
+│   ├── config_store.py          # versioned migration, strict validation, atomic save
 │   ├── snapshot_store.py        # sequence, immutable snapshot, subscriptions
 │   ├── hardware.py              # HardwarePort + HonorToolsAdapter + FakeHardware
 │   ├── supervisor.py            # controller lifecycle and health

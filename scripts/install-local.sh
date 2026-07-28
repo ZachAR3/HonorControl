@@ -182,6 +182,15 @@ if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; the
     exit 2
 fi
 systemctl is-active --quiet honor-control.service && WAS_ACTIVE=true
+CONTROL_WAS_ENABLED=false
+TOUCHPAD_WAS_ENABLED=false
+TOUCHPAD_WAS_ACTIVE=false
+systemctl is-enabled --quiet honor-control.service 2>/dev/null && \
+    CONTROL_WAS_ENABLED=true
+systemctl is-enabled --quiet honor-touchpad-restore.service 2>/dev/null && \
+    TOUCHPAD_WAS_ENABLED=true
+systemctl is-active --quiet honor-touchpad-restore.service 2>/dev/null && \
+    TOUCHPAD_WAS_ACTIVE=true
 
 if $DEV_MODE; then
     echo "error: editable root-service installs are unsupported." >&2
@@ -201,6 +210,13 @@ if [[ -n "$WHEELHOUSE" && ! -d "$WHEELHOUSE" ]]; then
     echo "error: wheelhouse directory does not exist: $WHEELHOUSE" >&2
     exit 2
 fi
+if [[ -f "$ROOT/SHA256SUMS" && -f "$ROOT/MANIFEST" ]]; then
+    echo "==> Verifying release bundle checksums"
+    if ! (cd "$ROOT" && sha256sum --strict -c SHA256SUMS >/dev/null); then
+        echo "error: release bundle checksum verification failed" >&2
+        exit 2
+    fi
+fi
 if [[ -n "$WHEELHOUSE" ]]; then
     # Fully offline, hash-verified install: every artifact must be listed in
     # SHA256SUMS and match before we touch the system.
@@ -210,11 +226,39 @@ if [[ -n "$WHEELHOUSE" ]]; then
         echo "         (cd $WHEELHOUSE && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)" >&2
         exit 2
     fi
-    echo "==> Verifying wheelhouse checksums (offline install)"
-    if ! (cd "$WHEELHOUSE" && sha256sum -c SHA256SUMS); then
+    echo "==> Verifying exact wheelhouse contents (offline install)"
+    if find "$WHEELHOUSE" -maxdepth 1 -type l | grep -q .; then
+        echo "error: wheelhouse must not contain symbolic links" >&2
+        exit 2
+    fi
+    awk 'NF >= 2 {
+        name=$2
+        sub(/^[*]/, "", name)
+        sub(/^\\.\\//, "", name)
+        print name
+    }' "$WHEELHOUSE/SHA256SUMS" | LC_ALL=C sort -u > "$STAGE/listed-artifacts"
+    find "$WHEELHOUSE" -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' |
+        LC_ALL=C sort > "$STAGE/actual-artifacts"
+    if ! cmp -s "$STAGE/listed-artifacts" "$STAGE/actual-artifacts"; then
+        echo "error: wheelhouse contents do not exactly match SHA256SUMS" >&2
+        diff -u "$STAGE/listed-artifacts" "$STAGE/actual-artifacts" >&2 || true
+        exit 2
+    fi
+    if ! (cd "$WHEELHOUSE" && sha256sum --strict -c SHA256SUMS); then
         echo "error: wheelhouse checksum verification failed; refusing to install" >&2
         exit 2
     fi
+    shopt -s nullglob
+    HONOR_CONTROL_WHEELS=("$WHEELHOUSE"/honor_control-*.whl)
+    HONOR_TOOLS_WHEELS=("$WHEELHOUSE"/honor_tools-0.1.0-*.whl)
+    shopt -u nullglob
+    if [[ ${#HONOR_CONTROL_WHEELS[@]} -ne 1 || ${#HONOR_TOOLS_WHEELS[@]} -ne 1 ]]; then
+        echo "error: wheelhouse requires exactly one honor-control wheel and" >&2
+        echo "       exactly one honor-tools 0.1.0 wheel" >&2
+        exit 2
+    fi
+    HONOR_CONTROL_WHEEL="${HONOR_CONTROL_WHEELS[0]}"
+    HONOR_TOOLS_WHEEL="${HONOR_TOOLS_WHEELS[0]}"
 fi
 HONOR_TOOLS_ROOT="$(cd "$ROOT/../honor-tools" 2>/dev/null && pwd || true)"
 if [[ ( -z "$HONOR_TOOLS_ROOT" || \
@@ -244,9 +288,8 @@ assert_replaceable "$ROOT/packaging/polkit/org.honorlinux.control.policy" /usr/s
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/share/applications/org.honorlinux.Control.desktop
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop
 assert_replaceable "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop
-if $TOUCHPAD_FIRMWARE; then
-    assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
-fi
+assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
+assert_replaceable "$ROOT/packaging/touchpad/touchpad-firmware-qualified" /etc/honor-control/touchpad-firmware-qualified
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml
 
@@ -270,7 +313,10 @@ if [[ -n "$WHEELHOUSE" ]]; then
     # (setuptools/wheel and the honor packages) needed for an offline install.
     PIP_ARGS+=(--no-index --find-links "$WHEELHOUSE" --no-build-isolation)
 fi
-if [[ -n "$HONOR_TOOLS_ROOT" && -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]]; then
+if [[ -n "$WHEELHOUSE" ]]; then
+    "$PIP" install "${PIP_ARGS[@]}" "$HONOR_TOOLS_WHEEL"
+    "$PIP" install "${PIP_ARGS[@]}" "${HONOR_CONTROL_WHEEL}[gui]"
+elif [[ -n "$HONOR_TOOLS_ROOT" && -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]]; then
     mkdir -p "$STAGE/honor-tools"
     install -m 0644 "$HONOR_TOOLS_ROOT/pyproject.toml" \
         "$STAGE/honor-tools/"
@@ -280,10 +326,11 @@ if [[ -n "$HONOR_TOOLS_ROOT" && -f "$HONOR_TOOLS_ROOT/pyproject.toml" ]]; then
     find "$STAGE/honor-tools/honor" -type d -name __pycache__ -prune \
         -exec rm -rf {} +
     "$PIP" install "${PIP_ARGS[@]}" "$STAGE/honor-tools"
+    "$PIP" install "${PIP_ARGS[@]}" "$STAGE/source[gui]"
 else
     "$PIP" install "${PIP_ARGS[@]}" "honor-tools==0.1.0"
+    "$PIP" install "${PIP_ARGS[@]}" "$STAGE/source[gui]"
 fi
-"$PIP" install "${PIP_ARGS[@]}" "$STAGE/source[gui]"
 
 echo "==> [3/7] Validating isolated installation"
 "$PY" -m pip check
@@ -316,7 +363,13 @@ install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.desktop" /usr/sh
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /usr/share/applications/org.honorlinux.Control.Tray.desktop 0644
 install_managed "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop" /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop 0644
 if $TOUCHPAD_FIRMWARE; then
+    install_managed "$ROOT/packaging/touchpad/touchpad-firmware-qualified" /etc/honor-control/touchpad-firmware-qualified 0644
     install_managed "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
+else
+    backup_destination /etc/honor-control/touchpad-firmware-qualified
+    rm -f /etc/honor-control/touchpad-firmware-qualified
+    backup_destination /etc/systemd/system/honor-touchpad-restore.service
+    rm -f /etc/systemd/system/honor-touchpad-restore.service
 fi
 install_managed "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore 0755
 install_managed "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml 0644
@@ -389,6 +442,29 @@ MANIFEST="$RELEASE_DIR/installed-files.sha256"
 for destination in "${MANAGED_DESTS[@]}"; do
     [[ -f "$destination" && ! -L "$destination" ]] && sha256sum "$destination" >> "$MANIFEST"
 done
+
+# Persist the exact pre-install system state inside this release. rollback.sh
+# restores these files transactionally before selecting the predecessor.
+ROLLBACK_STATE="$RELEASE_DIR/rollback-state"
+install -d -m 0700 "$ROLLBACK_STATE/backups"
+: > "$ROLLBACK_STATE/managed.tsv"
+for ((index=0; index<${#MANAGED_DESTS[@]}; index++)); do
+    destination=${MANAGED_DESTS[$index]}
+    printf '%s\t%s\t%s\n' \
+        "$index" "${MANAGED_EXISTED[$index]}" "$destination" \
+        >> "$ROLLBACK_STATE/managed.tsv"
+    if [[ ${MANAGED_EXISTED[$index]} == 1 ]]; then
+        cp -a -- "${MANAGED_BACKUPS[$index]}" "$ROLLBACK_STATE/backups/$index"
+    fi
+done
+{
+    printf 'previous_release=%s\n' "$OLD_RELEASE"
+    printf 'honor_control_enabled=%s\n' "$CONTROL_WAS_ENABLED"
+    printf 'honor_control_active=%s\n' "$WAS_ACTIVE"
+    printf 'touchpad_restore_enabled=%s\n' "$TOUCHPAD_WAS_ENABLED"
+    printf 'touchpad_restore_active=%s\n' "$TOUCHPAD_WAS_ACTIVE"
+} > "$ROLLBACK_STATE/release.env"
+chmod 0600 "$ROLLBACK_STATE/managed.tsv" "$ROLLBACK_STATE/release.env"
 COMMITTED=true
 
 # Keep the active release and one known-good predecessor for manual rollback.

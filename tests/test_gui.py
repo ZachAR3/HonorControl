@@ -7,6 +7,7 @@ from typed snapshots and that the state store emits only on change.
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import threading
 import time
@@ -17,6 +18,7 @@ import pytest
 # Set offscreen before importing Qt.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import shiboken6  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -43,6 +45,10 @@ def qapp():
     """Single QApplication for all GUI tests."""
     app = QApplication.instance() or QApplication([])
     yield app
+    app.closeAllWindows()
+    app.processEvents()
+    shiboken6.delete(app)
+    gc.collect()
 
 
 class TestGuiState:
@@ -480,6 +486,7 @@ class TestGuiPageConstruction:
         snap = SystemSnapshot(
             gestures=GesturesSnapshot(
                 firmware_settings_supported=True,
+                firmware_writes_qualified=True,
                 firmware_settings={"edge_volume": 1, "sensitivity": 0},
             )
         )
@@ -497,6 +504,7 @@ class TestGuiPageConstruction:
             sequence=1,
             gestures=GesturesSnapshot(
                 firmware_settings_supported=True,
+                firmware_writes_qualified=True,
                 firmware_settings={"edge_volume": 1},
             ),
         )
@@ -516,6 +524,27 @@ class TestGuiPageConstruction:
                 ({"edge_volume": 1, "three_finger_drag": 1},),
             )
         ]
+
+    def test_touchpad_editor_is_disabled_until_writes_are_qualified(
+        self, qapp
+    ) -> None:
+        from honor_control.frontend.gui.pages.touchpad import TouchpadPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = TouchpadPage(state)
+        state.set_snapshot(
+            SystemSnapshot(
+                gestures=GesturesSnapshot(
+                    firmware_settings_supported=True,
+                    firmware_writes_qualified=False,
+                    firmware_settings={"edge_volume": 1},
+                )
+            )
+        )
+
+        assert page.apply_button.isEnabled() is False
+        assert "not qualified" in page.firmware_summary.text().lower()
 
     def test_overview_quick_profile_action_preserves_controller_intent(
         self, qapp

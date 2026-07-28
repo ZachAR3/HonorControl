@@ -167,10 +167,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(
-        "--force",
+        "--allow-unqualified",
         action="store_true",
-        help="bypass the inter-process touchpad lock (recovery only; unsafe "
-        "while honor-control.service is applying settings)",
+        help="allow a diagnostic firmware write before qualification; the "
+        "exclusive device lock remains enforced",
     )
     parser.add_argument(
         "--sysfs-root",
@@ -447,32 +447,30 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    write_command = args.command in {"set", "master"} or (
+    write_command = args.command == "set" or (
         args.command == "apply" and not getattr(args, "dry_run", False)
+    ) or (
+        args.command == "master" and getattr(args, "value", None) is not None
     )
     needs_lock = write_command or args.command == "support"
-    # HC-001: firmware setting writes are disabled until qualified; --force
-    # overrides for diagnostics/recovery.  Probe/list/encode/support stay
-    # available either way.
-    if write_command and not args.force and not touchpad_firmware_writes_qualified():
+    # HC-001: firmware setting writes are disabled until qualified. The
+    # diagnostic override deliberately does not bypass serialization.
+    if (
+        write_command
+        and not args.allow_unqualified
+        and not touchpad_firmware_writes_qualified()
+    ):
         print(
             "honor-touchpadctl: firmware setting writes are not qualified on "
             "this build (probe/list/encode/support remain available). Use "
-            "--force to override for diagnostics/recovery.",
+            "--allow-unqualified for a supervised diagnostic replay.",
             file=sys.stderr,
         )
         return EXIT_UNAVAILABLE
     # HC-011: write/support commands take an exclusive inter-process lock so a
     # standalone run cannot interleave with honor-control.service.  Read-only
-    # probe/list/encode (and --force recovery) skip it.
+    # probe/list/encode skip it.
     if not needs_lock:
-        return _run(args)
-    if args.force:
-        print(
-            "honor-touchpadctl: --force bypasses the touchpad lock; do not use "
-            "while honor-control.service is applying settings",
-            file=sys.stderr,
-        )
         return _run(args)
     try:
         with touchpad_firmware_lock():
@@ -480,9 +478,12 @@ def main(argv: list[str] | None = None) -> int:
     except TouchpadLockBusy as exc:
         print(
             f"honor-touchpadctl: {exc}; is honor-control.service applying "
-            "touchpad settings? Use --force to override.",
+            "touchpad settings?",
             file=sys.stderr,
         )
+        return EXIT_UNAVAILABLE
+    except RuntimeError as exc:
+        print(f"honor-touchpadctl: {exc}", file=sys.stderr)
         return EXIT_UNAVAILABLE
 
 

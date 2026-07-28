@@ -10,26 +10,24 @@
 - The automatic `honor-touchpad-restore.service` unit is no longer installed
   or enabled unless firmware writes are qualified (installer flag
   `--enable-touchpad-firmware` / env `HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`).
-- The installer now supports a fully offline, hash-verified install:
-  `--wheelhouse DIR` requires and verifies a `SHA256SUMS` file and installs
-  with `--no-index --find-links --no-build-isolation`.
-- Added a supported rollback path (`scripts/install-local.sh --rollback` or
-  `scripts/rollback.sh`) that atomically repoints `/opt/honor-control/current`
-  to the retained predecessor release and restarts the service.
-- Added `scripts/make-release-bundle.sh` to assemble a versioned, checksummed
-  offline release bundle (wheel + sdist, packaging tree, installer scripts,
-  `SHA256SUMS`, `MANIFEST`, and a minimal `sbom.json` of pinned deps).
+- The installer now supports a complete offline install. `--wheelhouse DIR`
+  verifies the exact checksummed artifact set and installs reviewed wheels
+  with `--no-index`.
+- Added a transactional rollback path (`scripts/install-local.sh --rollback`
+  or `scripts/rollback.sh`) that restores the predecessor, managed system
+  files, service state, and the original release if health checks fail.
+- Added `scripts/make-release-bundle.sh` to build and clean-room test a
+  reproducible wheelhouse containing the application and all dependencies.
 - CI split into `lint`, `test`, `security`, `shell`, and `packaging` jobs:
   branch-coverage floor (`--cov-branch --cov-fail-under=72`), shellcheck,
-  `xmllint` packaging validation, `pip-audit` / `bandit` / secret scanning,
-  and all actions pinned to full commit SHAs.
+  strict warning handling, `xmllint` packaging validation, hard
+  `pip-audit` / `bandit` / full-history gitleaks gates, and pinned actions.
 - Removed the unhardened direct-`Exec` / `User=root` D-Bus activation
   fallback; activation now requires systemd
   (`SystemdService=honor-control.service`).
 - Corrected repository URLs (`HonorLinux/honor-control` to
-  `ZachAR3/HonorControl`) in the systemd unit and polkit policy, and replaced
-  the README "personally tested all" claim with a per-feature verification
-  status table.
+  `ZachAR3/HonorControl`) in the systemd unit and polkit policy, and simplified
+  the README to the supported platform, install, usage, and development basics.
 
 ### Fixed
 

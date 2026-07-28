@@ -2,6 +2,18 @@
 # Install only the standard-library Honor touchpad controller and restore unit.
 set -euo pipefail
 
+TOUCHPAD_FIRMWARE=false
+if [[ "${HONOR_TOUCHPAD_FIRMWARE_QUALIFIED:-0}" == "1" ]]; then
+    TOUCHPAD_FIRMWARE=true
+fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --enable-touchpad-firmware) TOUCHPAD_FIRMWARE=true ;;
+        *) echo "error: unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
 if [[ $EUID -ne 0 ]]; then
     echo "error: run this installer with sudo" >&2
     exit 1
@@ -99,6 +111,7 @@ assert_replaceable "$ROOT/honor_control/backend/touchpad_firmware.py" "$DEST/bac
 assert_replaceable "$ROOT/honor_control/cli/__init__.py" "$DEST/cli/__init__.py"
 assert_replaceable "$ROOT/honor_control/cli/touchpadctl.py" "$DEST/cli/touchpadctl.py"
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service
+assert_replaceable "$ROOT/packaging/touchpad/touchpad-firmware-qualified" /etc/honor-control/touchpad-firmware-qualified
 assert_replaceable "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml
 
@@ -114,7 +127,15 @@ install_owned "$ROOT/honor_control/cli/touchpadctl.py" "$DEST/cli/touchpadctl.py
 install_owned "$ROOT/packaging/touchpad/honor-touchpadctl" /usr/bin/honor-touchpadctl 0755
 
 echo "==> Installing profile restore files"
-install_owned "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
+if $TOUCHPAD_FIRMWARE; then
+    install_owned "$ROOT/packaging/touchpad/touchpad-firmware-qualified" /etc/honor-control/touchpad-firmware-qualified 0644
+    install_owned "$ROOT/packaging/systemd/honor-touchpad-restore.service" /etc/systemd/system/honor-touchpad-restore.service 0644
+else
+    backup_destination /etc/honor-control/touchpad-firmware-qualified
+    rm -f /etc/honor-control/touchpad-firmware-qualified
+    backup_destination /etc/systemd/system/honor-touchpad-restore.service
+    rm -f /etc/systemd/system/honor-touchpad-restore.service
+fi
 install_owned "$ROOT/packaging/systemd/honor-touchpad-system-sleep" /usr/lib/systemd/system-sleep/honor-touchpad-restore 0755
 install_owned "$ROOT/packaging/touchpad/honor-touchpad.example.toml" /usr/share/doc/honor-control/honor-touchpad.example.toml 0644
 
@@ -123,6 +144,9 @@ honor-touchpadctl list >/dev/null
 honor-touchpadctl apply --dry-run \
     /usr/share/doc/honor-control/honor-touchpad.example.toml >/dev/null
 systemctl daemon-reload
+if ! $TOUCHPAD_FIRMWARE; then
+    systemctl disable --now honor-touchpad-restore.service 2>/dev/null || true
+fi
 MANIFEST_STAGE="$STAGE/installed-files.sha256"
 : > "$MANIFEST_STAGE"
 for destination in "${DESTINATIONS[@]}"; do
@@ -134,4 +158,8 @@ COMMITTED=true
 
 echo "Done. Run the read-only check with:"
 echo "  sudo honor-touchpadctl --json probe"
-echo "The restore service remains disabled until you create /etc/honor-touchpad.toml."
+if $TOUCHPAD_FIRMWARE; then
+    echo "Create /etc/honor-touchpad.toml, then enable the restore service."
+else
+    echo "Firmware writes and automatic restore remain unqualified and disabled."
+fi

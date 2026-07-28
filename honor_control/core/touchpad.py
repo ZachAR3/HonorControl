@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import pathlib
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -37,16 +38,35 @@ TOUCHPAD_REPORT_BYTES: Final = 9
 #: explicit, reviewed hardware qualification record exists.  Probe, descriptor
 #: inspection, dry-run encoding, and gesture input are unaffected.
 _FIRMWARE_QUALIFIED_ENV: Final = "HONOR_TOUCHPAD_FIRMWARE_QUALIFIED"
+_FIRMWARE_QUALIFIED_FILE_ENV: Final = (
+    "HONOR_CONTROL_TOUCHPAD_QUALIFICATION_FILE"
+)
+_DEFAULT_FIRMWARE_QUALIFIED_FILE: Final = (
+    "/etc/honor-control/touchpad-firmware-qualified"
+)
 
 
 def touchpad_firmware_writes_qualified() -> bool:
     """Return True only if firmware writes were explicitly qualified.
 
-    Reads ``HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`` (matching the installer's
-    ``--enable-touchpad-firmware`` flag).  Defaults to False so that no
-    production path can write unqualified reports.
+    The environment flag is intended for tests and one-shot diagnostics. A
+    production install persists qualification as a root-managed marker file
+    so the backend and boot/resume restore unit make the same decision.
     """
-    return os.environ.get(_FIRMWARE_QUALIFIED_ENV, "").strip() == "1"
+    if os.environ.get(_FIRMWARE_QUALIFIED_ENV, "").strip() == "1":
+        return True
+    marker = pathlib.Path(
+        os.environ.get(
+            _FIRMWARE_QUALIFIED_FILE_ENV,
+            _DEFAULT_FIRMWARE_QUALIFIED_FILE,
+        )
+    )
+    try:
+        return marker.is_file() and marker.read_text(encoding="ascii").strip() == (
+            "qualified=1"
+        )
+    except OSError:
+        return False
 
 
 #: Environment override for the inter-process touchpad firmware lock path
@@ -76,13 +96,10 @@ def touchpad_firmware_lock(
         if directory:
             os.makedirs(directory, exist_ok=True)
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o640)
-    except OSError:
-        # The lock is advisory/best-effort: if it cannot be created (e.g. an
-        # unprivileged environment without a writable /run), proceed unlocked
-        # rather than failing the operation.  In production both the root
-        # service and the root CLI can always create it.
-        yield
-        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot acquire touchpad firmware lock {lock_path}: {exc}"
+        ) from exc
     flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     try:
         fcntl.flock(fd, flags)
@@ -91,10 +108,11 @@ def touchpad_firmware_lock(
         raise TouchpadLockBusy(
             "touchpad firmware is busy (held by another writer)"
         ) from exc
-    except OSError:
+    except OSError as exc:
         os.close(fd)
-        yield
-        return
+        raise RuntimeError(
+            f"cannot acquire touchpad firmware lock {lock_path}: {exc}"
+        ) from exc
     try:
         yield
     finally:

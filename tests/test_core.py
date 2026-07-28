@@ -380,9 +380,27 @@ class TestTouchpadFirmwareLock:
         with touchpad_firmware_lock(lock_path):
             pass
 
-    def test_lock_degrades_when_path_unwritable(self, monkeypatch) -> None:
+    def test_lock_fails_closed_when_path_unwritable(self) -> None:
         from honor_control.core.touchpad import touchpad_firmware_lock
 
-        # An uncreatable lock path (unprivileged /run) must not fail the op.
-        with touchpad_firmware_lock("/proc/definitely-not-writable/x.lock"):
-            pass
+        with pytest.raises(RuntimeError, match="cannot acquire"):
+            with touchpad_firmware_lock("/proc/definitely-not-writable/x.lock"):
+                pass
+
+    def test_qualification_marker_must_have_exact_content(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from honor_control.core.touchpad import (
+            touchpad_firmware_writes_qualified,
+        )
+
+        marker = tmp_path / "qualified"
+        monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
+        monkeypatch.setenv(
+            "HONOR_CONTROL_TOUCHPAD_QUALIFICATION_FILE", str(marker)
+        )
+        assert touchpad_firmware_writes_qualified() is False
+        marker.write_text("qualified=yes\n", encoding="ascii")
+        assert touchpad_firmware_writes_qualified() is False
+        marker.write_text("qualified=1\n", encoding="ascii")
+        assert touchpad_firmware_writes_qualified() is True

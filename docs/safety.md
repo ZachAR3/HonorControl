@@ -69,6 +69,11 @@
   backup while service health remains degraded.
 - During a running reload, a corrupt primary leaves the newer in-memory
   last-known-good state active; it never replaces it with the older backup.
+- Unknown keys in the current schema fail validation so misspelled hardware
+  intent cannot silently fall back to defaults.
+- A failed power apply and rollback sets a persisted recovery marker. Automatic
+  switching remains blocked across service restarts until verified
+  reconciliation clears the marker.
 - The service retains last-known-good data on refresh failure and marks
   the domain stale.
 - A historical recovered error clears from active health.

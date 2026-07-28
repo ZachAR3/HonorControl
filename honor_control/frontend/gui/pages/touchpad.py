@@ -409,7 +409,13 @@ class TouchpadPage(PageBase):
     def _update_firmware_actions(self) -> None:
         snap = self.state.snapshot
         supported = bool(snap and snap.gestures.firmware_settings_supported)
-        can_edit = self.state.connected and supported and not self._firmware_pending
+        qualified = bool(snap and snap.gestures.firmware_writes_qualified)
+        can_edit = (
+            self.state.connected
+            and supported
+            and qualified
+            and not self._firmware_pending
+        )
         for row in self._firmware_rows.values():
             row.combo.setEnabled(can_edit)
         self.apply_button.setEnabled(can_edit and self._firmware_dirty)
@@ -451,12 +457,16 @@ class TouchpadPage(PageBase):
     def _on_snapshot(self, snap: SystemSnapshot) -> None:
         ges = snap.gestures
         firmware_ok = ges.firmware_settings_supported
-        self.firmware_dot.set_color(StatusDot.GREEN if firmware_ok else StatusDot.RED)
-        self.firmware_summary.setText(
-            "Firmware controls available"
-            if firmware_ok
-            else "Firmware controls unavailable"
-        )
+        qualified = ges.firmware_writes_qualified
+        ready = firmware_ok and qualified
+        self.firmware_dot.set_color(StatusDot.GREEN if ready else StatusDot.RED)
+        if not firmware_ok:
+            summary = "Firmware controls unavailable"
+        elif not qualified:
+            summary = "Firmware writes not qualified"
+        else:
+            summary = "Firmware controls available"
+        self.firmware_summary.setText(summary)
         if ges.device_found:
             device = ges.device_path or "Found"
             if ges.permission_denied:

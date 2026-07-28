@@ -86,6 +86,7 @@ else
     remove_if_owned /usr/share/applications/org.honorlinux.Control.Tray.desktop "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop"
     remove_if_owned /etc/xdg/autostart/org.honorlinux.Control.Tray.desktop "$ROOT/packaging/desktop/org.honorlinux.Control.Tray.desktop"
     remove_if_owned /etc/systemd/system/honor-touchpad-restore.service "$ROOT/packaging/systemd/honor-touchpad-restore.service"
+    remove_if_owned /etc/honor-control/touchpad-firmware-qualified "$ROOT/packaging/touchpad/touchpad-firmware-qualified"
     remove_if_owned /usr/lib/systemd/system-sleep/honor-touchpad-restore "$ROOT/packaging/systemd/honor-touchpad-system-sleep"
     remove_if_owned /usr/share/doc/honor-control/honor-touchpad.example.toml "$ROOT/packaging/touchpad/honor-touchpad.example.toml"
 fi

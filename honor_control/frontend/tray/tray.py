@@ -184,15 +184,20 @@ class HonorTray(QObject):
             action.setEnabled(
                 self.controller.connected
                 and snap.gestures.firmware_settings_supported
+                and snap.gestures.firmware_writes_qualified
                 and configured
             )
-            action.setToolTip(
-                ""
-                if configured
-                else "Configure this setting in the Touchpad page first"
-            )
+            if not snap.gestures.firmware_writes_qualified:
+                tooltip = "Touchpad firmware writes are not qualified"
+            elif not configured:
+                tooltip = "Configure this setting in the Touchpad page first"
+            else:
+                tooltip = ""
+            action.setToolTip(tooltip)
         self.touchpad_menu.setEnabled(
-            self.controller.connected and snap.gestures.firmware_settings_supported
+            self.controller.connected
+            and snap.gestures.firmware_settings_supported
+            and snap.gestures.firmware_writes_qualified
         )
 
     def _open_gui(self) -> None:

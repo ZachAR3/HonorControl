@@ -45,10 +45,33 @@ from honor_control.core.models import (
 
 log = logging.getLogger("honor_control.client.sdbus_client")
 
-#: Default per-call timeout (seconds).  Admin mutations may trigger an
-#: interactive polkit prompt (the authorizer allows ~60s for a human), so the
-#: client deadline must sit above that plus normal hardware operation time.
-DEFAULT_TIMEOUT = 90.0
+DEFAULT_READ_TIMEOUT = 5.0
+DEFAULT_MUTATION_TIMEOUT = 90.0
+DEFAULT_TIMEOUT = DEFAULT_MUTATION_TIMEOUT
+_LONG_RUNNING_METHODS = frozenset(
+    {
+        "RunChecks",
+        "SetThresholds",
+        "SetMode",
+        "SetProfile",
+        "SetAutoSwitch",
+        "SavePowerProfile",
+        "DeletePowerProfile",
+        "ConfigureAutoSwitch",
+        "SetStockAuto",
+        "SetCurve",
+        "SetManual",
+        "SetMapping",
+        "SetEnabled",
+        "SetAllEnabled",
+        "SetDaemonEnabled",
+        "ApplyTouchpadSettings",
+        "SetTouchpadSetting",
+        "QueryTouchpadSupport",
+        "SetMitigationEnabled",
+        "Reload",
+    }
+)
 MAX_COALESCED_REFRESHES = 4
 
 
@@ -64,9 +87,11 @@ class SdbusClient(ControlClient):
         self,
         bus_kind: str = "system",
         timeout: float = DEFAULT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
     ) -> None:
         self._bus_kind = bus_kind
-        self._timeout = timeout
+        self._mutation_timeout = timeout
+        self._read_timeout = read_timeout
         self._bus: Any = None
         self._proxy: Any = None
         self._connected = False
@@ -154,7 +179,12 @@ class SdbusClient(ControlClient):
                 raise ClientError(
                     TransportError.INTERNAL, f"Unknown client method: {method}"
                 )
-            result = await asyncio.wait_for(member(*args), timeout=self._timeout)
+            timeout = (
+                self._mutation_timeout
+                if method in _LONG_RUNNING_METHODS
+                else self._read_timeout
+            )
+            result = await asyncio.wait_for(member(*args), timeout=timeout)
             return _from_variant(result)
         except TimeoutError:
             raise ClientError(TransportError.TIMEOUT, f"{method} timed out")
@@ -578,6 +608,16 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
             config_valid=_bool(service.get("config_valid")),
             stale_domains=_str_tuple(service.get("stale_domains")),
             last_fault=_str(service.get("last_fault")),
+            hardware_queue_stuck=_bool(service.get("hardware_queue_stuck")),
+            stuck_command=_str(service.get("stuck_command")),
+            fan_recovery_required=_bool(service.get("fan_recovery_required")),
+            power_recovery_required=_bool(service.get("power_recovery_required")),
+            controller_restart_counts={
+                str(name): _int(count, 0) or 0
+                for name, count in _dict(
+                    service.get("controller_restart_counts")
+                ).items()
+            },
         ),
         platform=PlatformInfo(
             vendor=_str(platform.get("vendor")),
@@ -663,6 +703,9 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
             wmi_transport_present=_bool(gestures.get("wmi_transport_present")),
             firmware_settings_supported=_bool(
                 gestures.get("firmware_settings_supported")
+            ),
+            firmware_writes_qualified=_bool(
+                gestures.get("firmware_writes_qualified")
             ),
             firmware_settings={
                 str(name): int(value)

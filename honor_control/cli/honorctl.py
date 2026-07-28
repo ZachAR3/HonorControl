@@ -482,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=90.0,
-        help="per-call timeout in seconds (default: 90; above the interactive polkit deadline)",
+        help="mutation timeout in seconds (default: 90; reads use 5 seconds)",
     )
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 

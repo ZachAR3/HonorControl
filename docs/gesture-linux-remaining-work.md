@@ -143,13 +143,17 @@ honor-touchpadctl apply --dry-run \
 Apply one reversible HID setting:
 
 ```bash
-sudo honor-touchpadctl set edge_brightness off
-sudo honor-touchpadctl set edge_brightness on
+sudo systemctl stop honor-control.service 2>/dev/null || true
+sudo honor-touchpadctl --allow-unqualified set edge_brightness off
+sudo honor-touchpadctl --allow-unqualified set edge_brightness on
+# Restart honor-control.service afterward if it was previously running.
 ```
 
-For a complete persistent profile:
+After the physical replay gate passes, reinstall with persistent
+qualification and create a complete profile:
 
 ```bash
+sudo bash scripts/install-touchpad-only.sh --enable-touchpad-firmware
 sudo cp /usr/share/doc/honor-control/honor-touchpad.example.toml \
   /etc/honor-touchpad.toml
 sudoedit /etc/honor-touchpad.toml

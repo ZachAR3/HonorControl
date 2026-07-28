@@ -42,7 +42,6 @@ from honor_control.backend.config_store import (
     GpuState,
     PowerAutoSwitchState,
     PowerProfileState,
-    PowerState,
     ServiceState,
     TouchpadState,
 )
@@ -226,6 +225,13 @@ class ApplicationService:
     async def initialize(self) -> None:
         """Load config, publish observed state, and reconcile user intent."""
         self._config.load()
+        self._power_recovery_required = (
+            self._config.state.power.recovery_required
+        )
+        if self._power_recovery_required:
+            self._power_recovery_detail = {
+                "profile": self._config.state.power.recovery_profile
+            }
         await self._refresh_all()
         await self._initialize_fan_safety()
         await self._reconcile_power_profile()
@@ -554,7 +560,7 @@ class ApplicationService:
             )
         if result.get("error"):
             await self._refresh_power()
-            self._record_power_rollback_failure(name, result)
+            await self._record_power_rollback_failure(name, result)
             return OperationResult.failed(
                 code="power_apply_failed",
                 message=str(result["error"]),
@@ -578,11 +584,7 @@ class ApplicationService:
                     await self._config.update(
                         lambda s: replace(
                             s,
-                            power=PowerState(
-                                profile=name,
-                                auto_switch=s.power.auto_switch,
-                                profiles=s.power.profiles,
-                            ),
+                            power=replace(s.power, profile=name),
                         )
                     )
                     persisted = True
@@ -623,9 +625,21 @@ class ApplicationService:
                     },
                 )
             # A fully converged, verified apply resolves any prior recovery
-            # fault and re-enables automatic switching/hooks.
-            self._power_recovery_required = False
-            self._power_recovery_detail = {}
+            # fault only after the cleared marker is durable.
+            if self._power_recovery_required and not await self._set_power_recovery(
+                False
+            ):
+                return OperationResult.partial(
+                    code="power_reconciled_recovery_not_persisted",
+                    message=(
+                        f"Profile '{name}' converged, but the recovery marker "
+                        "could not be cleared"
+                    ),
+                    persisted=False,
+                    applied=True,
+                    sequence=self._snapshots.sequence,
+                    details=result,
+                )
             return OperationResult.success(
                 message=f"Profile '{name}' applied",
                 changed=True,
@@ -636,7 +650,7 @@ class ApplicationService:
             )
 
         await self._refresh_power()
-        self._record_power_rollback_failure(name, result)
+        await self._record_power_rollback_failure(name, result)
         return OperationResult.partial(
             code="power_partial_apply",
             message="Partial apply: "
@@ -649,7 +663,9 @@ class ApplicationService:
             details=result,
         )
 
-    def _record_power_rollback_failure(self, name: str, result: dict[str, Any]) -> None:
+    async def _record_power_rollback_failure(
+        self, name: str, result: dict[str, Any]
+    ) -> None:
         """Latch a durable fault when both apply and rollback fail.
 
         A multi-resource power transaction (PPD/RAPL/EPP/governor/turbo) whose
@@ -664,16 +680,46 @@ class ApplicationService:
             and rollback.get("attempted")
             and not rollback.get("ok")
         ):
-            self._power_recovery_required = True
-            self._power_recovery_detail = {
+            detail = {
                 "profile": name,
                 "rollback": rollback,
                 "observed": result.get("observed", {}),
             }
+            marker_persisted = await self._set_power_recovery(True, name, detail)
+            result["recovery_marker_persisted"] = marker_persisted
             log.error(
                 "power apply and rollback both failed for '%s'; recovery required",
                 name,
             )
+
+    async def _set_power_recovery(
+        self,
+        required: bool,
+        profile: str = "",
+        detail: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist the power recovery latch before changing its safe state."""
+        if required:
+            self._power_recovery_required = True
+            self._power_recovery_detail = detail or {"profile": profile}
+        try:
+            await self._config.update(
+                lambda state: replace(
+                    state,
+                    power=replace(
+                        state.power,
+                        recovery_required=required,
+                        recovery_profile=profile if required else "",
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.critical("failed to persist power recovery marker: %s", exc)
+            return False
+        if not required:
+            self._power_recovery_required = False
+            self._power_recovery_detail = {}
+        return True
 
     @_serialized_mutation
     async def reconcile_power(self) -> OperationResult:
@@ -713,8 +759,8 @@ class ApplicationService:
         await self._config.update(
             lambda s: replace(
                 s,
-                power=PowerState(
-                    profile=s.power.profile,
+                power=replace(
+                    s.power,
                     auto_switch=PowerAutoSwitchState(
                         enabled=enabled,
                         on_ac=s.power.auto_switch.on_ac,
@@ -722,7 +768,6 @@ class ApplicationService:
                         on_ac_script=s.power.auto_switch.on_ac_script,
                         on_battery_script=s.power.auto_switch.on_battery_script,
                     ),
-                    profiles=s.power.profiles,
                 ),
             )
         )
@@ -769,9 +814,8 @@ class ApplicationService:
         await self._config.update(
             lambda state: replace(
                 state,
-                power=PowerState(
-                    profile=state.power.profile,
-                    auto_switch=state.power.auto_switch,
+                power=replace(
+                    state.power,
                     profiles={**state.power.profiles, profile_name: definition},
                 ),
             )
@@ -871,9 +915,8 @@ class ApplicationService:
         await self._config.update(
             lambda state: replace(
                 state,
-                power=PowerState(
-                    profile=state.power.profile,
-                    profiles=state.power.profiles,
+                power=replace(
+                    state.power,
                     auto_switch=PowerAutoSwitchState(
                         enabled=bool(enabled),
                         on_ac=ac_profile,
@@ -1340,6 +1383,12 @@ class ApplicationService:
                 ),
                 sequence=self._snapshots.sequence,
             )
+        restart_runtime = bool(
+            self._gesture_runtime is not None
+            and self._config.state.gestures.daemon_enabled
+        )
+        if self._gesture_runtime is not None:
+            await self._supervisor.stop("gesture_daemon")
         try:
             with touchpad_firmware_lock():
                 return await self._apply_touchpad_settings_unlocked(settings)
@@ -1352,6 +1401,18 @@ class ApplicationService:
                 ),
                 sequence=self._snapshots.sequence,
             )
+        except RuntimeError as exc:
+            return OperationResult.unavailable(
+                code="touchpad_lock_unavailable",
+                message=str(exc),
+                sequence=self._snapshots.sequence,
+            )
+        finally:
+            if restart_runtime:
+                await self._supervisor.start("gesture_daemon")
+                await asyncio.sleep(0)
+            if self._gesture_runtime is not None:
+                await self._refresh_gestures()
 
     async def _apply_touchpad_settings_unlocked(
         self, settings: dict[str, int]
@@ -1482,6 +1543,12 @@ class ApplicationService:
     @_serialized_mutation
     async def query_touchpad_support(self) -> dict[str, Any]:
         """Query capabilities while holding exclusive ownership of the reader."""
+        restart_runtime = bool(
+            self._gesture_runtime is not None
+            and self._config.state.gestures.daemon_enabled
+        )
+        if self._gesture_runtime is not None:
+            await self._supervisor.stop("gesture_daemon")
         try:
             with touchpad_firmware_lock():
                 return await self._query_touchpad_support_unlocked()
@@ -1491,23 +1558,19 @@ class ApplicationService:
                 "Touchpad firmware is busy (standalone honor-touchpadctl holds "
                 "the device)",
             ) from None
-
-    async def _query_touchpad_support_unlocked(self) -> dict[str, Any]:
-        restart_runtime = bool(
-            self._gesture_runtime is not None
-            and self._config.state.gestures.daemon_enabled
-        )
-        if self._gesture_runtime is not None:
-            await self._supervisor.stop("gesture_daemon")
-        try:
-            bits = await self._queue.run(
-                "touchpad_support", self._hw.query_touchpad_support
-            )
+        except RuntimeError as exc:
+            raise DomainException(DomainError.UNAVAILABLE, str(exc)) from exc
         finally:
             if restart_runtime:
                 await self._supervisor.start("gesture_daemon")
                 await asyncio.sleep(0)
-            await self._refresh_gestures()
+            if self._gesture_runtime is not None:
+                await self._refresh_gestures()
+
+    async def _query_touchpad_support_unlocked(self) -> dict[str, Any]:
+        bits = await self._queue.run(
+            "touchpad_support", self._hw.query_touchpad_support
+        )
         return {
             "supported_bits": sorted(bits),
             "known": {
