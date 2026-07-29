@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -38,59 +37,32 @@ class PowerPage(PageBase):
     def _build(self) -> None:
         self._profiles: dict[str, PowerProfileEntry] = {}
         self._profile_dirty = False
-        self._active_combo_dirty = False
+        self._profile_selection_dirty = False
         self._auto_dirty = False
         self._loading = False
 
-        active = Card("Performance mode")
-        active_row = QHBoxLayout()
-        self.active_combo = QComboBox()
-        self.active_combo.currentIndexChanged.connect(self._on_active_combo_changed)
-        self.active_combo.setVisible(False)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        self.mode_buttons: dict[str, QPushButton] = {}
-        for entry in POWER_PROFILES:
-            button = QPushButton(entry.label)
-            button.setCheckable(True)
-            button.setMinimumWidth(100)
-            button.clicked.connect(
-                lambda _checked=False, name=entry.name: self._select_active_mode(name)
-            )
-            self.mode_group.addButton(button)
-            self.mode_buttons[entry.name] = button
-            active_row.addWidget(button)
-        active_row.addStretch(1)
-        self.applied_label = QLabel("Applied profile · —")
-        self.applied_label.setProperty("muted", True)
-        active_row.addWidget(self.applied_label)
-        self.active_apply = QPushButton("Apply changes")
-        self.active_apply.setProperty("quiet", True)
-        self.active_apply.clicked.connect(
-            lambda: self.intent.emit("set_profile", (self.active_combo.currentData(),))
-        )
-        active_row.addWidget(self.active_apply)
-        active.layout.addLayout(active_row)
-        self.register_control(self.active_combo)
-        self.register_pending_control("set_profile", self.active_apply)
-        self.add_widget(active)
-
         editor = Card("Profile settings")
-        edit_hint = QLabel(
-            "Editable · choose or type values, then select Apply changes."
-        )
+        edit_hint = QLabel("Choose one profile to apply or edit its saved settings.")
         edit_hint.setProperty("editHint", True)
         editor.layout.addWidget(edit_hint)
         pick_row = QHBoxLayout()
-        self.edit_combo = QComboBox()
+        self.profile_combo = QComboBox()
         self.profile_new = QPushButton("New profile")
         self.profile_new.clicked.connect(self._new_profile)
-        self.edit_combo.currentIndexChanged.connect(self._load_profile_editor)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
         pick_row.addWidget(QLabel("Profile"))
-        pick_row.addWidget(self.edit_combo, 1)
+        pick_row.addWidget(self.profile_combo, 1)
         pick_row.addWidget(self.profile_new)
+        self.profile_apply = QPushButton("Apply")
+        self.profile_apply.clicked.connect(
+            lambda: self.intent.emit("set_profile", (self.profile_combo.currentData(),))
+        )
+        pick_row.addWidget(self.profile_apply)
         self.profile_new.setProperty("quiet", True)
         editor.layout.addLayout(pick_row)
+        self.applied_label = QLabel("Applied profile · —")
+        self.applied_label.setProperty("muted", True)
+        editor.layout.addWidget(self.applied_label)
 
         form_widget = QWidget()
         form = QFormLayout(form_widget)
@@ -186,7 +158,7 @@ class PowerPage(PageBase):
         self.register_control(self.turbo)
         self.register_control(self.max_perf)
         profile_buttons = QHBoxLayout()
-        self.profile_save = QPushButton("Apply changes")
+        self.profile_save = QPushButton("Save profile settings")
         self.profile_delete = QPushButton("Delete custom profile")
         self.profile_reset = QPushButton("Reset profile")
         self.profile_save.clicked.connect(self._save_profile)
@@ -201,7 +173,7 @@ class PowerPage(PageBase):
         self.profile_reset.setProperty("quiet", True)
         editor.layout.addLayout(profile_buttons)
         for widget in (
-            self.edit_combo,
+            self.profile_combo,
             self.profile_new,
             self.profile_save,
             self.profile_delete,
@@ -210,6 +182,7 @@ class PowerPage(PageBase):
             self.register_control(widget)
         self.register_pending_control("save_power_profile", self.profile_save)
         self.register_pending_control("delete_power_profile", self.profile_delete)
+        self.register_pending_control("set_profile", self.profile_apply)
         self.add_widget(editor)
 
         automatic = Card("Automatic AC / battery switching")
@@ -305,18 +278,18 @@ class PowerPage(PageBase):
         ):
             self._profile_dirty = False
         combo_state = [
-            (self.active_combo.itemData(i), self.active_combo.itemText(i))
-            for i in range(self.active_combo.count())
+            (self.profile_combo.itemData(i), self.profile_combo.itemText(i))
+            for i in range(self.profile_combo.count())
         ]
         desired_combo_state = [(entry.name, entry.label) for entry in entries]
         if combo_state != desired_combo_state:
-            active_name = self.active_combo.currentData()
-            edit_name = (
-                editor_name if editor_name in names else self.edit_combo.currentData()
+            selected_name = (
+                editor_name
+                if editor_name in names
+                else self.profile_combo.currentData()
             )
             for combo in (
-                self.active_combo,
-                self.edit_combo,
+                self.profile_combo,
                 self.auto_ac,
                 self.auto_battery,
             ):
@@ -326,23 +299,21 @@ class PowerPage(PageBase):
                     combo.addItem(entry.label, entry.name)
                 combo.blockSignals(False)
             self._select_data(
-                self.active_combo, active_name or snap.power.desired_profile
+                self.profile_combo,
+                selected_name or snap.power.desired_profile or names[0],
             )
-            self._select_data(self.edit_combo, edit_name or names[0])
             if not self._profile_dirty:
                 self._load_profile_editor()
-        # Update the active-profile combo from the snapshot, but only when
-        # the user hasn't manually changed it.  This prevents the 5-second
-        # refresh loop from snapping the combo back to the currently
-        # applied profile before the user can click "Apply profile".
-        active_selection = self.active_combo.currentData()
+        # Preserve a user's pending selection across periodic snapshots.
+        profile_selection = self.profile_combo.currentData()
         applied = snap.power.applied_profile or snap.power.desired_profile
-        if active_selection == applied:
-            self._active_combo_dirty = False
-        if not self._active_combo_dirty:
-            self._select_data(self.active_combo, applied)
-        for name, button in self.mode_buttons.items():
-            button.setChecked(name == self.active_combo.currentData())
+        if profile_selection == applied:
+            self._profile_selection_dirty = False
+        if not self._profile_selection_dirty and not self._profile_dirty:
+            before = self.profile_combo.currentData()
+            self._select_data(self.profile_combo, applied)
+            if self.profile_combo.currentData() != before:
+                self._load_profile_editor()
         self.applied_label.setText(f"Applied profile · {applied or 'Not reported'}")
         if self._auto_matches(snap):
             self._auto_dirty = False
@@ -415,7 +386,7 @@ class PowerPage(PageBase):
             combo.blockSignals(False)
 
     def _load_profile_editor(self) -> None:
-        name = self.edit_combo.currentData()
+        name = self.profile_combo.currentData()
         profile = self._profiles.get(str(name))
         if profile is None:
             return
@@ -460,18 +431,11 @@ class PowerPage(PageBase):
         if not self._loading:
             self._profile_dirty = True
 
-    def _on_active_combo_changed(self, *_args) -> None:
-        """Track user selection so snapshots don't snap the combo back."""
+    def _on_profile_changed(self, *_args) -> None:
+        """Keep one selection for both applying and editing a profile."""
         if not self._loading:
-            self._active_combo_dirty = True
-        for name, button in self.mode_buttons.items():
-            button.setChecked(name == self.active_combo.currentData())
-
-    def _select_active_mode(self, name: str) -> None:
-        self._select_data(self.active_combo, name)
-        self._active_combo_dirty = True
-        for mode, button in self.mode_buttons.items():
-            button.setChecked(mode == name)
+            self._profile_selection_dirty = True
+        self._load_profile_editor()
 
     def _set_metadata_visible(self, visible: bool) -> None:
         for widget in self._metadata_widgets:
@@ -496,7 +460,7 @@ class PowerPage(PageBase):
         )
 
     def _reset_profile(self) -> None:
-        name = str(self.edit_combo.currentData())
+        name = str(self.profile_combo.currentData())
         factory = next(
             (profile for profile in POWER_PROFILES if profile.name == name), None
         )
@@ -516,7 +480,7 @@ class PowerPage(PageBase):
         self._profile_dirty = True
 
     def _delete_profile(self) -> None:
-        name = self.edit_combo.currentData()
+        name = self.profile_combo.currentData()
         if not name:
             return
         answer = QMessageBox.question(
@@ -534,7 +498,7 @@ class PowerPage(PageBase):
             return
         if result is not None and bool(getattr(result, "applied", False)):
             return
-        self._active_combo_dirty = False
+        self._profile_selection_dirty = False
         self.refresh()
 
     def _mark_auto_dirty(self, *_args) -> None:

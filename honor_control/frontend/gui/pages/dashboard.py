@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -37,6 +37,7 @@ class DashboardPage(PageBase):
     show_page_title = False
 
     def _build(self) -> None:
+        self._profile_selection_dirty = False
         self._build_performance()
         self._build_battery()
         self._build_cooling()
@@ -44,6 +45,7 @@ class DashboardPage(PageBase):
         self._build_utilities()
         self.add_stretch()
         self.state.snapshot_changed.connect(self._on_snapshot)
+        self.state.operation_completed.connect(self._on_operation_completed)
 
     def _build_performance(self) -> None:
         self.profile_card = Card("Performance mode")
@@ -61,26 +63,21 @@ class DashboardPage(PageBase):
         summary.addWidget(self.fan_value)
         self.profile_card.layout.addLayout(summary)
 
-        modes = QHBoxLayout()
-        modes.setSpacing(0)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        self.mode_buttons: dict[str, QPushButton] = {}
-        for entry in POWER_PROFILES:
-            button = QPushButton(entry.label)
-            button.setCheckable(True)
-            button.setMinimumWidth(112)
-            button.clicked.connect(
-                lambda _checked=False, name=entry.name: self.intent.emit(
-                    "set_profile", (name,)
-                )
-            )
-            self.register_pending_control("set_profile", button)
-            self.mode_group.addButton(button)
-            self.mode_buttons[entry.name] = button
-            modes.addWidget(button)
-        modes.addStretch(1)
-        self.profile_card.layout.addLayout(modes)
+        picker = QHBoxLayout()
+        picker.addWidget(QLabel("Profile"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(
+            self._on_profile_selection_changed
+        )
+        picker.addWidget(self.profile_combo, 1)
+        self.profile_apply = QPushButton("Apply")
+        self.profile_apply.clicked.connect(
+            lambda: self.intent.emit("set_profile", (self.profile_combo.currentData(),))
+        )
+        picker.addWidget(self.profile_apply)
+        self.register_control(self.profile_combo)
+        self.register_pending_control("set_profile", self.profile_apply)
+        self.profile_card.layout.addLayout(picker)
         self.add_widget(self.profile_card)
 
     def _build_battery(self) -> None:
@@ -179,8 +176,32 @@ class DashboardPage(PageBase):
     def _on_snapshot(self, snap: SystemSnapshot) -> None:
         applied = snap.power.applied_profile or snap.power.desired_profile or "—"
         self.profile_value.setText(applied)
-        for name, button in self.mode_buttons.items():
-            button.setChecked(name == applied)
+        entries = snap.power.profiles or POWER_PROFILES
+        combo_state = [
+            (self.profile_combo.itemData(i), self.profile_combo.itemText(i))
+            for i in range(self.profile_combo.count())
+        ]
+        desired_state = [(entry.name, entry.label) for entry in entries]
+        if combo_state != desired_state:
+            selected = self.profile_combo.currentData()
+            self.profile_combo.blockSignals(True)
+            self.profile_combo.clear()
+            for entry in entries:
+                self.profile_combo.addItem(entry.label, entry.name)
+            index = self.profile_combo.findData(selected)
+            if index < 0:
+                index = self.profile_combo.findData(applied)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+            self.profile_combo.blockSignals(False)
+        if self.profile_combo.currentData() == applied:
+            self._profile_selection_dirty = False
+        if not self._profile_selection_dirty:
+            index = self.profile_combo.findData(applied)
+            if index >= 0 and index != self.profile_combo.currentIndex():
+                self.profile_combo.blockSignals(True)
+                self.profile_combo.setCurrentIndex(index)
+                self.profile_combo.blockSignals(False)
         self.cpu_value.setText(f"CPU  {_milli_to_celsius(snap.fan.temp_mc)}")
         if snap.fan.measured_rpm is not None:
             fan = f"{snap.fan.measured_rpm:,} RPM"
@@ -222,6 +243,17 @@ class DashboardPage(PageBase):
             f"{gestures.gestures_emitted:,} shortcuts emitted"
         )
         self.gesture_toggle.setChecked(gestures.daemon_enabled)
+
+    def _on_profile_selection_changed(self, *_args) -> None:
+        self._profile_selection_dirty = True
+
+    def _on_operation_completed(self, operation_id: str, result: object) -> None:
+        if not operation_id.startswith("set_profile:"):
+            return
+        if result is not None and bool(getattr(result, "applied", False)):
+            return
+        self._profile_selection_dirty = False
+        self.refresh()
 
     def refresh(self) -> None:
         if self.state.snapshot is not None:

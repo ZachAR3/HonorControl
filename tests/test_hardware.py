@@ -511,13 +511,13 @@ class TestHonorToolsAdapterFilesystem:
         assert governors_seen_by_ppd == [("powersave", "powersave")]
         assert result["ppd_ok"] is True
 
-    def test_power_apply_reports_epp_conflict_with_performance_governor(
+    def test_power_apply_stages_epp_before_performance_governor(
         self, tmp_path, monkeypatch
     ) -> None:
         adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
         original_write = adapter._write_text_verified  # noqa: SLF001
 
-        def reject_epp_in_performance_governor(path, value):
+        def emulate_intel_pstate(path, value):
             if path.name == "energy_performance_preference":
                 governor = (
                     path.parent.joinpath("scaling_governor")
@@ -526,11 +526,14 @@ class TestHonorToolsAdapterFilesystem:
                 )
                 if governor == "performance":
                     return False
-            return original_write(path, value)
+            written = original_write(path, value)
+            if written and path.name == "scaling_governor" and value == "performance":
+                path.parent.joinpath("energy_performance_preference").write_text(
+                    "default", encoding="utf-8"
+                )
+            return written
 
-        monkeypatch.setattr(
-            adapter, "_write_text_verified", reject_epp_in_performance_governor
-        )
+        monkeypatch.setattr(adapter, "_write_text_verified", emulate_intel_pstate)
         definition = {
             "pl1_uw": 35_000_000,
             "pl2_uw": 55_000_000,
@@ -544,7 +547,10 @@ class TestHonorToolsAdapterFilesystem:
         result = adapter.apply_power_profile("performance", definition)
 
         assert result["governor_ok"] is True
-        assert result["epp_ok"] is False
+        assert result["epp_ok"] is True
+        assert all(result["writes"]["governor_epp_stage"].values())
+        assert all(result["writes"]["epp"].values())
+        assert set(result["observed"]["epp"].values()) == {"default"}
 
     def test_power_apply_reports_readback_mismatch(self, tmp_path, monkeypatch) -> None:
         adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)

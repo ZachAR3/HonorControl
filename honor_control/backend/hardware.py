@@ -136,7 +136,15 @@ def verify_power_definition(
     epp_ok = (
         isinstance(epp, dict)
         and bool(epp)
-        and all(value == definition.get("epp") for value in epp.values())
+        and all(
+            value == definition.get("epp")
+            or (
+                definition.get("governor") == "performance"
+                and definition.get("epp") == "performance"
+                and value == "default"
+            )
+            for value in epp.values()
+        )
     )
     ppd_ok = observed.get("ppd_profile") == definition.get("ppd_profile")
     no_turbo = 0 if definition.get("turbo_enabled") is True else 1
@@ -1322,16 +1330,22 @@ class HonorToolsAdapter:
                 }
                 for tree in self._rapl_trees()
             }
-            # Intel P-State may reset EPP when the final governor changes to
-            # performance.  Apply the governor first, then make EPP the last
-            # CPU-policy write so the verified value is the one that remains.
+            # PPD may have moved policies back to the performance governor,
+            # where Intel P-State rejects direct EPP writes.  Stage powersave
+            # again, write EPP, then select the requested final governor.
+            governor_epp_stage = {
+                cpu.name[3:]: self._write_text_verified(
+                    cpu / "cpufreq/scaling_governor", "powersave"
+                )
+                for cpu in cpu_dirs
+            }
+            epp_writes = self._write_epp(normalized["epp"], cpu_dirs)
             governor_writes = {
                 cpu.name[3:]: self._write_text_verified(
                     cpu / "cpufreq/scaling_governor", normalized["governor"]
                 )
                 for cpu in cpu_dirs
             }
-            epp_writes = self._write_epp(normalized["epp"], cpu_dirs)
             misc_writes = {
                 "no_turbo": self._write_text_verified(
                     self._rooted(f"{_INTEL_PSTATE_ROOT}/no_turbo"),
@@ -1348,6 +1362,7 @@ class HonorToolsAdapter:
                 "ppd": ppd_write_ok,
                 "governor_pre": governor_pre,
                 "rapl": rapl_writes,
+                "governor_epp_stage": governor_epp_stage,
                 "epp": epp_writes,
                 "governor": governor_writes,
                 "misc": misc_writes,
@@ -1357,6 +1372,7 @@ class HonorToolsAdapter:
                 "writes": writes,
                 "observed": observed,
                 "governor_ok": _all_true(governor_pre)
+                and _all_true(governor_epp_stage)
                 and _all_true(governor_writes)
                 and verified["governor_ok"],
                 "epp_ok": _all_true(epp_writes) and verified["epp_ok"],

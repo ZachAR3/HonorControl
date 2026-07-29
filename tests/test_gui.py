@@ -197,6 +197,7 @@ class TestGuiPageConstruction:
         )
         page._on_snapshot(snap)
         assert page.profile_value.text() == "balanced"
+        assert page.profile_combo.currentData() == "balanced"
         assert "75" in page.battery_value.text()
 
     def test_battery_page_construction(self, qapp) -> None:
@@ -239,7 +240,7 @@ class TestGuiPageConstruction:
             fan=FanSnapshot(temp_mc=45000, target_speed=30),
         )
         page._on_snapshot(snap)
-        assert page.active_combo.currentData() == "balanced"
+        assert page.profile_combo.currentData() == "balanced"
 
     def test_power_editor_preserves_unsaved_values_during_refresh(self, qapp) -> None:
         from honor_control.frontend.gui.pages.power import PowerPage
@@ -361,15 +362,79 @@ class TestGuiPageConstruction:
                 ),
             )
         )
-        page.active_combo.setCurrentIndex(page.active_combo.findData("performance"))
-        assert page.active_combo.currentData() == "performance"
+        page.profile_combo.setCurrentIndex(page.profile_combo.findData("performance"))
+        assert page.profile_combo.currentData() == "performance"
 
         state.emit_completed(
             "set_profile:performance",
             OperationResult.failed(code="write_failed", message="failed"),
         )
 
-        assert page.active_combo.currentData() == "balanced"
+        assert page.profile_combo.currentData() == "balanced"
+
+    def test_failed_overview_apply_reconciles_selection_to_snapshot(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.dashboard import DashboardPage
+
+        state = GuiState()
+        page = DashboardPage(state)
+        profiles = (
+            PowerProfileEntry(name="balanced", label="Balanced"),
+            PowerProfileEntry(name="performance", label="Performance"),
+        )
+        state.set_snapshot(
+            SystemSnapshot(
+                sequence=1,
+                power=PowerSnapshot(
+                    applied_profile="balanced",
+                    desired_profile="balanced",
+                    profiles=profiles,
+                ),
+            )
+        )
+        page.profile_combo.setCurrentIndex(page.profile_combo.findData("performance"))
+
+        state.emit_completed(
+            "set_profile:performance",
+            OperationResult.failed(code="write_failed", message="failed"),
+        )
+
+        assert page.profile_combo.currentData() == "balanced"
+
+    def test_power_profile_picker_also_loads_editor(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.power import PowerPage
+
+        state = GuiState()
+        page = PowerPage(state)
+        profiles = (
+            PowerProfileEntry(
+                name="balanced",
+                label="Balanced",
+                pl1_uw=25_000_000,
+                pl2_uw=35_000_000,
+            ),
+            PowerProfileEntry(
+                name="custom",
+                label="Custom",
+                pl1_uw=30_000_000,
+                pl2_uw=45_000_000,
+                built_in=False,
+            ),
+        )
+        page._on_snapshot(  # noqa: SLF001
+            SystemSnapshot(
+                power=PowerSnapshot(
+                    applied_profile="balanced",
+                    desired_profile="balanced",
+                    profiles=profiles,
+                )
+            )
+        )
+
+        page.profile_combo.setCurrentIndex(page.profile_combo.findData("custom"))
+
+        assert page.profile_name.text() == "custom"
+        assert page.pl1.value() == 30.0
+        assert page.pl2.value() == 45.0
 
     def test_pending_operation_disables_its_apply_control(self, qapp) -> None:
         from honor_control.frontend.gui.pages.battery import BatteryPage
@@ -525,9 +590,7 @@ class TestGuiPageConstruction:
             )
         ]
 
-    def test_touchpad_editor_is_disabled_until_writes_are_qualified(
-        self, qapp
-    ) -> None:
+    def test_touchpad_editor_is_disabled_until_writes_are_qualified(self, qapp) -> None:
         from honor_control.frontend.gui.pages.touchpad import TouchpadPage
 
         state = GuiState()
@@ -557,7 +620,19 @@ class TestGuiPageConstruction:
         emitted: list[tuple[str, object]] = []
         page.intent.connect(lambda method, args: emitted.append((method, args)))
 
-        page.mode_buttons["performance"].click()
+        page._on_snapshot(  # noqa: SLF001
+            SystemSnapshot(
+                power=PowerSnapshot(
+                    applied_profile="balanced",
+                    profiles=(
+                        PowerProfileEntry(name="balanced", label="Balanced"),
+                        PowerProfileEntry(name="performance", label="Performance"),
+                    ),
+                )
+            )
+        )
+        page.profile_combo.setCurrentIndex(page.profile_combo.findData("performance"))
+        page.profile_apply.click()
 
         assert emitted == [("set_profile", ("performance",))]
 
