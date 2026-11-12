@@ -22,7 +22,7 @@ DEFAULT_GESTURE_MAPPINGS: dict[str, str] = {
     # has no universal screen-recording key, so the default chord emulates a
     # selective screenshot (Shift+Print).
     "7": "leftshift,print",
-    "8": "leftmeta,h",
+    "8": "leftmeta,pagedown",
     "9": "leftalt,f4",
 }
 

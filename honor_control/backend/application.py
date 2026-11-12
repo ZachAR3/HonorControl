@@ -1613,8 +1613,13 @@ class ApplicationService:
                 "Touchpad firmware is busy (standalone honor-touchpadctl holds "
                 "the device)",
             ) from None
-        except RuntimeError as exc:
-            raise DomainException(DomainError.UNAVAILABLE, str(exc)) from exc
+        except (RuntimeError, TouchpadFirmwareError) as exc:
+            # The firmware may simply not answer the capability query; that is
+            # an expected condition, not an internal fault.
+            raise DomainException(
+                DomainError.UNAVAILABLE,
+                f"Touchpad firmware did not report its supported gestures: {exc}",
+            ) from exc
         finally:
             if restart_runtime:
                 await self._supervisor.start("gesture_daemon")

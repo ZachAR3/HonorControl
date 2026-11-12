@@ -517,12 +517,13 @@ class TestGuiPageConstruction:
         page._on_snapshot(  # noqa: SLF001
             SystemSnapshot(gestures=GesturesSnapshot(mappings=(entry,)))
         )
-        row = page._rows[entry.id]  # noqa: SLF001
+        row = page._items[f"id:{entry.id}"]  # noqa: SLF001
         page._update_pending_started("set_mapping:three_finger:x")  # noqa: SLF001
         assert row.isEnabled() is False
 
         page._on_snapshot(SystemSnapshot(sequence=1))  # noqa: SLF001
         assert entry.id not in page._rows  # noqa: SLF001
+        assert f"id:{entry.id}" not in page._items  # noqa: SLF001
         assert all(  # noqa: SLF001
             row not in widgets for widgets in page._pending_controls.values()
         )
@@ -631,7 +632,6 @@ class TestGuiPageConstruction:
             )
         )
         page._on_snapshot(snap)
-        assert page._firmware_rows["edge_volume"].combo.currentData() == 1  # noqa: SLF001
         assert page._firmware_rows["sensitivity"].combo.currentData() == 0  # noqa: SLF001
 
     def test_touchpad_editor_batches_and_preserves_dirty_values(self, qapp) -> None:
@@ -655,7 +655,7 @@ class TestGuiPageConstruction:
         row.combo.setCurrentIndex(row.combo.findData(1))
         page._on_snapshot(replace(snap, sequence=2))  # noqa: SLF001
         assert [c.summary for c in page.pending_changes()] == [
-            "Touchpad firmware settings"
+            "Touchpad behavior settings"
         ]
         page.apply_pending()
 
@@ -683,7 +683,7 @@ class TestGuiPageConstruction:
         )
 
         assert page.pending_changes() == []
-        assert not page._firmware_rows["edge_volume"].combo.isEnabled()  # noqa: SLF001
+        assert not page._firmware_rows["sensitivity"].combo.isEnabled()  # noqa: SLF001
         assert "unavailable" in page.firmware_summary.text().lower()
 
     def test_backend_reconnect_preserves_page_specific_disabled_controls(self, qapp) -> None:

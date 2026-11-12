@@ -102,7 +102,8 @@ def _page(window, name: str):
 
 
 class TestActionBar:
-    def test_starts_grayed_out(self, window) -> None:
+    def test_starts_hidden(self, window) -> None:
+        assert window.action_bar.isHidden()
         assert window.changes_label.text() == "No unsaved changes"
         assert not window.apply_button.isEnabled()
         assert not window.discard_button.isEnabled()
@@ -112,11 +113,13 @@ class TestActionBar:
     ) -> None:
         battery = _page(window, "Battery")
         battery.slider.setValue(60)
+        assert not window.action_bar.isHidden()
         assert window.apply_button.isEnabled() and window.discard_button.isEnabled()
         assert "1 unsaved change" in window.changes_label.text()
         assert "Charge limit: 60%" in window.changes_label.text()
 
         window.discard_button.click()
+        assert window.action_bar.isHidden()
         assert not window.apply_button.isEnabled()
         assert window.changes_label.text() == "No unsaved changes"
         assert battery.slider.value() == 80  # back to the real value
@@ -213,29 +216,40 @@ class TestFanStaging:
 
 
 class TestTouchpadStaging:
-    def test_shortcut_and_enabled_edits_are_staged_per_row(self, window) -> None:
+    def test_one_entry_per_gesture_with_its_shortcuts(self, window) -> None:
         touchpad = _page(window, "Touchpad")
-        row = touchpad._rows["3:1"]  # noqa: SLF001
-        row.mapping.setText("leftmeta,v")
-        touchpad._rows["3:2"].enabled_box.setChecked(False)  # noqa: SLF001
+        item = touchpad._items["edge_brightness"]  # noqa: SLF001
+        assert list(item.lines) == ["3:1", "3:2"]
+        assert touchpad._rows["3:1"] is item.lines["3:1"]  # noqa: SLF001
+
+    def test_shortcut_and_enabled_edits_are_staged_per_gesture(self, window) -> None:
+        touchpad = _page(window, "Touchpad")
+        item = touchpad._items["edge_brightness"]  # noqa: SLF001
+        item.lines["3:1"].mapping.setText("leftmeta,v")
+        item.enabled_box.setChecked(False)
         assert window.calls == []
-        assert "2 edited" in window.changes_label.text()
+        assert "1 gesture edited" in window.changes_label.text()
 
         window.apply_button.click()
         assert ("set_mapping", ("3:1", "leftmeta,v")) in window.calls
+        assert ("set_enabled", ("3:1", False)) in window.calls
         assert ("set_enabled", ("3:2", False)) in window.calls
+        # The same switch drives the firmware setting, in one batched write.
+        assert (
+            "apply_touchpad_settings",
+            ({"edge_brightness": 0},),
+        ) in window.calls
 
     def test_a_refresh_keeps_an_unapplied_shortcut(self, window) -> None:
         touchpad = _page(window, "Touchpad")
-        row = touchpad._rows["3:1"]  # noqa: SLF001
-        row.mapping.setText("typed")
+        line = touchpad._rows["3:1"]  # noqa: SLF001
+        line.mapping.setText("typed")
         window.state.set_snapshot(_snapshot(sequence=2))
-        assert row.mapping.text() == "typed"
+        assert line.mapping.text() == "typed"
 
     def test_an_edit_the_service_confirms_stops_being_pending(self, window) -> None:
         touchpad = _page(window, "Touchpad")
-        row = touchpad._rows["3:1"]  # noqa: SLF001
-        row.mapping.setText("new")
+        touchpad._rows["3:1"].mapping.setText("new")  # noqa: SLF001
         confirmed = _snapshot(
             sequence=2,
             gestures=GesturesSnapshot(
@@ -249,18 +263,103 @@ class TestTouchpadStaging:
         window.state.set_snapshot(confirmed)
         assert touchpad.pending_changes() == []
 
-    def test_enable_all_stages_every_row(self, window) -> None:
+    def test_firmware_off_shows_the_gesture_as_disabled(self, window) -> None:
         touchpad = _page(window, "Touchpad")
-        for row in touchpad._rows.values():  # noqa: SLF001
-            row.set_enabled(False)
-        window.discard_button.click()
-        assert all(r.enabled_box.isChecked() for r in touchpad._rows.values())  # noqa: SLF001
+        window.state.set_snapshot(
+            _snapshot(
+                sequence=2,
+                gestures=replace(
+                    _snapshot().gestures, firmware_settings={"edge_brightness": 0}
+                ),
+            )
+        )
+        assert not touchpad._items["edge_brightness"].enabled_box.isChecked()  # noqa: SLF001
+        assert touchpad.pending_changes() == []
 
-    def test_discard_restores_firmware_and_shortcut_edits(self, window) -> None:
+    def test_unsupported_firmware_only_changes_the_desktop_part(self, window) -> None:
+        touchpad = _page(window, "Touchpad")
+        window.state.set_snapshot(
+            _snapshot(
+                sequence=2,
+                gestures=replace(
+                    _snapshot().gestures, firmware_settings_supported=False
+                ),
+            )
+        )
+        touchpad._items["edge_brightness"].enabled_box.setChecked(False)  # noqa: SLF001
+        window.apply_button.click()
+        methods = [name for name, _args in window.calls]
+        assert "set_enabled" in methods
+        assert "apply_touchpad_settings" not in methods
+
+    def test_recorded_shortcut_fills_the_field(self, window) -> None:
+        touchpad = _page(window, "Touchpad")
+        line = touchpad._rows["3:1"]  # noqa: SLF001
+        line.record_button.start()
+        line.record_button.handle_key("leftmeta", pressed=True)
+        line.record_button.handle_key("pagedown", pressed=True)
+        assert line.mapping.text() == "leftmeta,pagedown"
+        assert not line.record_button.recording
+
+    def test_unknown_gesture_ids_still_get_an_entry(self, window) -> None:
+        touchpad = _page(window, "Touchpad")
+        window.state.set_snapshot(
+            _snapshot(
+                sequence=2,
+                gestures=GesturesSnapshot(
+                    firmware_settings_supported=True,
+                    mappings=(
+                        _entry("3:1", "Brightness up", "a"),
+                        _entry("99", "Mystery", "x"),
+                    ),
+                ),
+            )
+        )
+        assert "id:99" in touchpad._items  # noqa: SLF001
+        assert "99" in touchpad._rows  # noqa: SLF001
+        assert "3:2" not in touchpad._rows  # noqa: SLF001
+        assert "edge_close_or_minimize" not in touchpad._items  # noqa: SLF001
+
+    def test_enable_all_stages_every_gesture(self, window) -> None:
+        touchpad = _page(window, "Touchpad")
+        for item in touchpad._items.values():  # noqa: SLF001
+            item.set_enabled(False)
+        assert touchpad.pending_changes()
+        window.discard_button.click()
+        assert all(
+            item.enabled_box.isChecked()
+            for item in touchpad._items.values()  # noqa: SLF001
+        )
+
+    def test_discard_restores_shortcut_edits(self, window) -> None:
         touchpad = _page(window, "Touchpad")
         touchpad._rows["3:1"].mapping.setText("x")  # noqa: SLF001
         window.discard_button.click()
         assert touchpad._rows["3:1"].mapping.text() == "a"  # noqa: SLF001
+
+
+class TestFanPollingKeepsStagedChoice:
+    def test_polling_does_not_undo_stock_while_on_custom_curve(self, window) -> None:
+        fan = _page(window, "Fan")
+        curve = "40000:0,60000:30,80000:65,95000:100"
+        base = _snapshot(
+            sequence=2,
+            fan=FanSnapshot(
+                available=True, mode=FanMode.CURVE, curves={"default": curve}
+            ),
+        )
+        window.state.set_snapshot(base)
+        assert fan.rb_curve.isChecked()
+
+        fan.rb_auto.click()
+        assert fan.rb_auto.isChecked()
+        for sequence in (3, 4, 5):
+            window.state.set_snapshot(replace(base, sequence=sequence))
+            assert fan.rb_auto.isChecked(), "polling reverted the staged mode"
+        assert [c.summary for c in fan.pending_changes()] == ["Fan mode: Stock auto"]
+
+        window.apply_button.click()
+        assert ("set_stock_auto", ()) in window.calls
 
 
 class TestPowerStaging:

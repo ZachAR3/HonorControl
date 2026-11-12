@@ -255,6 +255,22 @@ class TestTouchpadFirmwareMutation:
         assert 20 in support["supported_bits"]
         assert support["known"]["20"] == "three_finger_drag"
 
+    def test_support_query_timeout_is_unavailable_not_internal(self, tmp_path) -> None:
+        from honor_control.backend.touchpad_firmware import TouchpadFirmwareError
+        from honor_control.core.errors import DomainError
+
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        def silent_firmware() -> frozenset[int]:
+            raise TouchpadFirmwareError("support query failed: timed out")
+
+        svc._hw.query_touchpad_support = silent_firmware  # noqa: SLF001
+        with pytest.raises(DomainException) as caught:
+            asyncio.run(svc.query_touchpad_support())
+        assert caught.value.code == DomainError.UNAVAILABLE
+        assert "did not report" in str(caught.value)
+
     def test_partial_profile_persists_only_completed_settings(
         self, tmp_path, monkeypatch
     ) -> None:

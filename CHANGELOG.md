@@ -50,10 +50,17 @@
 
 ### Changed
 
+- Touchpad page: each gesture is now one entry with a single **Enabled**
+  switch (firmware setting and desktop shortcut together) and its key
+  combination, which can be typed or captured with a new **Record** button.
+  The firmware-only behaviour options (sensitivity, haptics, pressure,
+  three-finger drag, mouse-like mode) moved to one "Touch behavior" card.
+- The default shortcut for the top-left corner click (minimize) is now
+  Meta+PageDown instead of Meta+H.
 - One shared **Apply changes / Discard** bar replaces the Save/Apply buttons
   that were repeated on the Power, Battery, Fan, Touchpad and Overview pages.
-  It sits at the bottom of the window, is grayed out while nothing is pending,
-  and lights up when any page holds an unsaved edit (it names what is pending;
+  It sits at the bottom of the window, is hidden while nothing is pending,
+  and appears when any page holds an unsaved edit (it names what is pending;
   Ctrl+S applies). Staged edits now include the power profile choice and
   profile settings, automatic AC/battery switching, display preferences, the
   charge limit and charge-mode presets, fan mode / manual speed / curve,
@@ -73,6 +80,11 @@
 
 ### Fixed
 
+- Fan page: polling no longer reverts a staged mode (for example choosing
+  Stock auto while a custom curve is active) before Apply is pressed.
+- "Check supported gestures" no longer reports an internal error when the
+  touchpad firmware does not answer the capability query; it is reported as
+  unavailable and the page says so.
 - Battery threshold writes choose an order that keeps the driver's hysteresis
   invariant at the intermediate step too, re-discover the supply before
   writing, and fail closed when the current thresholds cannot be read.

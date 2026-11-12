@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
     def _build_action_bar(self) -> QWidget:
         """The one static place for every unsaved edit on every page."""
         bar = QFrame()
+        self.action_bar = bar
         bar.setObjectName("HonorActionBar")
         bar.setFixedHeight(52)
         row = QHBoxLayout(bar)
@@ -252,11 +253,12 @@ class MainWindow(QMainWindow):
         ]
 
     def _update_action_bar(self, *_args) -> None:
-        """Enable Apply/Discard only while some page holds unsaved edits."""
+        """Show the bar (with Apply/Discard) only while edits are unsaved."""
         if not hasattr(self, "apply_button"):
             return  # a page signalled while the window is still being built
         changes = self._pending_changes()
         busy = bool(self.state.pending_operations)
+        self.action_bar.setVisible(bool(changes))
         offline_ok = all(not change.requires_service for _page, change in changes)
         self.apply_button.setEnabled(
             bool(changes) and not busy and (self.state.connected or offline_ok)

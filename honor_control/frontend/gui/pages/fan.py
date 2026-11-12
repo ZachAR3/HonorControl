@@ -233,9 +233,13 @@ class FanPage(PageBase):
         )
         saved = fan.curves.get(self.profile_combo.currentText(), "")
         current = format_curve(list(self.curve_graph.points))
+        # A staged selection is only considered "applied" when the service now
+        # reports exactly that mode.  Polling must never pull the user's pick
+        # back to the current mode before they press Apply.
         if fan.mode == FanMode.CURVE and saved == current:
             self._curve_dirty = False
-            self._mode_dirty = False
+            if self.rb_curve.isChecked():
+                self._mode_dirty = False
         elif (fan.mode == FanMode.STOCK and self.rb_auto.isChecked()) or (
             fan.mode == FanMode.MANUAL_OVERRIDE and self.rb_manual.isChecked()
         ):
