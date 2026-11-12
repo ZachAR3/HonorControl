@@ -1,0 +1,15 @@
+Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384
+eDP-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 344mm x 194mm
+	max bpc: 8 
+		range:  (6, 12)
+	Broadcast RGB: Automatic 
+		supported: Automatic, Full, Limited 16:235
+   1920x1080    144.00*+  60.00  48.00  
+   1920x1080i    60.00  
+   1680x1050    144.00  59.95  
+   1280x720      60.00  
+HDMI-1 connected 2560x1440+1920+0 (normal left inverted right x axis y axis) 600mm x 340mm
+	max bpc: 8 
+		range:  (6, 12)
+   2560x1440     60.00*+  144.00  
+DP-1 disconnected (normal left inverted right x axis y axis)

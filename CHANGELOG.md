@@ -37,12 +37,31 @@
 ### Added
 
 - Display preferences per power source. The Power page has a "Display on AC /
-  battery" card to pick a refresh rate and KWin's colour accuracy/efficiency
-  trade-off for each source. The session frontend (tray or window) applies
-  them to the built-in panel through `kscreen-doctor` on the first snapshot
+  battery" card to pick a refresh rate, colour depth (bits per colour) and
+  colour accuracy/efficiency trade-off for each source. The choices are read
+  from the built-in panel, so only options the panel and platform actually
+  support are shown (other laptops and refresh rates work unchanged). The
+  session frontend (tray or window) applies them on the first power reading
   and on every AC/battery transition; the root service is not involved, and
-  the resolution is never changed. Set
+  the resolution is never changed. Backends: KDE Plasma (`kscreen-doctor`),
+  GNOME (Mutter D-Bus), wlroots compositors (`wlr-randr`), X11 (`xrandr`) and
+  Windows (Win32 display settings). See `docs/display-backends.md`. Set
   `HONOR_CONTROL_DISABLE_DISPLAY_POLICY=1` to switch this off.
+
+### Changed
+
+- One shared **Apply changes / Discard** bar replaces the Save/Apply buttons
+  that were repeated on the Power, Battery, Fan, Touchpad and Overview pages.
+  It sits at the bottom of the window, is grayed out while nothing is pending,
+  and lights up when any page holds an unsaved edit (it names what is pending;
+  Ctrl+S applies). Staged edits now include the power profile choice and
+  profile settings, automatic AC/battery switching, display preferences, the
+  charge limit and charge-mode presets, fan mode / manual speed / curve,
+  touchpad firmware settings, and gesture shortcuts and their enabled state.
+  Because edits are staged, a periodic refresh no longer overwrites an unapplied
+  battery charge limit, and selecting "Stock auto" in the Fan page now waits for
+  Apply instead of switching immediately. The Overview page's charge-limit
+  slider and gesture toggle still apply instantly.
 
 ### Performance
 

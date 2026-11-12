@@ -9,11 +9,22 @@ client object or perform D-Bus calls.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from honor_control.frontend.gui.state import GuiState
+
+
+@dataclass(frozen=True)
+class PendingChange:
+    """One unsaved edit a page is holding, shown in the window's action bar."""
+
+    #: Short description, for example ``"Fan mode: Custom curve"``.
+    summary: str
+    #: False for edits stored locally (they can be applied while offline).
+    requires_service: bool = True
 
 
 class PageBase(QWidget):
@@ -29,6 +40,8 @@ class PageBase(QWidget):
     icon: str = ""
     show_page_title: bool = True
     intent = Signal(str, object)
+    #: Emitted whenever the set of unsaved edits may have changed.
+    changes_changed = Signal()
 
     def __init__(
         self,
@@ -74,6 +87,22 @@ class PageBase(QWidget):
 
     def refresh(self) -> None:
         """Pull fresh data from the state into the widgets. Override."""
+
+    # -- Unsaved edits (driven from the window's single Apply/Discard bar) --
+
+    def pending_changes(self) -> list[PendingChange]:
+        """Return the page's unsaved edits (empty when there are none)."""
+        return []
+
+    def apply_pending(self) -> None:
+        """Apply every unsaved edit.  Called by the window's Apply button."""
+
+    def discard_pending(self) -> None:
+        """Drop every unsaved edit and show the current state again."""
+
+    def notify_changes(self) -> None:
+        """Tell the window the set of unsaved edits may have changed."""
+        self.changes_changed.emit()
 
     def add_widget(self, widget: QWidget) -> QWidget:
         self._root.addWidget(widget)

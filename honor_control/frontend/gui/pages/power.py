@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from honor_control.core.errors import OperationStatus
 from honor_control.core.models import (
     POWER_PL1_MAX_UW,
     POWER_PL1_MIN_UW,
@@ -26,13 +27,16 @@ from honor_control.core.models import (
 )
 from honor_control.frontend.display_policy import (
     COLOR_ACCURACY,
+    COLOR_BITS_AUTOMATIC,
+    COLOR_BITS_UNCHANGED,
     COLOR_EFFICIENCY,
     COLOR_UNCHANGED,
     REFRESH_UNCHANGED,
+    DisplayCapabilities,
     DisplayPolicy,
     DisplayPreference,
 )
-from honor_control.frontend.gui.pages import PageBase
+from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.widgets import Card, InfoRow
 
 
@@ -50,7 +54,9 @@ class PowerPage(PageBase):
         self._loading = False
 
         editor = Card("Profile settings")
-        edit_hint = QLabel("Choose one profile to apply or edit its saved settings.")
+        edit_hint = QLabel(
+            "Choose a profile to apply or edit its settings, then use Apply changes."
+        )
         edit_hint.setProperty("editHint", True)
         editor.layout.addWidget(edit_hint)
         pick_row = QHBoxLayout()
@@ -61,11 +67,6 @@ class PowerPage(PageBase):
         pick_row.addWidget(QLabel("Profile"))
         pick_row.addWidget(self.profile_combo, 1)
         pick_row.addWidget(self.profile_new)
-        self.profile_apply = QPushButton("Apply")
-        self.profile_apply.clicked.connect(
-            lambda: self.intent.emit("set_profile", (self.profile_combo.currentData(),))
-        )
-        pick_row.addWidget(self.profile_apply)
         self.profile_new.setProperty("quiet", True)
         editor.layout.addLayout(pick_row)
         self.applied_label = QLabel("Applied profile · —")
@@ -166,31 +167,24 @@ class PowerPage(PageBase):
         self.register_control(self.turbo)
         self.register_control(self.max_perf)
         profile_buttons = QHBoxLayout()
-        self.profile_save = QPushButton("Save profile settings")
         self.profile_delete = QPushButton("Delete custom profile")
         self.profile_reset = QPushButton("Reset profile")
-        self.profile_save.clicked.connect(self._save_profile)
         self.profile_delete.clicked.connect(self._delete_profile)
         self.profile_reset.clicked.connect(self._reset_profile)
         profile_buttons.addStretch(1)
         profile_buttons.addWidget(self.profile_reset)
         profile_buttons.addWidget(self.profile_delete)
-        profile_buttons.addWidget(self.profile_save)
-        self.profile_save.setProperty("quiet", True)
         self.profile_delete.setProperty("quiet", True)
         self.profile_reset.setProperty("quiet", True)
         editor.layout.addLayout(profile_buttons)
         for widget in (
             self.profile_combo,
             self.profile_new,
-            self.profile_save,
             self.profile_delete,
             self.profile_reset,
         ):
             self.register_control(widget)
-        self.register_pending_control("save_power_profile", self.profile_save)
         self.register_pending_control("delete_power_profile", self.profile_delete)
-        self.register_pending_control("set_profile", self.profile_apply)
         self.add_widget(editor)
 
         automatic = Card("Automatic AC / battery switching")
@@ -237,11 +231,7 @@ class PowerPage(PageBase):
         automatic.layout.addWidget(warning)
         auto_bottom = QHBoxLayout()
         self.script_status = QLabel("Not run")
-        self.auto_save = QPushButton("Save automatic settings")
-        self.auto_save.setProperty("quiet", True)
-        self.auto_save.clicked.connect(self._save_auto)
         auto_bottom.addWidget(self.script_status, 1)
-        auto_bottom.addWidget(self.auto_save)
         automatic.layout.addLayout(auto_bottom)
         for widget in (
             self.auto_enabled,
@@ -257,50 +247,47 @@ class PowerPage(PageBase):
             else:
                 widget.currentIndexChanged.connect(self._mark_auto_dirty)
             self.register_control(widget)
-        self.register_pending_control("configure_auto_switch", self.auto_save)
         self.add_widget(automatic)
 
         display = Card("Display on AC / battery")
-        display_hint = QLabel(
+        self.display_hint = QLabel(
             "Applied to the built-in screen when the power source changes. "
-            "Saved immediately; stored for your user, not system-wide."
+            "Stored for your user, not system-wide."
         )
-        display_hint.setProperty("muted", True)
-        display_hint.setWordWrap(True)
-        display.layout.addWidget(display_hint)
+        self.display_hint.setProperty("muted", True)
+        self.display_hint.setWordWrap(True)
+        display.layout.addWidget(self.display_hint)
         display_form_widget = QWidget()
-        display_form = QFormLayout(display_form_widget)
-        display_form.setContentsMargins(0, 0, 0, 0)
-        display_form.setHorizontalSpacing(20)
-        display_form.setVerticalSpacing(0)
+        self._display_form = QFormLayout(display_form_widget)
+        self._display_form.setContentsMargins(0, 0, 0, 0)
+        self._display_form.setHorizontalSpacing(20)
+        self._display_form.setVerticalSpacing(0)
         self._display_policy: DisplayPolicy | None = None
         self._display_loading = False
+        # One row per option and power source; which rows are shown depends on
+        # what the panel and the platform backend actually support.
         self.display_refresh: dict[bool, QComboBox] = {}
+        self.display_bits: dict[bool, QComboBox] = {}
         self.display_color: dict[bool, QComboBox] = {}
         for ac_online, source in ((True, "AC"), (False, "battery")):
             refresh = QComboBox()
-            refresh.addItem("Don't change", REFRESH_UNCHANGED)
+            bits = QComboBox()
             color = QComboBox()
-            color.addItem("Don't change", COLOR_UNCHANGED)
-            color.addItem("Prefer color accuracy", COLOR_ACCURACY)
-            color.addItem("Prefer efficiency", COLOR_EFFICIENCY)
-            refresh.currentIndexChanged.connect(
-                lambda _index, value=ac_online: self._save_display(value)
-            )
-            color.currentIndexChanged.connect(
-                lambda _index, value=ac_online: self._save_display(value)
-            )
+            for combo in (refresh, bits, color):
+                combo.currentIndexChanged.connect(self._display_edited)
             self.display_refresh[ac_online] = refresh
+            self.display_bits[ac_online] = bits
             self.display_color[ac_online] = color
-            display_form.addRow(f"Refresh rate on {source}", refresh)
-            display_form.addRow(f"Color accuracy on {source}", color)
+            self._display_form.addRow(f"Refresh rate on {source}", refresh)
+            self._display_form.addRow(f"Color depth on {source}", bits)
+            self._display_form.addRow(f"Color accuracy on {source}", color)
         display.layout.addWidget(display_form_widget)
         self.display_status = QLabel("")
         self.display_status.setProperty("muted", True)
         self.display_status.setWordWrap(True)
         display.layout.addWidget(self.display_status)
         self._display_form_widget = display_form_widget
-        display_form_widget.setEnabled(False)
+        display_form_widget.setVisible(False)
         self.add_widget(display)
 
         telemetry = Card("Telemetry")
@@ -399,6 +386,7 @@ class PowerPage(PageBase):
             if snap.power.ac_online is False
             else "Unknown"
         )
+        self.notify_changes()
 
     def _editor_matches(self, profile: PowerProfileEntry | None) -> bool:
         if profile is None:
@@ -458,6 +446,7 @@ class PowerPage(PageBase):
         self._set_metadata_visible(not profile.built_in)
         self._loading = False
         self._profile_dirty = False
+        self.notify_changes()
 
     def _new_profile(self) -> None:
         self._loading = True
@@ -477,16 +466,19 @@ class PowerPage(PageBase):
         self._set_metadata_visible(True)
         self._loading = False
         self._profile_dirty = True
+        self.notify_changes()
 
     def _mark_profile_dirty(self, *_args) -> None:
         if not self._loading:
             self._profile_dirty = True
+            self.notify_changes()
 
     def _on_profile_changed(self, *_args) -> None:
         """Keep one selection for both applying and editing a profile."""
         if not self._loading:
             self._profile_selection_dirty = True
         self._load_profile_editor()
+        self.notify_changes()
 
     def _set_metadata_visible(self, visible: bool) -> None:
         for widget in self._metadata_widgets:
@@ -529,6 +521,7 @@ class PowerPage(PageBase):
         self.max_perf.setValue(factory.max_perf_pct)
         self._loading = False
         self._profile_dirty = True
+        self.notify_changes()
 
     def _delete_profile(self) -> None:
         name = self.profile_combo.currentData()
@@ -545,68 +538,168 @@ class PowerPage(PageBase):
             self.intent.emit("delete_power_profile", (name,))
 
     def _on_operation_completed(self, operation_id: str, result: object) -> None:
-        if not operation_id.startswith("set_profile:"):
+        method = operation_id.split(":", 1)[0]
+        succeeded = (
+            result is not None
+            and getattr(result, "status", None) == OperationStatus.SUCCESS
+        )
+        if method == "save_power_profile" and succeeded:
+            self._profile_dirty = False
+        elif method == "configure_auto_switch" and succeeded:
+            self._auto_dirty = False
+        elif method == "set_profile":
+            if result is not None and bool(getattr(result, "applied", False)):
+                self._profile_selection_dirty = False
+            else:
+                self._profile_selection_dirty = False
+                self.refresh()
+        else:
             return
-        if result is not None and bool(getattr(result, "applied", False)):
-            return
-        self._profile_selection_dirty = False
-        self.refresh()
+        self.notify_changes()
 
     # -- Display preferences (local, applied by the session frontend) --
 
     def set_display_policy(self, policy: DisplayPolicy) -> None:
         """Attach the session display policy that stores and applies choices."""
         self._display_policy = policy
-        policy.refresh_rates_changed.connect(self._on_display_rates)
+        policy.capabilities_changed.connect(self._on_display_capabilities)
         policy.status_changed.connect(self.display_status.setText)
-        self._display_form_widget.setEnabled(policy.available)
-        if not policy.available:
-            self.display_status.setText(
-                "Display switching is unavailable: kscreen-doctor was not found."
+        if policy.disabled_by_environment:
+            self._show_display_message("Display switching is disabled by the environment.")
+        elif not policy.available:
+            self._show_display_message(
+                "Display switching is not available: no supported display "
+                "backend was found for this desktop."
             )
-        self._on_display_rates(policy.refresh_rates)
-        policy.query_refresh_rates()
+        else:
+            if policy.capabilities is not None:
+                self._on_display_capabilities(policy.capabilities)
+            policy.query_capabilities()
 
-    def _on_display_rates(self, rates: object) -> None:
-        """Rebuild the refresh-rate choices and re-select the saved ones."""
+    def _show_display_message(self, message: str) -> None:
+        self._display_form_widget.setVisible(False)
+        self.display_status.setText(message)
+
+    def _on_display_capabilities(self, capabilities: object) -> None:
+        """Show only the options this panel and backend support."""
         policy = self._display_policy
         if policy is None:
             return
-        offered = [int(rate) for rate in rates] if isinstance(rates, list) else []
+        if not isinstance(capabilities, DisplayCapabilities):
+            if not self._display_form_widget.isVisibleTo(self):
+                self.display_status.setText(
+                    "Could not read this display's capabilities, so display "
+                    "switching is unavailable."
+                )
+            return
+        if not capabilities.supports_anything:
+            self._show_display_message(
+                f"{capabilities.backend}: nothing to switch on {capabilities.output}."
+            )
+            return
+        self.display_hint.setText(
+            f"Applied to {capabilities.output} when the power source changes "
+            f"(via {capabilities.backend}). Stored for your user, not system-wide."
+        )
         self._display_loading = True
         try:
-            for ac_online, combo in self.display_refresh.items():
+            for ac_online in (True, False):
                 preference = policy.preference(ac_online)
-                choices = sorted(
-                    set(offered)
-                    | ({preference.refresh_hz} - {REFRESH_UNCHANGED})
-                )
-                combo.clear()
-                combo.addItem("Don't change", REFRESH_UNCHANGED)
-                for rate in choices:
-                    combo.addItem(f"{rate} Hz", rate)
-                self._select_data(combo, preference.refresh_hz)
-                self._select_data(self.display_color[ac_online], preference.color)
+                self._fill_refresh(ac_online, capabilities, preference)
+                self._fill_bits(ac_online, capabilities, preference)
+                self._fill_color(ac_online, capabilities, preference)
+            for row, supported in self._display_rows(capabilities):
+                self._display_form.setRowVisible(row, supported)
         finally:
             self._display_loading = False
+        self._display_form_widget.setVisible(True)
+        self.display_status.setText(policy.status)
 
-    def _save_display(self, ac_online: bool) -> None:
-        policy = self._display_policy
-        if policy is None or self._display_loading:
-            return
-        policy.set_preference(
-            ac_online,
-            DisplayPreference(
-                refresh_hz=int(
-                    self.display_refresh[ac_online].currentData() or REFRESH_UNCHANGED
-                ),
-                color=str(self.display_color[ac_online].currentData() or ""),
+    def _display_rows(self, capabilities: DisplayCapabilities):
+        for combos, supported in (
+            (self.display_refresh, capabilities.supports_refresh),
+            (self.display_bits, capabilities.supports_color_bits),
+            (self.display_color, capabilities.color_priority),
+        ):
+            for combo in combos.values():
+                yield combo, supported
+
+    def _fill_refresh(
+        self, ac_online: bool, capabilities: DisplayCapabilities, pref: DisplayPreference
+    ) -> None:
+        combo = self.display_refresh[ac_online]
+        combo.clear()
+        combo.addItem("Don't change", REFRESH_UNCHANGED)
+        offered = set(capabilities.refresh_rates)
+        for rate in sorted(offered | ({pref.refresh_hz} - {REFRESH_UNCHANGED})):
+            label = f"{rate} Hz" if rate in offered else f"{rate} Hz (not offered here)"
+            combo.addItem(label, rate)
+        self._select_data(combo, pref.refresh_hz)
+
+    def _fill_bits(
+        self, ac_online: bool, capabilities: DisplayCapabilities, pref: DisplayPreference
+    ) -> None:
+        combo = self.display_bits[ac_online]
+        combo.clear()
+        combo.addItem("Don't change", COLOR_BITS_UNCHANGED)
+        if capabilities.color_bits_automatic:
+            combo.addItem("Automatic", COLOR_BITS_AUTOMATIC)
+        offered = set(capabilities.color_bits)
+        stale = {pref.color_bits} - {COLOR_BITS_UNCHANGED, COLOR_BITS_AUTOMATIC}
+        for bits in sorted(offered | stale):
+            label = f"{bits} bits per color"
+            if bits not in offered:
+                label += " (not offered here)"
+            combo.addItem(label, bits)
+        self._select_data(combo, pref.color_bits)
+
+    def _fill_color(
+        self, ac_online: bool, capabilities: DisplayCapabilities, pref: DisplayPreference
+    ) -> None:
+        combo = self.display_color[ac_online]
+        combo.clear()
+        combo.addItem("Don't change", COLOR_UNCHANGED)
+        combo.addItem("Prefer color accuracy", COLOR_ACCURACY)
+        combo.addItem("Prefer efficiency", COLOR_EFFICIENCY)
+        self._select_data(combo, pref.color)
+
+    def _display_edited(self, *_args) -> None:
+        if not self._display_loading:
+            self.notify_changes()
+
+    def _staged_display(self, ac_online: bool) -> DisplayPreference:
+        return DisplayPreference(
+            refresh_hz=int(
+                self.display_refresh[ac_online].currentData() or REFRESH_UNCHANGED
             ),
+            color_bits=int(
+                self.display_bits[ac_online].currentData() or COLOR_BITS_UNCHANGED
+            ),
+            color=str(self.display_color[ac_online].currentData() or ""),
         )
+
+    def _display_pending(self) -> bool:
+        policy = self._display_policy
+        if policy is None or not self._display_form_widget.isVisibleTo(self):
+            return False
+        return any(
+            self._staged_display(ac_online) != policy.preference(ac_online)
+            for ac_online in (True, False)
+        )
+
+    def _apply_display(self) -> None:
+        policy = self._display_policy
+        if policy is None:
+            return
+        for ac_online in (True, False):
+            staged = self._staged_display(ac_online)
+            if staged != policy.preference(ac_online):
+                policy.set_preference(ac_online, staged)
 
     def _mark_auto_dirty(self, *_args) -> None:
         if not self._loading:
             self._auto_dirty = True
+            self.notify_changes()
 
     def _save_auto(self) -> None:
         self.intent.emit(
@@ -619,6 +712,57 @@ class PowerPage(PageBase):
                 self.auto_battery_script.text().strip(),
             ),
         )
+
+    # -- Unsaved edits (see the window's Apply / Discard bar) --
+
+    def _profile_selection_pending(self) -> bool:
+        snap = self.state.snapshot
+        if not self._profile_selection_dirty or snap is None:
+            return False
+        applied = snap.power.applied_profile or snap.power.desired_profile
+        return self.profile_combo.currentData() != applied
+
+    def pending_changes(self) -> list[PendingChange]:
+        changes: list[PendingChange] = []
+        if self._profile_dirty:
+            name = self.profile_name.text().strip() or "new profile"
+            changes.append(PendingChange(f"Power profile settings ({name})"))
+        if self._profile_selection_pending():
+            changes.append(
+                PendingChange(f"Apply power profile: {self.profile_combo.currentText()}")
+            )
+        if self._auto_dirty:
+            changes.append(PendingChange("Automatic AC / battery switching"))
+        if self._display_pending():
+            changes.append(
+                PendingChange("Display on AC / battery", requires_service=False)
+            )
+        return changes
+
+    def apply_pending(self) -> None:
+        # Save an edited profile first so selecting it applies the new values.
+        if self._profile_dirty:
+            self._save_profile()
+        if self._profile_selection_pending():
+            self.intent.emit("set_profile", (self.profile_combo.currentData(),))
+        if self._auto_dirty:
+            self._save_auto()
+        if self._display_pending():
+            self._apply_display()
+            self.notify_changes()
+
+    def discard_pending(self) -> None:
+        self._profile_dirty = False
+        self._profile_selection_dirty = False
+        self._auto_dirty = False
+        snap = self.state.snapshot
+        if snap is not None:
+            self._on_snapshot(snap)  # reselects the applied profile, reloads auto
+            self._load_profile_editor()
+        policy = self._display_policy
+        if policy is not None and policy.capabilities is not None:
+            self._on_display_capabilities(policy.capabilities)
+        self.notify_changes()
 
     def refresh(self) -> None:
         snap = self.state.snapshot

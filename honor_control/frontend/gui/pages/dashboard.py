@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from honor_control.core.models import POWER_PROFILES, SystemSnapshot
-from honor_control.frontend.gui.pages import PageBase
+from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.widgets import Card, ToggleSwitch
 
 
@@ -70,13 +70,7 @@ class DashboardPage(PageBase):
             self._on_profile_selection_changed
         )
         picker.addWidget(self.profile_combo, 1)
-        self.profile_apply = QPushButton("Apply")
-        self.profile_apply.clicked.connect(
-            lambda: self.intent.emit("set_profile", (self.profile_combo.currentData(),))
-        )
-        picker.addWidget(self.profile_apply)
-        self.register_control(self.profile_combo)
-        self.register_pending_control("set_profile", self.profile_apply)
+        self.register_pending_control("set_profile", self.profile_combo)
         self.profile_card.layout.addLayout(picker)
         self.add_widget(self.profile_card)
 
@@ -243,17 +237,46 @@ class DashboardPage(PageBase):
             f"{gestures.gestures_emitted:,} shortcuts emitted"
         )
         self.gesture_toggle.setChecked(gestures.daemon_enabled)
+        self.notify_changes()
 
     def _on_profile_selection_changed(self, *_args) -> None:
         self._profile_selection_dirty = True
+        self.notify_changes()
 
     def _on_operation_completed(self, operation_id: str, result: object) -> None:
         if not operation_id.startswith("set_profile:"):
             return
-        if result is not None and bool(getattr(result, "applied", False)):
-            return
+        self._profile_selection_dirty = False
+        if not (result is not None and bool(getattr(result, "applied", False))):
+            self.refresh()
+        self.notify_changes()
+
+    # -- Unsaved edits (see the window's Apply / Discard bar) --
+
+    def _applied_profile(self) -> str | None:
+        snap = self.state.snapshot
+        if snap is None:
+            return None
+        return snap.power.applied_profile or snap.power.desired_profile
+
+    def pending_changes(self) -> list[PendingChange]:
+        if (
+            self._profile_selection_dirty
+            and self.profile_combo.currentData() != self._applied_profile()
+        ):
+            return [
+                PendingChange(f"Apply power profile: {self.profile_combo.currentText()}")
+            ]
+        return []
+
+    def apply_pending(self) -> None:
+        if self.pending_changes():
+            self.intent.emit("set_profile", (self.profile_combo.currentData(),))
+
+    def discard_pending(self) -> None:
         self._profile_selection_dirty = False
         self.refresh()
+        self.notify_changes()
 
     def refresh(self) -> None:
         if self.state.snapshot is not None:

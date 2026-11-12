@@ -45,6 +45,11 @@ class GuiState(QObject):
         return self._connected
 
     @property
+    def pending_operations(self) -> frozenset[str]:
+        """Return the ids of operations that have not completed yet."""
+        return frozenset(self._pending_ops)
+
+    @property
     def stale_domains(self) -> tuple[str, ...]:
         """Return domains whose last live read failed."""
         if self._snapshot is None:

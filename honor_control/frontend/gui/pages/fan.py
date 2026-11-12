@@ -28,7 +28,7 @@ from honor_control.core.models import (
 )
 from honor_control.core.validation import format_curve, parse_curve
 from honor_control.frontend.gui.fan_curve_editor import FanCurveGraph
-from honor_control.frontend.gui.pages import PageBase
+from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.widgets import Card, InfoRow
 
 
@@ -41,6 +41,7 @@ class FanPage(PageBase):
     def _build(self) -> None:
         self._curve_dirty = False
         self._mode_dirty = False
+        self._manual_touched = False
         self._loading_curve = False
         status = Card("")
         summary = QHBoxLayout()
@@ -92,19 +93,13 @@ class FanPage(PageBase):
         self.manual_slider.setValue(50)
         self.manual_label = QLabel("50 %")
         self.manual_label.setMinimumWidth(50)
-        self.manual_slider.valueChanged.connect(
-            lambda v: self.manual_label.setText(f"{v} %")
+        self.manual_slider.setToolTip(
+            "Applying a manual speed temporarily overrides firmware fan control "
+            "for 5 minutes"
         )
-        self.manual_apply = QPushButton("Apply")
-        self.manual_apply.setToolTip(
-            "Temporarily overrides firmware fan control for 5 minutes"
-        )
-        self.manual_apply.clicked.connect(
-            lambda: self.intent.emit("set_manual", (self.manual_slider.value(), 300))
-        )
+        self.manual_slider.valueChanged.connect(self._manual_changed)
         mh.addWidget(self.manual_slider, 1)
         mh.addWidget(self.manual_label)
-        mh.addWidget(self.manual_apply)
         mode_card.layout.addWidget(self.manual_widget)
         self.manual_widget.setVisible(False)
 
@@ -112,7 +107,6 @@ class FanPage(PageBase):
         self.register_control(self.rb_curve)
         self.register_control(self.rb_manual)
         self.register_control(self.manual_slider)
-        self.register_pending_control("set_manual", self.manual_apply)
         self.register_pending_control("set_stock_auto", self.rb_auto)
         self.add_widget(mode_card)
 
@@ -155,28 +149,24 @@ class FanPage(PageBase):
         cl.addLayout(point_row)
         self.curve_hint = QLabel(
             "Click to add, drag to edit, right-click to remove. "
-            "2–12 points; 95 °C and above must be 100%."
+            "2–12 points; 95 °C and above must be 100%. "
+            "Use Apply changes to validate and activate the curve."
         )
         self.curve_hint.setProperty("muted", True)
         self.curve_hint.setStyleSheet("font-size: 11px;")
         self.curve_hint.setWordWrap(True)
         cl.addWidget(self.curve_hint)
-        self.curve_apply = QPushButton("Validate and apply curve")
-        self.curve_apply.clicked.connect(self._apply_curve)
-        cl.addWidget(self.curve_apply)
         self.register_control(self.profile_combo)
         self.register_control(self.curve_graph)
         self.register_control(self.point_temp)
         self.register_control(self.point_speed)
         self.register_control(self.point_add)
         self.register_control(self.point_remove)
-        self.register_pending_control("set_curve", self.curve_apply)
         self.add_widget(self.curve_widget)
         self.curve_widget.setVisible(False)
 
         self.rb_auto.toggled.connect(self._on_mode_changed)
         self.rb_auto.clicked.connect(lambda: self._set_mode_dirty())
-        self.rb_auto.clicked.connect(lambda: self.intent.emit("set_stock_auto", ()))
         self.rb_curve.toggled.connect(self._on_mode_changed)
         self.rb_curve.clicked.connect(lambda: self._set_mode_dirty())
         self.rb_manual.toggled.connect(self._on_mode_changed)
@@ -258,6 +248,7 @@ class FanPage(PageBase):
             else:
                 self.rb_auto.setChecked(True)
         self._load_selected_curve()
+        self.notify_changes()
 
     def _on_mode_changed(self) -> None:
         is_manual = self.rb_manual.isChecked()
@@ -267,10 +258,17 @@ class FanPage(PageBase):
 
     def _set_mode_dirty(self) -> None:
         self._mode_dirty = True
+        self.notify_changes()
+
+    def _manual_changed(self, value: int) -> None:
+        self.manual_label.setText(f"{value} %")
+        self._manual_touched = True
+        self.notify_changes()
 
     def _profile_changed(self) -> None:
         self._curve_dirty = False
         self._load_selected_curve(force=True)
+        self.notify_changes()
 
     def _load_selected_curve(self, force: bool = False) -> None:
         snap = self.state.snapshot
@@ -290,6 +288,7 @@ class FanPage(PageBase):
         if not self._loading_curve:
             self._curve_dirty = True
             self.curve_hint.setText("Unsaved curve changes")
+            self.notify_changes()
 
     def _selection_changed(self, index: int) -> None:
         enabled = index >= 0
@@ -342,9 +341,67 @@ class FanPage(PageBase):
                 else bool(getattr(result, "applied", False))
             )
             if accepted:
+                if method == "set_manual":
+                    self._manual_touched = False
+                self.notify_changes()
                 return
         self._mode_dirty = False
+        self._manual_touched = False
         self.refresh()
+        self.notify_changes()
+
+    # -- Unsaved edits (see the window's Apply / Discard bar) --
+
+    def pending_changes(self) -> list[PendingChange]:
+        snap = self.state.snapshot
+        if snap is None or not (
+            self._mode_dirty or self._curve_dirty or self._manual_touched
+        ):
+            return []
+        fan = snap.fan
+        if self.rb_auto.isChecked():
+            if fan.mode != FanMode.STOCK:
+                return [PendingChange("Fan mode: Stock auto")]
+        elif self.rb_manual.isChecked():
+            if fan.mode != FanMode.MANUAL_OVERRIDE or (
+                self._manual_touched
+                and fan.target_speed != self.manual_slider.value()
+            ):
+                return [
+                    PendingChange(f"Fan mode: Manual {self.manual_slider.value()} %")
+                ]
+        elif self.rb_curve.isChecked():
+            profile = self.profile_combo.currentText()
+            saved = fan.curves.get(profile, "")
+            current = format_curve(list(self.curve_graph.points))
+            if fan.mode != FanMode.CURVE or saved != current:
+                return [PendingChange(f"Fan mode: Custom curve ({profile})")]
+        return []
+
+    def apply_pending(self) -> None:
+        if not self.pending_changes():
+            return
+        self._mode_dirty = True
+        if self.rb_auto.isChecked():
+            self.intent.emit("set_stock_auto", ())
+        elif self.rb_manual.isChecked():
+            self.intent.emit("set_manual", (self.manual_slider.value(), 300))
+        elif self.rb_curve.isChecked():
+            self._apply_curve()
+
+    def discard_pending(self) -> None:
+        self._mode_dirty = False
+        self._curve_dirty = False
+        self._manual_touched = False
+        snap = self.state.snapshot
+        if snap is not None and snap.fan.target_speed is not None:
+            self.manual_slider.blockSignals(True)
+            self.manual_slider.setValue(snap.fan.target_speed)
+            self.manual_label.setText(f"{snap.fan.target_speed} %")
+            self.manual_slider.blockSignals(False)
+        self._load_selected_curve(force=True)
+        self.refresh()
+        self.notify_changes()
 
     def refresh(self) -> None:
         snap = self.state.snapshot

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from honor_control.core.models import GestureEntry, SystemSnapshot
 from honor_control.core.touchpad import TOUCHPAD_SETTING_SPECS, TouchpadSetting
-from honor_control.frontend.gui.pages import PageBase
+from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.widgets import Card, InfoRow, StatusDot
 
 _SETTING_COPY: dict[TouchpadSetting, tuple[str, str]] = {
@@ -132,14 +133,16 @@ class _FirmwareSettingRow(QWidget):
 
 
 class _GestureRow(QWidget):
-    """Stable, editable desktop shortcut row keyed by gesture ID."""
+    """Stable, editable desktop shortcut row keyed by gesture ID.
 
-    intent = Signal(str, object)
+    Edits are staged in the row and sent from the window's Apply bar.
+    """
+
+    changed = Signal()
 
     def __init__(self, entry: GestureEntry) -> None:
         super().__init__()
-        self._gesture_id = entry.id
-        self._enabled = entry.enabled
+        self._entry = entry
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 5, 2, 5)
         layout.setSpacing(8)
@@ -149,30 +152,54 @@ class _GestureRow(QWidget):
         self.mapping = QLineEdit()
         self.mapping.setPlaceholderText("e.g. leftmeta,v")
         self.mapping.setToolTip("Comma-separated Linux key names")
-        self.mapping.returnPressed.connect(self._apply)
+        self.mapping.textChanged.connect(lambda _text: self.changed.emit())
         layout.addWidget(self.mapping, 1)
-        self.apply_button = QPushButton("Save")
-        self.apply_button.clicked.connect(self._apply)
-        layout.addWidget(self.apply_button)
-        self.toggle_button = QPushButton()
-        self.toggle_button.clicked.connect(self._toggle)
-        layout.addWidget(self.toggle_button)
-        self.update_entry(entry)
+        self.enabled_box = QCheckBox("Enabled")
+        self.enabled_box.toggled.connect(lambda _checked: self.changed.emit())
+        layout.addWidget(self.enabled_box)
+        self._show(entry)
+
+    @property
+    def gesture_id(self) -> str:
+        return self._entry.id
+
+    @property
+    def mapping_changed(self) -> bool:
+        return self.mapping.text() != self._entry.mapping
+
+    @property
+    def enabled_changed(self) -> bool:
+        return self.enabled_box.isChecked() != self._entry.enabled
+
+    @property
+    def is_dirty(self) -> bool:
+        return self.mapping_changed or self.enabled_changed
+
+    def _show(self, entry: GestureEntry) -> None:
+        for widget in (self.mapping, self.enabled_box):
+            widget.blockSignals(True)
+        self.mapping.setText(entry.mapping)
+        self.enabled_box.setChecked(entry.enabled)
+        for widget in (self.mapping, self.enabled_box):
+            widget.blockSignals(False)
 
     def update_entry(self, entry: GestureEntry) -> None:
-        self._enabled = entry.enabled
+        """Take a new service value without losing the user's staged edit."""
+        was_dirty = self.is_dirty
+        self._entry = entry
         self.name.setText(entry.label)
         self.name.setToolTip(f"Report ID: {entry.id}")
-        if not self.mapping.hasFocus():
-            self.mapping.setText(entry.mapping)
-        self.toggle_button.setText("Disable" if entry.enabled else "Enable")
         self.setToolTip(entry.error)
+        if not was_dirty:
+            self._show(entry)
+        self.changed.emit()
 
-    def _apply(self) -> None:
-        self.intent.emit("set_mapping", (self._gesture_id, self.mapping.text()))
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled_box.setChecked(enabled)
 
-    def _toggle(self) -> None:
-        self.intent.emit("set_enabled", (self._gesture_id, not self._enabled))
+    def discard(self) -> None:
+        self._show(self._entry)
+        self.changed.emit()
 
 
 class TouchpadPage(PageBase):
@@ -238,9 +265,6 @@ class TouchpadPage(PageBase):
         firmware_host = QWidget()
         firmware_host.setLayout(self._firmware_grid)
         self.add_widget(firmware_host)
-        actions_card = Card("")
-        actions_card.layout.addLayout(self._firmware_actions)
-        self.add_widget(actions_card)
         self._build_runtime()
         self._build_mappings()
         self.add_stretch()
@@ -267,8 +291,8 @@ class TouchpadPage(PageBase):
         status.layout.addLayout(headline)
 
         explanation = QLabel(
-            "Changes are applied together in one firmware transaction and saved as "
-            "desired state. The firmware does not "
+            "Changes are applied together with Apply changes, in one firmware "
+            "transaction, and saved as desired state. The firmware does not "
             "provide setting readback, so “Not configured” means Honor Control has "
             "not written that value yet."
         )
@@ -283,18 +307,6 @@ class TouchpadPage(PageBase):
         status.layout.addWidget(self.device_row)
         self.master_row.setVisible(False)
         self.support_row.setVisible(False)
-        actions = QHBoxLayout()
-        actions.addStretch(1)
-        self.discard_button = QPushButton("Discard changes")
-        self.discard_button.clicked.connect(self._discard_firmware_changes)
-        self.register_control(self.discard_button)
-        actions.addWidget(self.discard_button)
-        self.apply_button = QPushButton("Apply touchpad settings")
-        self.apply_button.setDefault(True)
-        self.apply_button.clicked.connect(self._apply_firmware_changes)
-        self.register_control(self.apply_button)
-        actions.addWidget(self.apply_button)
-        self._firmware_actions = actions
         self.add_widget(status)
 
     def _build_firmware_group(
@@ -346,8 +358,9 @@ class TouchpadPage(PageBase):
     def _build_mappings(self) -> None:
         card = Card("Desktop shortcut mappings")
         intro = QLabel(
-            "Map each confirmed input report to a Linux key combination. Changes "
-            "are consumed live by the gesture dispatch service."
+            "Map each confirmed input report to a Linux key combination, then use "
+            "Apply changes. Applied mappings are consumed live by the gesture "
+            "dispatch service."
         )
         intro.setWordWrap(True)
         intro.setProperty("muted", True)
@@ -355,12 +368,10 @@ class TouchpadPage(PageBase):
         controls = QHBoxLayout()
         enable_all = QPushButton("Enable all")
         disable_all = QPushButton("Disable all")
-        enable_all.clicked.connect(lambda: self.intent.emit("set_all_enabled", (True,)))
-        disable_all.clicked.connect(
-            lambda: self.intent.emit("set_all_enabled", (False,))
-        )
-        self.register_pending_control("set_all_enabled", enable_all)
-        self.register_pending_control("set_all_enabled", disable_all)
+        enable_all.clicked.connect(lambda: self._stage_all_enabled(True))
+        disable_all.clicked.connect(lambda: self._stage_all_enabled(False))
+        self.register_control(enable_all)
+        self.register_control(disable_all)
         controls.addWidget(enable_all)
         controls.addWidget(disable_all)
         controls.addStretch(1)
@@ -378,6 +389,11 @@ class TouchpadPage(PageBase):
         self._firmware_draft[setting] = value
         self._firmware_dirty = True
         self._update_firmware_actions()
+        self.notify_changes()
+
+    def _stage_all_enabled(self, enabled: bool) -> None:
+        for row in self._rows.values():
+            row.set_enabled(enabled)
 
     def _apply_firmware_changes(self) -> None:
         if self._firmware_draft and self._firmware_dirty:
@@ -416,8 +432,6 @@ class TouchpadPage(PageBase):
         )
         for row in self._firmware_rows.values():
             row.combo.setEnabled(can_edit)
-        self.apply_button.setEnabled(can_edit and self._firmware_dirty)
-        self.discard_button.setEnabled(can_edit and self._firmware_dirty)
         self.support_button.setEnabled(can_edit and not self._support_pending)
 
     def _toggle_daemon(self) -> None:
@@ -440,6 +454,7 @@ class TouchpadPage(PageBase):
             if result is not None and bool(getattr(result, "applied", False)):
                 self._firmware_dirty = False
             self._update_firmware_actions()
+            self.notify_changes()
         elif operation_id.startswith("query_touchpad_support"):
             self._support_pending = False
             self._update_firmware_actions()
@@ -502,7 +517,7 @@ class TouchpadPage(PageBase):
             row = self._rows.get(entry.id)
             if row is None:
                 row = _GestureRow(entry)
-                row.intent.connect(self.intent.emit)
+                row.changed.connect(self.notify_changes)
                 self._rows[entry.id] = row
                 self.register_pending_control("set_mapping", row)
                 self.register_pending_control("set_enabled", row)
@@ -511,6 +526,36 @@ class TouchpadPage(PageBase):
                 row.update_entry(entry)
         self.set_backend_available(self.state.connected)
         self._update_firmware_actions()
+
+    # -- Unsaved edits (see the window's Apply / Discard bar) --
+
+    def pending_changes(self) -> list[PendingChange]:
+        changes: list[PendingChange] = []
+        if self._firmware_dirty:
+            changes.append(PendingChange("Touchpad firmware settings"))
+        edited = sum(1 for row in self._rows.values() if row.is_dirty)
+        if edited:
+            noun = "shortcut" if edited == 1 else "shortcuts"
+            changes.append(PendingChange(f"Gesture {noun}: {edited} edited"))
+        return changes
+
+    def apply_pending(self) -> None:
+        for row in self._rows.values():
+            if row.mapping_changed:
+                self.intent.emit("set_mapping", (row.gesture_id, row.mapping.text()))
+            if row.enabled_changed:
+                self.intent.emit(
+                    "set_enabled", (row.gesture_id, row.enabled_box.isChecked())
+                )
+        if self._firmware_dirty:
+            self._apply_firmware_changes()
+
+    def discard_pending(self) -> None:
+        if self._firmware_dirty:
+            self._discard_firmware_changes()
+        for row in self._rows.values():
+            row.discard()
+        self.notify_changes()
 
     def refresh(self) -> None:
         snap = self.state.snapshot

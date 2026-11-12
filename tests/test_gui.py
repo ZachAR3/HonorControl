@@ -444,13 +444,13 @@ class TestGuiPageConstruction:
         state.set_connected(True)
         page = BatteryPage(state)
 
-        state.mark_pending("set_thresholds:80:75")
-        assert not page.apply_btn.isEnabled()
+        state.mark_pending("set_mode:home")
+        assert not page.mode_buttons["home"].isEnabled()
         state.emit_completed(
-            "set_thresholds:80:75",
+            "set_mode:home",
             OperationResult.success(applied=True),
         )
-        assert page.apply_btn.isEnabled()
+        assert page.mode_buttons["home"].isEnabled()
 
     def test_local_settings_remain_usable_without_backend(self, qapp) -> None:
         from honor_control.frontend.gui.pages.settings import SettingsPage
@@ -465,11 +465,11 @@ class TestGuiPageConstruction:
         state = GuiState()
         page = BatteryPage(state)
         page.set_backend_available(False)
-        state.mark_pending("set_thresholds:80:75")
-        state.emit_completed("set_thresholds:80:75", OperationResult.success(applied=True))
-        assert not page.apply_btn.isEnabled()
+        state.mark_pending("set_mode:home")
+        state.emit_completed("set_mode:home", OperationResult.success(applied=True))
+        assert not page.mode_buttons["home"].isEnabled()
         page.set_backend_available(True)
-        assert page.apply_btn.isEnabled()
+        assert page.mode_buttons["home"].isEnabled()
 
     def test_pending_control_handles_disconnect_and_repeated_operations(self, qapp) -> None:
         from honor_control.frontend.gui.pages.battery import BatteryPage
@@ -478,29 +478,29 @@ class TestGuiPageConstruction:
         state.set_connected(True)
         page = BatteryPage(state)
 
-        page._update_pending_started("set_thresholds:80:75")  # noqa: SLF001
-        page._update_pending_started("set_thresholds:85:80")  # noqa: SLF001
-        assert page.apply_btn.isEnabled() is False
+        page._update_pending_started("set_mode:home")  # noqa: SLF001
+        page._update_pending_started("set_mode:travel")  # noqa: SLF001
+        assert page.mode_buttons["home"].isEnabled() is False
 
         page.set_backend_available(False)
         page._update_pending_completed(  # noqa: SLF001
-            "set_thresholds:80:75", None
+            "set_mode:home", None
         )
         page.set_backend_available(True)
-        assert page.apply_btn.isEnabled() is False
+        assert page.mode_buttons["home"].isEnabled() is False
 
         page._update_pending_completed(  # noqa: SLF001
-            "set_thresholds:85:80", None
+            "set_mode:travel", None
         )
-        assert page.apply_btn.isEnabled() is True
+        assert page.mode_buttons["home"].isEnabled() is True
 
         # A later operation must capture the current enabled state rather than
         # reusing a stale baseline from the earlier pending operation.
-        page._update_pending_started("set_thresholds:90:85")  # noqa: SLF001
+        page._update_pending_started("set_mode:storage")  # noqa: SLF001
         page._update_pending_completed(  # noqa: SLF001
-            "set_thresholds:90:85", None
+            "set_mode:storage", None
         )
-        assert page.apply_btn.isEnabled() is True
+        assert page.mode_buttons["home"].isEnabled() is True
 
     def test_dynamic_gesture_row_is_removed_from_pending_registry(self, qapp) -> None:
         from honor_control.frontend.gui.pages.touchpad import TouchpadPage
@@ -654,7 +654,10 @@ class TestGuiPageConstruction:
         row = page._firmware_rows["three_finger_drag"]  # noqa: SLF001
         row.combo.setCurrentIndex(row.combo.findData(1))
         page._on_snapshot(replace(snap, sequence=2))  # noqa: SLF001
-        page.apply_button.click()
+        assert [c.summary for c in page.pending_changes()] == [
+            "Touchpad firmware settings"
+        ]
+        page.apply_pending()
 
         assert row.combo.currentData() == 1
         assert emitted == [
@@ -679,7 +682,8 @@ class TestGuiPageConstruction:
             )
         )
 
-        assert page.apply_button.isEnabled() is False
+        assert page.pending_changes() == []
+        assert not page._firmware_rows["edge_volume"].combo.isEnabled()  # noqa: SLF001
         assert "unavailable" in page.firmware_summary.text().lower()
 
     def test_backend_reconnect_preserves_page_specific_disabled_controls(self, qapp) -> None:
@@ -742,7 +746,11 @@ class TestGuiPageConstruction:
             )
         )
         page.profile_combo.setCurrentIndex(page.profile_combo.findData("performance"))
-        page.profile_apply.click()
+        assert emitted == []  # staged until the window's Apply bar
+        assert [c.summary for c in page.pending_changes()] == [
+            "Apply power profile: Performance"
+        ]
+        page.apply_pending()
 
         assert emitted == [("set_profile", ("performance",))]
 

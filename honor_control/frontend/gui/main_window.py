@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
     QToolButton,
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
 from honor_control import __version__
 from honor_control.frontend.gui.controller import GuiController
 from honor_control.frontend.gui.design import apply_design_system
-from honor_control.frontend.gui.pages import PageBase
+from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.pages.battery import BatteryPage
 from honor_control.frontend.gui.pages.dashboard import DashboardPage
 from honor_control.frontend.gui.pages.diagnostics import DiagnosticsPage
@@ -160,11 +161,14 @@ class MainWindow(QMainWindow):
         for page_cls, _icon, _label in PAGES:
             page = page_cls(self.state)
             page.intent.connect(self._on_intent)
+            page.changes_changed.connect(self._update_action_bar)
             self._pages.append(page)
             self.stack.addWidget(page)
         body_layout.addWidget(self.stack, 1)
         root.addWidget(body, 1)
+        root.addWidget(self._build_action_bar())
         self.sidebar.setCurrentRow(0)
+        self._update_action_bar()
 
     def _build_sidebar(self) -> QWidget:
         bar = QFrame()
@@ -216,6 +220,74 @@ class MainWindow(QMainWindow):
         h.addWidget(refresh)
         return header
 
+    def _build_action_bar(self) -> QWidget:
+        """The one static place for every unsaved edit on every page."""
+        bar = QFrame()
+        bar.setObjectName("HonorActionBar")
+        bar.setFixedHeight(52)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(20, 0, 16, 0)
+        row.setSpacing(12)
+        self.changes_label = QLabel("No unsaved changes")
+        self.changes_label.setProperty("muted", True)
+        row.addWidget(self.changes_label, 1)
+        self.discard_button = QPushButton("Discard")
+        self.discard_button.setProperty("quiet", True)
+        self.discard_button.setToolTip("Drop all unsaved changes")
+        self.discard_button.clicked.connect(self._discard_all)
+        row.addWidget(self.discard_button)
+        self.apply_button = QPushButton("Apply changes")
+        self.apply_button.setProperty("accent", True)
+        self.apply_button.setToolTip("Apply all unsaved changes (Ctrl+S)")
+        self.apply_button.clicked.connect(self._apply_all)
+        row.addWidget(self.apply_button)
+        return bar
+
+    def _pending_changes(self) -> list[tuple[PageBase, PendingChange]]:
+        return [
+            (page, change) for page in self._pages for change in page.pending_changes()
+        ]
+
+    def _update_action_bar(self, *_args) -> None:
+        """Enable Apply/Discard only while some page holds unsaved edits."""
+        if not hasattr(self, "apply_button"):
+            return  # a page signalled while the window is still being built
+        changes = self._pending_changes()
+        busy = bool(self.state.pending_operations)
+        offline_ok = all(not change.requires_service for _page, change in changes)
+        self.apply_button.setEnabled(
+            bool(changes) and not busy and (self.state.connected or offline_ok)
+        )
+        self.discard_button.setEnabled(bool(changes) and not busy)
+        if not changes:
+            self.changes_label.setText("No unsaved changes")
+            self.changes_label.setToolTip("")
+            return
+        summaries = [f"{page.title}: {change.summary}" for page, change in changes]
+        noun = "change" if len(changes) == 1 else "changes"
+        text = f"{len(changes)} unsaved {noun} · " + "; ".join(summaries)
+        if len(text) > 110:
+            text = text[:107] + "…"
+        if not self.state.connected and not offline_ok:
+            text += "  (service offline)"
+        self.changes_label.setText(text)
+        self.changes_label.setToolTip("\n".join(summaries))
+
+    def _apply_all(self) -> None:
+        if not self.apply_button.isEnabled():
+            return
+        pages = [page for page in self._pages if page.pending_changes()]
+        for page in pages:
+            page.apply_pending()
+        self.statusBar().showMessage("Applying changes…", 3000)
+        self._update_action_bar()
+
+    def _discard_all(self) -> None:
+        for page in self._pages:
+            if page.pending_changes():
+                page.discard_pending()
+        self._update_action_bar()
+
     def _build_banner(self) -> QFrame:
         banner = QFrame()
         banner.setObjectName("HonorBanner")
@@ -234,6 +306,10 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.quit_application)
         self.addAction(quit_action)
+        apply_action = QAction("&Apply changes", self)
+        apply_action.setShortcut(QKeySequence.StandardKey.Save)
+        apply_action.triggered.connect(self._apply_all)
+        self.addAction(apply_action)
         refresh_action = QAction("&Refresh", self)
         refresh_action.setShortcut(QKeySequence.StandardKey.Refresh)
         refresh_action.triggered.connect(self.controller.refresh)
@@ -251,6 +327,9 @@ class MainWindow(QMainWindow):
         self.controller.operation_completed.connect(self.state.emit_completed)
         self.controller.operation_completed.connect(self._on_operation_completed)
         self.state.connection_changed.connect(self._update_availability)
+        self.state.connection_changed.connect(self._update_action_bar)
+        self.state.operation_pending.connect(self._update_action_bar)
+        self.state.operation_completed.connect(self._update_action_bar)
         self.state.snapshot_changed.connect(self._update_identity)
         self.state.stale_changed.connect(self._on_stale_changed)
         self.state.error_occurred.connect(self._on_ui_error)

@@ -1,34 +1,43 @@
-"""Per-power-source display preferences applied from the desktop session.
+"""Per-power-source display preferences applied from the user's session.
 
-Refresh rate and KWin's colour accuracy/efficiency trade-off are properties of
-the *user's* compositor session, so they deliberately do not live in the root
-service: a system daemon has no business (and no reliable way) to reconfigure
-a user's Wayland outputs.  Instead the session frontend that is already
-running (the tray, or the tray embedded in the main window) watches the
-service snapshot and, when the laptop moves between AC and battery, applies
-the user's display preferences for that power source through
-``kscreen-doctor``.
+Refresh rate and colour options are properties of the *user's* display
+session, so they deliberately do not live in the root service: a system daemon
+has no business (and no reliable way) to reconfigure a user's outputs.  The
+session frontend that is already running (the tray, or the tray embedded in
+the main window) watches the service snapshot and, when the laptop moves
+between AC and battery, applies the user's preferences for that power source
+through a platform backend (KDE, GNOME, wlroots, X11 or Windows; see
+``honor_control.frontend.display_backends``).
 
-Preferences are local application settings (``QSettings``), stored under a
-fixed organisation/application pair so the standalone tray and the GUI read
+Preferences are local application settings (``QSettings``) stored under a
+fixed organisation/application pair, so the standalone tray and the GUI read
 the same values even though they are separate Qt applications.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import shutil
-import subprocess
+import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
 
-from PySide6.QtCore import QObject, QSettings, Signal
+from PySide6.QtCore import QObject, QSettings, QTimer, Signal
 
 from honor_control.core.models import SystemSnapshot
+from honor_control.frontend.display_backends import (
+    COLOR_ACCURACY,
+    COLOR_BITS_AUTOMATIC,
+    COLOR_BITS_UNCHANGED,
+    COLOR_EFFICIENCY,
+    COLOR_UNCHANGED,
+    REFRESH_UNCHANGED,
+    DisplayBackend,
+    DisplayCapabilities,
+    DisplayPreference,
+    detect_backend,
+)
+from honor_control.frontend.display_backends.windows import system_ac_online
 
 log = logging.getLogger("honor_control.frontend.display_policy")
 
@@ -40,40 +49,26 @@ SETTINGS_APPLICATION = "Honor Control"
 #: (used by the test-suite, and available as a user kill-switch).
 DISABLE_ENV = "HONOR_CONTROL_DISABLE_DISPLAY_POLICY"
 
-KSCREEN_DOCTOR = "kscreen-doctor"
-KSCREEN_TIMEOUT_SECONDS = 8.0
+#: How often the AC state is read where no service supplies it (Windows).
+SYSTEM_POWER_POLL_MS = 30_000
 
-#: ``refresh_hz`` value meaning "leave the refresh rate alone".
-REFRESH_UNCHANGED = 0
-#: ``color`` values; the empty string means "leave it alone".
-COLOR_UNCHANGED = ""
-COLOR_ACCURACY = "accuracy"
-COLOR_EFFICIENCY = "efficiency"
-_COLOR_ARGUMENTS = {
-    COLOR_ACCURACY: "preferAccuracy",
-    COLOR_EFFICIENCY: "preferEfficiency",
-}
+__all__ = [
+    "COLOR_ACCURACY",
+    "COLOR_BITS_AUTOMATIC",
+    "COLOR_BITS_UNCHANGED",
+    "COLOR_EFFICIENCY",
+    "COLOR_UNCHANGED",
+    "DISABLE_ENV",
+    "REFRESH_UNCHANGED",
+    "DisplayCapabilities",
+    "DisplayPolicy",
+    "DisplayPreference",
+    "load_preference",
+    "open_settings",
+    "save_preference",
+]
 
-#: KScreen output type of a built-in laptop panel.
-_OUTPUT_TYPE_PANEL = 7
-_INTERNAL_NAME_PREFIXES = ("eDP", "LVDS", "DSI")
-#: Two modes are "the same rate" within this tolerance (59.94 vs 60, ...).
-_REFRESH_TOLERANCE_HZ = 1.0
-
-#: ``runner(arguments) -> (returncode, stdout)``; replaceable for tests.
-Runner = Callable[[list[str]], tuple[int, str]]
-
-
-@dataclass(frozen=True)
-class DisplayPreference:
-    """What to apply when the laptop enters one power source."""
-
-    refresh_hz: int = REFRESH_UNCHANGED
-    color: str = COLOR_UNCHANGED
-
-    @property
-    def is_noop(self) -> bool:
-        return self.refresh_hz == REFRESH_UNCHANGED and self.color == COLOR_UNCHANGED
+_COLORS = (COLOR_ACCURACY, COLOR_EFFICIENCY)
 
 
 def _source_key(ac_online: bool) -> str:
@@ -85,19 +80,26 @@ def open_settings() -> QSettings:
     return QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION)
 
 
+def _int_setting(settings: QSettings, key: str, default: int) -> int:
+    try:
+        return int(settings.value(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def load_preference(settings: QSettings, ac_online: bool) -> DisplayPreference:
     """Read (and sanitise) the preference for one power source."""
     prefix = f"display/{_source_key(ac_online)}"
-    try:
-        refresh = int(settings.value(f"{prefix}/refresh_hz", REFRESH_UNCHANGED))
-    except (TypeError, ValueError):
-        refresh = REFRESH_UNCHANGED
+    refresh = _int_setting(settings, f"{prefix}/refresh_hz", REFRESH_UNCHANGED)
     if not 0 <= refresh <= 1000:
         refresh = REFRESH_UNCHANGED
+    bits = _int_setting(settings, f"{prefix}/color_bits", COLOR_BITS_UNCHANGED)
+    if bits != COLOR_BITS_AUTOMATIC and not 0 <= bits <= 16:
+        bits = COLOR_BITS_UNCHANGED
     color = str(settings.value(f"{prefix}/color", COLOR_UNCHANGED) or "")
-    if color not in _COLOR_ARGUMENTS:
+    if color not in _COLORS:
         color = COLOR_UNCHANGED
-    return DisplayPreference(refresh_hz=refresh, color=color)
+    return DisplayPreference(refresh_hz=refresh, color_bits=bits, color=color)
 
 
 def save_preference(
@@ -105,164 +107,79 @@ def save_preference(
 ) -> None:
     prefix = f"display/{_source_key(ac_online)}"
     settings.setValue(f"{prefix}/refresh_hz", int(preference.refresh_hz))
+    settings.setValue(f"{prefix}/color_bits", int(preference.color_bits))
     settings.setValue(f"{prefix}/color", preference.color)
-
-
-# -- Pure helpers over ``kscreen-doctor -j`` output ---------------------------
-
-
-def internal_output(document: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the enabled built-in panel from a KScreen JSON document."""
-    outputs = document.get("outputs")
-    if not isinstance(outputs, list):
-        return None
-    for output in outputs:
-        if not isinstance(output, dict):
-            continue
-        if not output.get("connected") or not output.get("enabled"):
-            continue
-        name = str(output.get("name", ""))
-        if output.get("type") == _OUTPUT_TYPE_PANEL or name.startswith(
-            _INTERNAL_NAME_PREFIXES
-        ):
-            return output
-    return None
-
-
-def _current_mode(output: dict[str, Any]) -> dict[str, Any] | None:
-    current_id = str(output.get("currentModeId", ""))
-    for mode in output.get("modes") or ():
-        if isinstance(mode, dict) and str(mode.get("id", "")) == current_id:
-            return mode
-    return None
-
-
-def _modes_at_current_size(output: dict[str, Any]) -> list[dict[str, Any]]:
-    current = _current_mode(output)
-    if current is None:
-        return []
-    size = current.get("size")
-    return [
-        mode
-        for mode in output.get("modes") or ()
-        if isinstance(mode, dict) and mode.get("size") == size
-    ]
-
-
-def _rate(mode: dict[str, Any]) -> float:
-    try:
-        return float(mode.get("refreshRate", 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def available_refresh_rates(document: dict[str, Any]) -> list[int]:
-    """Return the distinct refresh rates offered at the current resolution."""
-    output = internal_output(document)
-    if output is None:
-        return []
-    rates = {round(_rate(mode)) for mode in _modes_at_current_size(output)}
-    return sorted(rate for rate in rates if rate > 0)
-
-
-def build_arguments(
-    document: dict[str, Any], preference: DisplayPreference
-) -> list[str]:
-    """Translate a preference into ``kscreen-doctor`` arguments.
-
-    Only the built-in panel is touched, the resolution is never changed, and a
-    refresh rate the panel does not offer at the current resolution is skipped
-    rather than approximated.  Returns an empty list when nothing must change.
-    """
-    output = internal_output(document)
-    if output is None or preference.is_noop:
-        return []
-    name = str(output.get("name", ""))
-    if not name:
-        return []
-    arguments: list[str] = []
-    if preference.refresh_hz != REFRESH_UNCHANGED:
-        current = _current_mode(output)
-        candidates = [
-            mode
-            for mode in _modes_at_current_size(output)
-            if abs(_rate(mode) - preference.refresh_hz) <= _REFRESH_TOLERANCE_HZ
-        ]
-        if candidates:
-            target = min(
-                candidates, key=lambda mode: abs(_rate(mode) - preference.refresh_hz)
-            )
-            if current is None or str(target.get("id")) != str(current.get("id")):
-                arguments.append(f"output.{name}.mode.{target.get('id')}")
-        else:
-            log.info(
-                "display: %s offers no %d Hz mode at the current resolution",
-                name,
-                preference.refresh_hz,
-            )
-    color_argument = _COLOR_ARGUMENTS.get(preference.color)
-    if color_argument:
-        # KScreen's JSON does not expose the current trade-off, so this is set
-        # unconditionally; it is idempotent.
-        arguments.append(f"output.{name}.colorPowerTradeoff.{color_argument}")
-    return arguments
-
-
-def _run_kscreen_doctor(arguments: list[str]) -> tuple[int, str]:
-    completed = subprocess.run(  # noqa: S603 - fixed binary, no shell
-        [KSCREEN_DOCTOR, *arguments],
-        capture_output=True,
-        text=True,
-        timeout=KSCREEN_TIMEOUT_SECONDS,
-        check=False,
-    )
-    return completed.returncode, completed.stdout
 
 
 class DisplayPolicy(QObject):
     """Apply display preferences when the power source changes.
 
-    Preferences are applied on the first snapshot after start (so a session
-    that begins on battery gets the battery settings), on every AC/battery
-    transition, and when the user edits them.  They are *not* re-applied on
-    ordinary refreshes, so a manual change in System Settings sticks until the
-    next transition.
+    Preferences are applied on the first power-source reading after start (so
+    a session that begins on battery gets the battery settings), on every
+    AC/battery transition, and when the user edits the active source's
+    preference.  They are *not* re-applied on ordinary refreshes, so a manual
+    change in the desktop's own settings sticks until the next transition.
     """
 
     #: Human-readable outcome of the last apply (for a status line).
     status_changed = Signal(str)
-    #: Refresh rates (Hz) the panel offers at its current resolution.
-    refresh_rates_changed = Signal(object)
+    #: ``DisplayCapabilities`` of the built-in panel, or ``None`` if unreadable.
+    capabilities_changed = Signal(object)
 
     def __init__(
         self,
         *,
         settings: QSettings | None = None,
-        runner: Runner | None = None,
+        backend: DisplayBackend | None = None,
+        backend_factory: Callable[[], DisplayBackend | None] = detect_backend,
         synchronous: bool = False,
+        poll_system_power: bool | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings if settings is not None else open_settings()
-        self._runner = runner
+        self._backend = backend
+        self._backend_factory = backend_factory
+        self._backend_resolved = backend is not None
         self._synchronous = synchronous
         self._last_ac: bool | None = None
         self._lock = threading.Lock()
-        self._refresh_rates: list[int] = []
+        self._capabilities: DisplayCapabilities | None = None
         self._status = ""
+        self._power_timer: QTimer | None = None
+        if poll_system_power is None:
+            poll_system_power = sys.platform == "win32"
+        if poll_system_power and self.available:
+            # No service supplies the AC state on this platform; read it here.
+            self._power_timer = QTimer(self)
+            self._power_timer.setInterval(SYSTEM_POWER_POLL_MS)
+            self._power_timer.timeout.connect(self._poll_system_power)
+            self._power_timer.start()
+            self._poll_system_power()
 
     # -- Introspection --
+
+    @property
+    def backend(self) -> DisplayBackend | None:
+        if not self._backend_resolved:
+            self._backend = self._backend_factory()
+            self._backend_resolved = True
+        return self._backend
 
     @property
     def available(self) -> bool:
         """Return whether display configuration can be driven at all."""
         if os.environ.get(DISABLE_ENV, "").strip() == "1":
             return False
-        return self._runner is not None or shutil.which(KSCREEN_DOCTOR) is not None
+        return self.backend is not None
 
     @property
-    def refresh_rates(self) -> list[int]:
-        return list(self._refresh_rates)
+    def disabled_by_environment(self) -> bool:
+        return os.environ.get(DISABLE_ENV, "").strip() == "1"
+
+    @property
+    def capabilities(self) -> DisplayCapabilities | None:
+        return self._capabilities
 
     @property
     def status(self) -> str:
@@ -286,7 +203,10 @@ class DisplayPolicy(QObject):
 
     def on_snapshot(self, snapshot: SystemSnapshot) -> None:
         """Slot for ``GuiController.snapshot_received``."""
-        ac_online = snapshot.power.ac_online
+        self.on_power_source(snapshot.power.ac_online)
+
+    def on_power_source(self, ac_online: bool | None) -> None:
+        """Apply the matching preference when the power source changes."""
         if ac_online is None or ac_online == self._last_ac:
             return
         self._last_ac = ac_online
@@ -294,13 +214,16 @@ class DisplayPolicy(QObject):
         self._settings.sync()
         self._dispatch(ac_online, load_preference(self._settings, ac_online))
 
-    def query_refresh_rates(self) -> None:
-        """Discover the panel's refresh rates (asynchronously)."""
+    def query_capabilities(self) -> None:
+        """Discover what the panel supports (asynchronously)."""
         if not self.available:
             return
         self._start(self._query_worker)
 
     # -- Workers (off the Qt main thread unless ``synchronous``) --
+
+    def _poll_system_power(self) -> None:
+        self.on_power_source(system_ac_online())
 
     def _dispatch(self, ac_online: bool, preference: DisplayPreference) -> None:
         if not self.available or preference.is_noop:
@@ -313,50 +236,38 @@ class DisplayPolicy(QObject):
             return
         threading.Thread(target=work, name="honor-display-policy", daemon=True).start()
 
-    def _run(self, arguments: list[str]) -> tuple[int, str]:
-        runner = self._runner or _run_kscreen_doctor
-        return runner(arguments)
-
-    def _query_document(self) -> dict[str, Any] | None:
-        try:
-            code, stdout = self._run(["-j"])
-            if code != 0:
-                return None
-            document = json.loads(stdout)
-        except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            log.warning("display: could not query outputs: %s", exc)
-            return None
-        return document if isinstance(document, dict) else None
-
     def _query_worker(self) -> None:
-        with self._lock:
-            document = self._query_document()
-        if document is None:
+        backend = self.backend
+        if backend is None:
             return
-        rates = available_refresh_rates(document)
-        self._refresh_rates = rates
-        self.refresh_rates_changed.emit(rates)
+        with self._lock:
+            try:
+                capabilities = backend.query()
+            except Exception as exc:  # noqa: BLE001 - never let a worker die noisily
+                log.warning("display: capability query failed: %s", exc)
+                capabilities = None
+        self._capabilities = capabilities
+        self.capabilities_changed.emit(capabilities)
 
     def _apply_worker(self, ac_online: bool, preference: DisplayPreference) -> None:
+        backend = self.backend
+        if backend is None:
+            return
         source = "AC" if ac_online else "battery"
         with self._lock:
-            document = self._query_document()
-            if document is None:
+            try:
+                result = backend.apply(preference)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("display: apply failed: %s", exc)
                 self._set_status(f"Display settings for {source} could not be applied")
                 return
-            arguments = build_arguments(document, preference)
-            if not arguments:
-                return
-            try:
-                code, _stdout = self._run(arguments)
-            except (OSError, subprocess.SubprocessError) as exc:
-                log.warning("display: kscreen-doctor failed: %s", exc)
-                code = 1
-        if code == 0:
-            log.info("display: applied %s for %s", " ".join(arguments), source)
+        if not result.ok:
+            detail = f" ({result.message})" if result.message else ""
+            self._set_status(
+                f"Display settings for {source} could not be applied{detail}"
+            )
+        elif result.changed:
             self._set_status(f"Display settings applied for {source}")
-        else:
-            self._set_status(f"Display settings for {source} could not be applied")
 
     def _set_status(self, message: str) -> None:
         self._status = message

@@ -184,6 +184,10 @@ def _style_sheet(t: Theme) -> str:
             background: {t.canvas};
             border-bottom: 1px solid {t.rule};
         }}
+        QFrame#HonorActionBar {{
+            background: {t.canvas};
+            border-top: 1px solid {t.rule};
+        }}
         QLabel#HonorBrand {{
             font-size: 16px;
             font-weight: 600;
