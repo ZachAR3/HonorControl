@@ -24,6 +24,14 @@ from honor_control.core.models import (
     PowerProfileEntry,
     SystemSnapshot,
 )
+from honor_control.frontend.display_policy import (
+    COLOR_ACCURACY,
+    COLOR_EFFICIENCY,
+    COLOR_UNCHANGED,
+    REFRESH_UNCHANGED,
+    DisplayPolicy,
+    DisplayPreference,
+)
 from honor_control.frontend.gui.pages import PageBase
 from honor_control.frontend.gui.widgets import Card, InfoRow
 
@@ -251,6 +259,49 @@ class PowerPage(PageBase):
             self.register_control(widget)
         self.register_pending_control("configure_auto_switch", self.auto_save)
         self.add_widget(automatic)
+
+        display = Card("Display on AC / battery")
+        display_hint = QLabel(
+            "Applied to the built-in screen when the power source changes. "
+            "Saved immediately; stored for your user, not system-wide."
+        )
+        display_hint.setProperty("muted", True)
+        display_hint.setWordWrap(True)
+        display.layout.addWidget(display_hint)
+        display_form_widget = QWidget()
+        display_form = QFormLayout(display_form_widget)
+        display_form.setContentsMargins(0, 0, 0, 0)
+        display_form.setHorizontalSpacing(20)
+        display_form.setVerticalSpacing(0)
+        self._display_policy: DisplayPolicy | None = None
+        self._display_loading = False
+        self.display_refresh: dict[bool, QComboBox] = {}
+        self.display_color: dict[bool, QComboBox] = {}
+        for ac_online, source in ((True, "AC"), (False, "battery")):
+            refresh = QComboBox()
+            refresh.addItem("Don't change", REFRESH_UNCHANGED)
+            color = QComboBox()
+            color.addItem("Don't change", COLOR_UNCHANGED)
+            color.addItem("Prefer color accuracy", COLOR_ACCURACY)
+            color.addItem("Prefer efficiency", COLOR_EFFICIENCY)
+            refresh.currentIndexChanged.connect(
+                lambda _index, value=ac_online: self._save_display(value)
+            )
+            color.currentIndexChanged.connect(
+                lambda _index, value=ac_online: self._save_display(value)
+            )
+            self.display_refresh[ac_online] = refresh
+            self.display_color[ac_online] = color
+            display_form.addRow(f"Refresh rate on {source}", refresh)
+            display_form.addRow(f"Color accuracy on {source}", color)
+        display.layout.addWidget(display_form_widget)
+        self.display_status = QLabel("")
+        self.display_status.setProperty("muted", True)
+        self.display_status.setWordWrap(True)
+        display.layout.addWidget(self.display_status)
+        self._display_form_widget = display_form_widget
+        display_form_widget.setEnabled(False)
+        self.add_widget(display)
 
         telemetry = Card("Telemetry")
         self.temp_row = InfoRow("CPU temperature", "—")
@@ -500,6 +551,58 @@ class PowerPage(PageBase):
             return
         self._profile_selection_dirty = False
         self.refresh()
+
+    # -- Display preferences (local, applied by the session frontend) --
+
+    def set_display_policy(self, policy: DisplayPolicy) -> None:
+        """Attach the session display policy that stores and applies choices."""
+        self._display_policy = policy
+        policy.refresh_rates_changed.connect(self._on_display_rates)
+        policy.status_changed.connect(self.display_status.setText)
+        self._display_form_widget.setEnabled(policy.available)
+        if not policy.available:
+            self.display_status.setText(
+                "Display switching is unavailable: kscreen-doctor was not found."
+            )
+        self._on_display_rates(policy.refresh_rates)
+        policy.query_refresh_rates()
+
+    def _on_display_rates(self, rates: object) -> None:
+        """Rebuild the refresh-rate choices and re-select the saved ones."""
+        policy = self._display_policy
+        if policy is None:
+            return
+        offered = [int(rate) for rate in rates] if isinstance(rates, list) else []
+        self._display_loading = True
+        try:
+            for ac_online, combo in self.display_refresh.items():
+                preference = policy.preference(ac_online)
+                choices = sorted(
+                    set(offered)
+                    | ({preference.refresh_hz} - {REFRESH_UNCHANGED})
+                )
+                combo.clear()
+                combo.addItem("Don't change", REFRESH_UNCHANGED)
+                for rate in choices:
+                    combo.addItem(f"{rate} Hz", rate)
+                self._select_data(combo, preference.refresh_hz)
+                self._select_data(self.display_color[ac_online], preference.color)
+        finally:
+            self._display_loading = False
+
+    def _save_display(self, ac_online: bool) -> None:
+        policy = self._display_policy
+        if policy is None or self._display_loading:
+            return
+        policy.set_preference(
+            ac_online,
+            DisplayPreference(
+                refresh_hz=int(
+                    self.display_refresh[ac_online].currentData() or REFRESH_UNCHANGED
+                ),
+                color=str(self.display_color[ac_online].currentData() or ""),
+            ),
+        )
 
     def _mark_auto_dirty(self, *_args) -> None:
         if not self._loading:

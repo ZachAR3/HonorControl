@@ -109,6 +109,12 @@ class MainWindow(QMainWindow):
             quit_application=self.quit_application,
         )
 
+        power_page = next(
+            (page for page in self._pages if isinstance(page, PowerPage)), None
+        )
+        if power_page is not None:
+            power_page.set_display_policy(self.tray.display_policy)
+
         settings_page = next(
             (page for page in self._pages if isinstance(page, SettingsPage)), None
         )

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from honor_control import __version__
 from honor_control.core.models import POWER_PROFILES, SystemSnapshot
+from honor_control.frontend.display_policy import DisplayPolicy
 from honor_control.frontend.gui.controller import GuiController
 from honor_control.frontend.single_instance import (
     FRONTEND_LOCK_NAME,
@@ -78,6 +79,11 @@ class HonorTray(QObject):
         self._build_menu()
         self.tray.activated.connect(self._on_activated)
         self.controller.snapshot_received.connect(self._on_snapshot)
+        # The tray is the session-side agent that is always running (alone or
+        # embedded in the main window), so it owns the AC/battery display
+        # preferences.
+        self.display_policy = DisplayPolicy(parent=self)
+        self.controller.snapshot_received.connect(self.display_policy.on_snapshot)
         self.controller.connection_changed.connect(self._set_online)
         self.controller.error.connect(self._on_error)
         self.controller.operation_completed.connect(self._on_operation)

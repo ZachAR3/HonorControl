@@ -34,6 +34,16 @@
   `ZachAR3/HonorControl`) in the systemd unit and polkit policy, and simplified
   the README to the supported platform, install, usage, and development basics.
 
+### Added
+
+- Display preferences per power source. The Power page has a "Display on AC /
+  battery" card to pick a refresh rate and KWin's colour accuracy/efficiency
+  trade-off for each source. The session frontend (tray or window) applies
+  them to the built-in panel through `kscreen-doctor` on the first snapshot
+  and on every AC/battery transition; the root service is not involved, and
+  the resolution is never changed. Set
+  `HONOR_CONTROL_DISABLE_DISPLAY_POLICY=1` to switch this off.
+
 ### Performance
 
 - Polling is foreground-aware. A visible, focused window holds a short

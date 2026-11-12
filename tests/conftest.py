@@ -17,3 +17,5 @@ def isolate_touchpad_safety_files(
         "HONOR_CONTROL_TOUCHPAD_LOCK",
         str(tmp_path / "touchpad.lock"),
     )
+    # GUI/tray tests must never reconfigure the developer's real displays.
+    monkeypatch.setenv("HONOR_CONTROL_DISABLE_DISPLAY_POLICY", "1")
