@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QSlider,
 )
 
-from honor_control.core.models import POWER_PROFILES, SystemSnapshot
+from honor_control.core.models import POWER_PROFILES, FanMode, SystemSnapshot
 from honor_control.frontend.gui.pages import PageBase, PendingChange
 from honor_control.frontend.gui.widgets import Card, ToggleSwitch
 
@@ -225,9 +225,7 @@ class DashboardPage(PageBase):
 
         mode = str(snap.fan.mode).replace("_", " ").title()
         self.cooling_value.setText(mode or "Unknown")
-        self.cooling_sub.setText(
-            "Firmware curve" if snap.fan.available else "Fan controls unavailable"
-        )
+        self.cooling_sub.setText(self._cooling_detail(snap))
 
         gestures = snap.gestures
         running = gestures.daemon_running
@@ -238,6 +236,20 @@ class DashboardPage(PageBase):
         )
         self.gesture_toggle.setChecked(gestures.daemon_enabled)
         self.notify_changes()
+
+    @staticmethod
+    def _cooling_detail(snap: SystemSnapshot) -> str:
+        fan = snap.fan
+        if not fan.available:
+            return "Fan controls unavailable"
+        if fan.mode == FanMode.CURVE:
+            return "Custom curve"
+        if fan.mode == FanMode.MANUAL_OVERRIDE:
+            speed = f" at {fan.target_speed} %" if fan.target_speed is not None else ""
+            return f"Manual speed{speed}"
+        if fan.mode == FanMode.FAILED_SAFE:
+            return "Fail-safe: fans forced on"
+        return "Firmware curve"
 
     def _on_profile_selection_changed(self, *_args) -> None:
         self._profile_selection_dirty = True

@@ -400,3 +400,25 @@ class TestPowerStaging:
             page = _page(window, name)
             for attr in attrs:
                 assert not hasattr(page, attr), f"{name}.{attr} should be gone"
+
+
+class TestOverviewCooling:
+    @pytest.mark.parametrize(
+        ("mode", "speed", "expected"),
+        [
+            (FanMode.STOCK, None, "Firmware curve"),
+            (FanMode.CURVE, None, "Custom curve"),
+            (FanMode.MANUAL_OVERRIDE, 60, "Manual speed at 60 %"),
+            (FanMode.FAILED_SAFE, None, "Fail-safe: fans forced on"),
+        ],
+    )
+    def test_detail_follows_the_active_fan_mode(
+        self, window, mode, speed, expected
+    ) -> None:
+        window.state.set_snapshot(
+            _snapshot(
+                sequence=2,
+                fan=FanSnapshot(available=True, mode=mode, target_speed=speed),
+            )
+        )
+        assert _page(window, "Dashboard").cooling_sub.text() == expected

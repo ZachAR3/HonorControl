@@ -50,6 +50,8 @@
 
 ### Changed
 
+- The Touchpad page no longer has a "Check supported gestures" button: this
+  touchpad's firmware does not answer that query. `honorctl` keeps the command.
 - Touchpad page: each gesture is now one entry with a single **Enabled**
   switch (firmware setting and desktop shortcut together) and its key
   combination, which can be typed or captured with a new **Record** button.
@@ -80,6 +82,8 @@
 
 ### Fixed
 
+- Overview: the Cooling card now shows the active fan mode (Firmware curve,
+  Custom curve, Manual speed) instead of always saying "Firmware curve".
 - Fan page: polling no longer reverts a staged mode (for example choosing
   Stock auto while a custom curve is active) before Apply is pressed.
 - "Check supported gestures" no longer reports an internal error when the

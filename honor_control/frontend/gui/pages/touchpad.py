@@ -386,7 +386,6 @@ class TouchpadPage(PageBase):
         self._firmware_draft: dict[str, int] = {}
         self._firmware_dirty = False
         self._firmware_pending = False
-        self._support_pending = False
 
         self._build_status()
         self._build_behavior()
@@ -407,20 +406,12 @@ class TouchpadPage(PageBase):
         self.firmware_summary.setStyleSheet("font-weight: 600;")
         headline.addWidget(self.firmware_summary)
         headline.addStretch(1)
-        self.support_button = QPushButton("Check supported gestures")
-        self.support_button.clicked.connect(
-            lambda: self.intent.emit("query_touchpad_support", ())
-        )
-        self.register_control(self.support_button)
-        headline.addWidget(self.support_button)
         status.layout.addLayout(headline)
 
         self.device_row = InfoRow("Validated HID endpoint", "—")
         self.master_row = InfoRow("WMI master switch", "—")
-        self.support_row = InfoRow("Capability query", "Not run")
         status.layout.addWidget(self.device_row)
         self.master_row.setVisible(False)
-        self.support_row.setVisible(False)
         self.add_widget(status)
 
     def _build_behavior(self) -> None:
@@ -557,7 +548,6 @@ class TouchpadPage(PageBase):
         can_edit = self.state.connected and supported and not self._firmware_pending
         for row in self._firmware_rows.values():
             row.combo.setEnabled(can_edit)
-        self.support_button.setEnabled(can_edit and not self._support_pending)
 
     def _toggle_daemon(self) -> None:
         snap = self.state.snapshot
@@ -568,11 +558,6 @@ class TouchpadPage(PageBase):
         if operation_id.startswith("apply_touchpad_settings:"):
             self._firmware_pending = True
             self._update_firmware_actions()
-        elif operation_id.startswith("query_touchpad_support"):
-            self._support_pending = True
-            self._update_firmware_actions()
-            self.support_row.set_value("Querying…")
-            self.support_row.setVisible(True)
 
     def _on_operation_completed(self, operation_id: str, result: object) -> None:
         if operation_id.startswith("apply_touchpad_settings:"):
@@ -581,20 +566,6 @@ class TouchpadPage(PageBase):
                 self._firmware_dirty = False
             self._update_firmware_actions()
             self.notify_changes()
-        elif operation_id.startswith("query_touchpad_support"):
-            self._support_pending = False
-            self._update_firmware_actions()
-            if isinstance(result, dict):
-                bits = result.get("supported_bits", [])
-                known = result.get("known", {})
-                self.support_row.set_value(
-                    f"{len(bits)} bits · {len(known)} recognized"
-                )
-            else:
-                self.support_row.set_value(
-                    "The touchpad firmware did not answer; its settings can "
-                    "still be applied"
-                )
 
     def _on_snapshot(self, snap: SystemSnapshot) -> None:
         ges = snap.gestures
