@@ -61,6 +61,55 @@ def test_probe_reports_complete_environment(tmp_path: pathlib.Path) -> None:
     assert result.uinput_found is True
 
 
+def test_probe_marks_unreadable_hidraw_as_permission_denied(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    sysfs, dev = _make_hidraw_tree(tmp_path)
+    monkeypatch.setattr(os, "access", lambda path, mode: path != dev / "hidraw7")
+
+    result = probe_gesture_environment(sysfs_root=sysfs, dev_root=dev)
+
+    assert result.available is False
+    assert result.permission_denied is True
+
+
+def test_run_session_closes_fds_when_reader_registration_fails(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    sysfs, dev = _make_hidraw_tree(tmp_path)
+    runtime = GestureRuntime(lambda: {}, sysfs_root=sysfs, dev_root=dev)
+    closed: list[int] = []
+
+    monkeypatch.setattr(
+        "honor_control.backend.gesture_runtime.os.open",
+        lambda path, *_args: 41 if str(path).endswith("hidraw7") else 42,
+    )
+    monkeypatch.setattr(
+        "honor_control.backend.gesture_runtime.os.close", closed.append
+    )
+    monkeypatch.setattr(
+        "honor_control.backend.gesture_runtime.create_uinput_device",
+        lambda *_args, **_kwargs: 42,
+    )
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(
+            loop, "add_reader", lambda *_args: (_ for _ in ()).throw(OSError("no fd"))
+        )
+        monkeypatch.setattr(loop, "remove_reader", lambda *_args: None)
+        with pytest.raises(OSError, match="no fd"):
+            await runtime._run_session()  # noqa: SLF001
+
+    asyncio.run(exercise())
+    # asyncio.run closes its own selector pipe after the coroutine returns;
+    # the final two closes are the runtime descriptors.
+    assert closed[-2:] == [42, 41]
+    assert runtime._hid_fd is None  # noqa: SLF001
+    assert runtime._uinput_fd is None  # noqa: SLF001
+    assert runtime._session_done is None  # noqa: SLF001
+
+
 def test_report_parser_rejects_non_vendor_reports() -> None:
     valid = b"\x0e\x03\x01\x00\x00\x00\x00\x00\x00"
     assert gesture_keys_from_report(valid) == ("3:1", "3")

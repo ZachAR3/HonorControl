@@ -1,5 +1,9 @@
 # Language-neutral Linux porting specification
 
+This document specifies the recovered protocol and its Linux transport. For
+the separate Windows application architecture, native API work, packaging, and
+validation roadmap, see [Windows support plan](../../WINDOWS_SUPPORT_PLAN.md).
+
 This is the complete contract needed to reimplement every recovered Honor
 touchpad configuration operation without the Windows Honor application.
 `touchpad.json` is the machine-readable source of truth; this document adds

@@ -43,6 +43,13 @@ dmesg | tail -n 30
 find /sys/bus/wmi/devices -path '*ABBC0F5B*/touchpad_enabled' -print
 ```
 
+The compiler must match the target kernel. If the kernel was built with an
+LLVM toolchain, pass `LLVM=1` to both module builds, for example `make
+LLVM=1` and `sudo make LLVM=1 install`. The current analysis host required
+that setting; a successful compile still does not qualify loading or hardware
+access. DKMS builds need the equivalent toolchain setting in their local DKMS
+configuration.
+
 ## DKMS installation
 
 If DKMS is installed, the included `dkms.conf` can rebuild the module after a

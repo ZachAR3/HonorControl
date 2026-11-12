@@ -6,7 +6,6 @@ import argparse
 import json
 import pathlib
 import sys
-import tomllib
 
 from honor_control.backend.touchpad_firmware import (
     TouchpadFirmwareError,
@@ -21,8 +20,8 @@ from honor_control.core.touchpad import (
     parse_touchpad_setting,
     parse_touchpad_value,
     touchpad_firmware_lock,
-    touchpad_firmware_writes_qualified,
 )
+from honor_control.core.touchpad_profile import load_touchpad_profile as _load_profile
 
 WMI_GUID = "ABBC0F5B-8EA1-11D1-A000-C90629100000"
 MASTER_DISABLE_COMMAND = 0x00001002
@@ -91,45 +90,6 @@ def _set_master(attribute: pathlib.Path, enabled: bool) -> bool:
     return observed
 
 
-def _load_profile(
-    path: pathlib.Path,
-) -> tuple[dict[TouchpadSetting, int], bool | None]:
-    """Load and fully validate the narrow touchpad TOML schema."""
-    with path.open("rb") as stream:
-        document = tomllib.load(stream)
-    unknown_tables = sorted(set(document) - {"settings", "master"})
-    if unknown_tables:
-        raise ValueError(f"unknown profile table(s): {', '.join(unknown_tables)}")
-
-    raw_settings = document.get("settings", {})
-    if not isinstance(raw_settings, dict):
-        raise ValueError("[settings] must be a TOML table")
-    settings: dict[TouchpadSetting, int] = {}
-    for name, raw_value in raw_settings.items():
-        canonical = parse_touchpad_setting(name)
-        if canonical in settings:
-            raise ValueError(f"duplicate touchpad setting {canonical.value!r}")
-        if not isinstance(raw_value, (str, int, bool)):
-            raise ValueError(f"{name} must be a string, integer, or boolean")
-        settings[canonical] = parse_touchpad_value(canonical, raw_value)
-
-    master: bool | None = None
-    if "master" in document:
-        raw_master = document["master"]
-        if not isinstance(raw_master, dict):
-            raise ValueError("[master] must be a TOML table")
-        unknown_master = sorted(set(raw_master) - {"enabled"})
-        if unknown_master:
-            raise ValueError(f"unknown [master] key(s): {', '.join(unknown_master)}")
-        if "enabled" not in raw_master or not isinstance(raw_master["enabled"], bool):
-            raise ValueError("[master].enabled must be true or false")
-        master = raw_master["enabled"]
-
-    if not settings and master is None:
-        raise ValueError("profile contains neither [settings] values nor [master]")
-    return settings, master
-
-
 def _encoded_profile_payload(
     settings: dict[TouchpadSetting, int],
     master: bool | None,
@@ -166,12 +126,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
-    parser.add_argument(
-        "--allow-unqualified",
-        action="store_true",
-        help="allow a diagnostic firmware write before qualification; the "
-        "exclusive device lock remains enforced",
-    )
     parser.add_argument(
         "--sysfs-root",
         type=pathlib.Path,
@@ -453,20 +407,6 @@ def main(argv: list[str] | None = None) -> int:
         args.command == "master" and getattr(args, "value", None) is not None
     )
     needs_lock = write_command or args.command == "support"
-    # HC-001: firmware setting writes are disabled until qualified. The
-    # diagnostic override deliberately does not bypass serialization.
-    if (
-        write_command
-        and not args.allow_unqualified
-        and not touchpad_firmware_writes_qualified()
-    ):
-        print(
-            "honor-touchpadctl: firmware setting writes are not qualified on "
-            "this build (probe/list/encode/support remain available). Use "
-            "--allow-unqualified for a supervised diagnostic replay.",
-            file=sys.stderr,
-        )
-        return EXIT_UNAVAILABLE
     # HC-011: write/support commands take an exclusive inter-process lock so a
     # standalone run cannot interleave with honor-control.service.  Read-only
     # probe/list/encode skip it.

@@ -48,6 +48,7 @@ from honor_control.core.models import (
     PlatformInfo,
     PowerSnapshot,
 )
+from honor_control.core.validation import MIN_HYSTERESIS
 
 log = logging.getLogger("honor_control.backend.hardware")
 
@@ -1164,22 +1165,52 @@ class HonorToolsAdapter:
             return BatterySnapshot(available=False, last_error=str(exc))
 
     def write_battery_thresholds(self, end: int, start: int) -> dict[str, Any]:
+        # Re-discover the supply immediately before a write.  Battery devices
+        # can disappear/reappear (or be renamed) after the capability probe;
+        # writing through a stale path is both ineffective and unsafe.
+        self._refresh_discovery()
         if self._battery_path is None:
             return {"end_write_ok": False, "start_write_ok": False}
         try:
             end_path = self._battery_path / "charge_control_end_threshold"
             start_path = self._battery_path / "charge_control_start_threshold"
+            old_end = self._read_int(end_path)
             old_start = self._read_int(start_path)
-            # Preserve the kernel invariant during transitions. For example,
-            # moving 90/85 -> 60/55 must lower start before end.
-            if old_start is not None and end < old_start:
+
+            # Preserve the driver's hysteresis invariant at the intermediate
+            # step as well as at the final state.  Comparing only the new end
+            # with the old start is insufficient: 90/85 -> 88/80 must lower
+            # ``start`` first even though the new end remains above 85.
+            end_first_safe = (
+                old_end is not None
+                and old_start is not None
+                and end - old_start >= MIN_HYSTERESIS
+            )
+            start_first_safe = (
+                old_end is not None
+                and old_start is not None
+                and old_end - start >= MIN_HYSTERESIS
+            )
+            if end_first_safe:
+                end_ok = self._write_int(end_path, end)
+                start_ok = self._write_int(start_path, start) if end_ok else False
+                write_order = ("end", "start")
+            elif start_first_safe:
                 start_ok = self._write_int(start_path, start)
                 end_ok = self._write_int(end_path, end) if start_ok else False
                 write_order = ("start", "end")
             else:
-                end_ok = self._write_int(end_path, end)
-                start_ok = self._write_int(start_path, start) if end_ok else False
-                write_order = ("end", "start")
+                # If either current threshold cannot be read, neither order
+                # can be proven safe.  Fail closed without issuing a partial
+                # write; the next capability/read cycle can retry once both
+                # values are available.
+                return {
+                    "end_write_ok": False,
+                    "start_write_ok": False,
+                    "readback_ok": False,
+                    "write_order": (),
+                    "error": "Current battery thresholds are unreadable or unsafe",
+                }
             result = {"end_write_ok": end_ok, "start_write_ok": start_ok}
             result["write_order"] = write_order
             observed_end = (
@@ -1421,16 +1452,6 @@ class HonorToolsAdapter:
                     for filename in _RAPL_LIMIT_FILES
                 }
 
-            writes["governors"] = {
-                index: (
-                    index in cpu_dirs
-                    and bool(value)
-                    and self._write_text_verified(
-                        cpu_dirs[index] / "cpufreq/scaling_governor", value
-                    )
-                )
-                for index, value in previous.get("governors", {}).items()
-            }
             writes["epp"] = {
                 index: (
                     index in cpu_dirs
@@ -1441,6 +1462,21 @@ class HonorToolsAdapter:
                     )
                 )
                 for index, value in previous.get("epp", {}).items()
+            }
+            # Restore EPP while every policy is still in powersave.  Intel
+            # P-State can reject EPP writes once a policy is switched back to
+            # the performance governor; the previous implementation restored
+            # governors first and could therefore leave a mixed state during
+            # rollback.
+            writes["governors"] = {
+                index: (
+                    index in cpu_dirs
+                    and bool(value)
+                    and self._write_text_verified(
+                        cpu_dirs[index] / "cpufreq/scaling_governor", value
+                    )
+                )
+                for index, value in previous.get("governors", {}).items()
             }
             writes["misc"] = {
                 "no_turbo": (

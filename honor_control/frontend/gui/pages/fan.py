@@ -113,6 +113,7 @@ class FanPage(PageBase):
         self.register_control(self.rb_manual)
         self.register_control(self.manual_slider)
         self.register_pending_control("set_manual", self.manual_apply)
+        self.register_pending_control("set_stock_auto", self.rb_auto)
         self.add_widget(mode_card)
 
         # Curve editor (visible only in custom mode)

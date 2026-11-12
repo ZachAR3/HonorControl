@@ -144,8 +144,8 @@ Apply one reversible HID setting:
 
 ```bash
 sudo systemctl stop honor-control.service 2>/dev/null || true
-sudo honor-touchpadctl --allow-unqualified set edge_brightness off
-sudo honor-touchpadctl --allow-unqualified set edge_brightness on
+sudo honor-touchpadctl set edge_brightness off
+sudo honor-touchpadctl set edge_brightness on
 # Restart honor-control.service afterward if it was previously running.
 ```
 

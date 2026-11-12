@@ -17,8 +17,8 @@
 # file in DIR; every listed artifact is verified with sha256sum -c before
 # anything is installed.
 #
-# Touchpad firmware WRITES are disabled by default (unqualified). The
-# automatic honor-touchpad-restore.service unit is neither installed nor
+# Automatic touchpad profile restore is opt-in. Explicit writes still use
+# device validation and locking. The restore unit is neither installed nor
 # enabled unless --enable-touchpad-firmware (or
 # HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1) is set.
 set -euo pipefail
@@ -26,6 +26,8 @@ set -euo pipefail
 DEV_MODE=false
 ROLLBACK=false
 TOUCHPAD_FIRMWARE=false
+# Legacy option and marker names are retained for installer compatibility.
+# They opt into automatic restore; the runtime no longer reads qualification.
 if [[ "${HONOR_TOUCHPAD_FIRMWARE_QUALIFIED:-0}" == "1" ]]; then
     TOUCHPAD_FIRMWARE=true
 fi
@@ -284,6 +286,7 @@ for script in honor-control-service honorctl honor-control-gui honor-control-tra
 done
 
 assert_replaceable "$ROOT/packaging/touchpad/honor-touchpadctl" /usr/bin/honor-touchpadctl
+assert_replaceable "$ROOT/honor_control/core/touchpad_profile.py" /usr/lib/honor-touchpad/honor_control/core/touchpad_profile.py
 assert_replaceable "$ROOT/packaging/systemd/honor-control.service" /etc/systemd/system/honor-control.service
 assert_replaceable "$ROOT/packaging/modules-load.d/honor-control.conf" /usr/lib/modules-load.d/honor-control.conf
 assert_replaceable "$ROOT/packaging/dbus/org.honorlinux.Control1.conf" /usr/share/dbus-1/system.d/org.honorlinux.Control1.conf
@@ -381,6 +384,7 @@ install -d -m755 /usr/lib/honor-touchpad/honor_control/{core,backend,cli}
 install_managed "$ROOT/honor_control/__init__.py" /usr/lib/honor-touchpad/honor_control/__init__.py 0644
 install_managed "$ROOT/honor_control/core/__init__.py" /usr/lib/honor-touchpad/honor_control/core/__init__.py 0644
 install_managed "$ROOT/honor_control/core/touchpad.py" /usr/lib/honor-touchpad/honor_control/core/touchpad.py 0644
+install_managed "$ROOT/honor_control/core/touchpad_profile.py" /usr/lib/honor-touchpad/honor_control/core/touchpad_profile.py 0644
 install_managed "$ROOT/honor_control/backend/__init__.py" /usr/lib/honor-touchpad/honor_control/backend/__init__.py 0644
 install_managed "$ROOT/honor_control/backend/touchpad_firmware.py" /usr/lib/honor-touchpad/honor_control/backend/touchpad_firmware.py 0644
 install_managed "$ROOT/honor_control/cli/__init__.py" /usr/lib/honor-touchpad/honor_control/cli/__init__.py 0644
@@ -405,11 +409,11 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications 2>/dev/null || true
 fi
 if $TOUCHPAD_FIRMWARE; then
-    echo "==> Touchpad firmware writes QUALIFIED: enabling honor-touchpad-restore.service"
+    echo "==> Automatic touchpad restore opted in: enabling honor-touchpad-restore.service"
     systemctl enable honor-touchpad-restore.service 2>/dev/null || true
 else
-    # Firmware writes are unqualified by default: never leave the automatic
-    # restore unit enabled (also covers upgrades from a qualified install).
+    # Automatic restore is opt-in: disable it when this install does not opt
+    # in (including upgrades from an installation with restore enabled).
     systemctl disable --now honor-touchpad-restore.service 2>/dev/null || true
 fi
 for module in acpi_call uinput; do

@@ -101,6 +101,10 @@ def probe_gesture_environment(
     uinput = dev_root / "uinput"
     device_readable = os.access(device, os.R_OK)
     uinput_writable = uinput.exists() and os.access(uinput, os.W_OK)
+    # Keep permission diagnostics independent of module availability.  A
+    # readable hidraw device with a missing uinput node is an availability
+    # problem; an unreadable hidraw node is also an explicit permission
+    # failure even when uinput has not been created yet.
     denied = not device_readable or (uinput.exists() and not uinput_writable)
     if not uinput.exists():
         error = "/dev/uinput not found; load the uinput kernel module"
@@ -318,14 +322,22 @@ class GestureRuntime:
 
         loop = asyncio.get_running_loop()
         self._session_done = loop.create_future()
-        loop.add_reader(self._hid_fd, self._read_ready)
-        self._status = replace(
-            self._status,
-            running=True,
-            permission_denied=False,
-            uinput_ready=True,
-            last_error="",
-        )
+        try:
+            # ``add_reader`` can fail even after both descriptors were opened
+            # (for example on an event loop implementation without fd
+            # watchers).  Close both descriptors on that path so reconnect
+            # attempts do not leak one pair per failure.
+            loop.add_reader(self._hid_fd, self._read_ready)
+            self._status = replace(
+                self._status,
+                running=True,
+                permission_denied=False,
+                uinput_ready=True,
+                last_error="",
+            )
+        except BaseException:
+            self._close_session()
+            raise
         log.info("gesture runtime reading %s", device)
         try:
             await self._session_done

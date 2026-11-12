@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+import tomllib
 
 ROOT = pathlib.Path(__file__).parent.parent
 INSTALL = ROOT / "scripts/install-local.sh"
@@ -87,14 +88,30 @@ def test_rollback_restores_system_files_and_reverts_on_failure() -> None:
     assert "restore_files" in source
     assert "restore_current" in source
     assert "rollback failed; restoring the original release" in source
+    assert "/usr/lib/honor-touchpad/honor_control/core/touchpad_profile.py" in source
 
 
-def test_touchpad_installers_persist_qualification() -> None:
+def test_touchpad_installers_preserve_legacy_restore_opt_in() -> None:
     full = INSTALL.read_text(encoding="utf-8")
     touchpad = INSTALL_TOUCHPAD.read_text(encoding="utf-8")
     for source in (full, touchpad):
         assert "--enable-touchpad-firmware" in source
         assert "/etc/honor-control/touchpad-firmware-qualified" in source
+
+
+def test_touchpad_only_install_includes_profile_loader_dependency() -> None:
+    touchpad_source = INSTALL_TOUCHPAD.read_text(encoding="utf-8")
+    full_source = INSTALL.read_text(encoding="utf-8")
+    assert (
+        'core/touchpad_profile.py" "$DEST/core/touchpad_profile.py"'
+        in touchpad_source
+    )
+    assert (
+        'core/touchpad_profile.py" /usr/lib/honor-touchpad/'
+        "honor_control/core/touchpad_profile.py"
+        in full_source
+    )
+    assert full_source.count("core/touchpad_profile.py") >= 2
 
 
 def test_privileged_touchpad_wrapper_uses_isolated_trusted_imports() -> None:
@@ -156,3 +173,14 @@ def test_installer_provisions_required_modules_and_tray_autostart() -> None:
     )
     assert "acpi_call" in modules
     assert "uinput" in modules
+
+
+def test_linux_dbus_dependency_is_not_required_on_windows() -> None:
+    """The shared package metadata must remain installable before a Windows port."""
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)["project"]
+    dependencies = project["dependencies"]
+    assert any(
+        dependency == "sdbus==0.14.2; sys_platform == 'linux'"
+        for dependency in dependencies
+    )

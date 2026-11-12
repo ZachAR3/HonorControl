@@ -20,6 +20,7 @@ from honor_control.backend.supervisor import RuntimeSupervisor
 from honor_control.backend.touchpad_firmware import (
     TouchpadApplyResult,
     TouchpadFirmwareError,
+    TouchpadFirmwareProbe,
 )
 from honor_control.core.errors import DomainException
 from honor_control.core.models import (
@@ -204,9 +205,8 @@ class TestTouchpadFirmwareMutation:
     """Verify typed touchpad writes and desired-state persistence."""
 
     def test_apply_profile_persists_only_after_acceptance(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ) -> None:
-        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
 
@@ -223,8 +223,7 @@ class TestTouchpadFirmwareMutation:
             "three_finger_drag": 1,
         }
 
-    def test_invalid_profile_never_reaches_hardware(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
+    def test_invalid_profile_never_reaches_hardware(self, tmp_path) -> None:
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
         before = len(
@@ -259,7 +258,6 @@ class TestTouchpadFirmwareMutation:
     def test_partial_profile_persists_only_completed_settings(
         self, tmp_path, monkeypatch
     ) -> None:
-        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
         completed = TouchpadApplyResult(
@@ -289,37 +287,41 @@ class TestTouchpadFirmwareMutation:
         assert result.persisted is True
         assert svc.config_store.state.touchpad.settings == {"sensitivity": 1}
 
-    def test_firmware_writes_gated_unqualified_by_default(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """HC-001: unqualified builds refuse writes but keep probe available."""
-        monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
-        svc = _make_service(tmp_path)
-        asyncio.run(svc.initialize())
-
-        result = asyncio.run(svc.apply_touchpad_settings({"sensitivity": 1}))
-        assert result.status == OperationStatus.UNAVAILABLE
-        assert result.code == "touchpad_firmware_unqualified"
-        assert not [
-            entry
-            for entry in svc._hw.call_log  # noqa: SLF001
-            if entry[0] == "apply_touchpad_settings"
-        ]
-        probe = asyncio.run(svc.probe_touchpad_firmware())
-        assert probe["firmware_writes_qualified"] is False
-
-    def test_firmware_writes_enabled_by_qualification_flag(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """HC-001: the qualification flag re-enables the (gated) write path."""
-        monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
+    def test_firmware_writes_follow_probe_capability(self, tmp_path) -> None:
+        """A verified endpoint, rather than an environment flag, permits writes."""
         svc = _make_service(tmp_path)
         asyncio.run(svc.initialize())
 
         probe = asyncio.run(svc.probe_touchpad_firmware())
-        assert probe["firmware_writes_qualified"] is True
+        assert probe["available"] is True
+        assert probe["platform_verified"] is True
+        assert "firmware_writes_qualified" not in probe
         result = asyncio.run(svc.apply_touchpad_settings({"sensitivity": 1}))
         assert result.status == OperationStatus.SUCCESS
+        assert result.applied is True
+
+    def test_firmware_writes_refuse_when_probe_unavailable(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        svc = _make_service(tmp_path)
+        asyncio.run(svc.initialize())
+
+        monkeypatch.setattr(
+            svc._hw,  # noqa: SLF001
+            "probe_touchpad_firmware",
+            lambda: TouchpadFirmwareProbe(
+                available=False,
+                device_found=True,
+                error="descriptor mismatch",
+            ),
+        )
+        result = asyncio.run(svc.apply_touchpad_settings({"sensitivity": 1}))
+        assert result.status == OperationStatus.UNAVAILABLE
+        assert result.code == "touchpad_firmware_unavailable"
+        assert not any(
+            name == "apply_touchpad_settings"
+            for name, _args, _kwargs in svc._hw.call_log  # noqa: SLF001
+        )
 
 
 class TestPowerMutation:
@@ -1048,6 +1050,58 @@ class TestFanMutation:
 
         asyncio.run(scenario())
 
+    def test_explicit_stock_auto_timeout_reserves_recovery(self, tmp_path, monkeypatch) -> None:
+        import time
+
+        svc = _make_service(tmp_path)
+
+        async def scenario() -> None:
+            await svc.initialize()
+            hardware = svc._hw  # noqa: SLF001
+            original_auto = hardware.set_fan_auto
+            original_run = svc.queue.run
+            calls = 0
+
+            def delayed_first_auto() -> bool:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    time.sleep(0.08)
+                return original_auto()
+
+            async def short_fan_timeout(
+                name,
+                func,
+                *args,
+                timeout=10.0,
+                timeout_recovery=None,
+            ):
+                if name == "fan_auto":
+                    timeout = 0.01
+                return await original_run(
+                    name,
+                    func,
+                    *args,
+                    timeout=timeout,
+                    timeout_recovery=timeout_recovery,
+                )
+
+            monkeypatch.setattr(hardware, "set_fan_auto", delayed_first_auto)
+            monkeypatch.setattr(svc.queue, "run", short_fan_timeout)
+
+            result = await svc.set_fan_stock_auto()
+
+            assert result.status == OperationStatus.PARTIAL
+            assert result.code == "fan_auto_restore_pending"
+            recovery = svc._fan_restore_task  # noqa: SLF001
+            assert recovery is not None
+            assert await asyncio.wait_for(asyncio.shield(recovery), timeout=1)
+            assert calls == 2
+            assert hardware._fan_mode == FanMode.STOCK  # noqa: SLF001
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+
     def test_manual_apply_and_restore_failure_publish_failed_safe(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1241,6 +1295,59 @@ class TestDiagnostics:
             asyncio.run(svc.get_recent_logs(0))
         with pytest.raises(DomainException):
             asyncio.run(svc.get_recent_logs(501))
+
+    def test_get_recent_logs_cancellation_reaps_helper(self, tmp_path, monkeypatch) -> None:
+        svc = _make_service(tmp_path)
+        killed: list[tuple[int, int]] = []
+
+        class PendingProcess:
+            pid = 4243
+            returncode: int | None = None
+
+            def __init__(self) -> None:
+                self.finished = asyncio.Event()
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                await self.finished.wait()
+                return b"", b""
+
+            async def wait(self) -> int:
+                await self.finished.wait()
+                return self.returncode or 0
+
+            def kill(self) -> None:
+                self.returncode = -9
+                self.finished.set()
+
+        process = PendingProcess()
+
+        async def create_process(*_args, **_kwargs):
+            return process
+
+        def kill_process_group(pid: int, sig: int) -> None:
+            killed.append((pid, sig))
+            process.returncode = -sig
+            process.finished.set()
+
+        monkeypatch.setattr(
+            "honor_control.backend.application.asyncio.create_subprocess_exec",
+            create_process,
+        )
+        monkeypatch.setattr(
+            "honor_control.backend.application.os.killpg", kill_process_group
+        )
+
+        async def scenario() -> None:
+            task = asyncio.create_task(svc.get_recent_logs(1))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await svc.shutdown()
+
+        asyncio.run(scenario())
+        assert killed == [(process.pid, 9)]
+        assert process.returncode == -9
 
 
 class TestReload:

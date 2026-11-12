@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import math
 import os
 import pathlib
 import select
@@ -143,6 +144,8 @@ def parse_vendor_collection_descriptor(descriptor: bytes) -> VendorCollectionCap
     local_usages: list[int] = []
     input_bits: dict[int, int] = {}
     output_bits: dict[int, int] = {}
+    total_input_bits: dict[int, int] = {}
+    total_output_bits: dict[int, int] = {}
     found = False
     position = 0
 
@@ -204,22 +207,30 @@ def parse_vendor_collection_descriptor(descriptor: bytes) -> VendorCollectionCap
             ):
                 found = True
         elif tag == 0xC:  # End Collection
-            if collections:
-                collections.pop()
+            if not collections:
+                raise ValueError("HID End Collection without Collection")
+            collections.pop()
         elif tag in (0x8, 0x9):  # Input / Output
+            report_id = globals_["report_id"]
+            bits = globals_["report_size"] * globals_["report_count"]
+            totals = total_input_bits if tag == 0x8 else total_output_bits
+            totals[report_id] = totals.get(report_id, 0) + bits
             in_vendor_collection = (
                 TOUCHPAD_VENDOR_USAGE_PAGE,
                 TOUCHPAD_VENDOR_USAGE,
                 0x01,
             ) in collections
             if in_vendor_collection:
-                report_id = globals_["report_id"]
-                bits = globals_["report_size"] * globals_["report_count"]
                 target = input_bits if tag == 0x8 else output_bits
                 target[report_id] = target.get(report_id, 0) + bits
 
         # Local state is cleared after every Main item.
         local_usages.clear()
+
+    if collections:
+        raise ValueError("unterminated HID collection")
+    if global_stack:
+        raise ValueError("unbalanced HID global PUSH")
 
     report_id: int | None
     if TOUCHPAD_REPORT_ID in input_bits or TOUCHPAD_REPORT_ID in output_bits:
@@ -237,8 +248,14 @@ def parse_vendor_collection_descriptor(descriptor: bytes) -> VendorCollectionCap
     return VendorCollectionCaps(
         found=found,
         report_id=report_id,
-        input_report_bytes=report_bytes(input_bits, report_id),
-        output_report_bytes=report_bytes(output_bits, report_id),
+        # Report IDs span collections: count all fields sharing the selected
+        # ID, while still requiring that direction in the vendor collection.
+        input_report_bytes=(
+            report_bytes(total_input_bits, report_id) if report_id in input_bits else 0
+        ),
+        output_report_bytes=(
+            report_bytes(total_output_bits, report_id) if report_id in output_bits else 0
+        ),
     )
 
 
@@ -383,8 +400,8 @@ class TouchpadFirmwareTransport:
         dmi_root: pathlib.Path | None = None,
         timeout_seconds: float = 2.0,
     ) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
         self._sysfs_root = sysfs_root
         self._dev_root = dev_root
         self._dmi_root = dmi_root
@@ -404,10 +421,10 @@ class TouchpadFirmwareTransport:
         poll_interval: float = 0.1,
     ) -> TouchpadFirmwareProbe:
         """Wait for the validated hidraw endpoint after boot or resume."""
-        if timeout_seconds < 0:
-            raise ValueError("device wait timeout cannot be negative")
-        if poll_interval <= 0:
-            raise ValueError("poll_interval must be positive")
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("device wait timeout must be finite and non-negative")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
         deadline = time.monotonic() + timeout_seconds
         while True:
             probe = self.probe()
@@ -434,13 +451,21 @@ class TouchpadFirmwareTransport:
             ) from exc
         # A hidraw number can be reused across hotplug.  Re-run the complete
         # identity/descriptor/DMI probe after opening and reject any change.
-        confirmed = self.probe()
-        if not confirmed.available or confirmed.device_path != probe.device_path:
+        try:
+            confirmed = self.probe()
+            same_node = os.path.samestat(os.fstat(fd), os.stat(probe.device_path))
+            if (
+                not confirmed.available
+                or confirmed.device_path != probe.device_path
+                or not same_node
+            ):
+                raise TouchpadFirmwareError(
+                    "touchpad identity changed while opening the firmware endpoint",
+                    device_path=probe.device_path,
+                )
+        except Exception:
             os.close(fd)
-            raise TouchpadFirmwareError(
-                "touchpad identity changed while opening the firmware endpoint",
-                device_path=probe.device_path,
-            )
+            raise
         return fd, probe.device_path
 
     def _write_report(self, fd: int, report: bytes) -> None:
@@ -448,6 +473,8 @@ class TouchpadFirmwareTransport:
             raise ValueError("refusing a non-Honor or non-nine-byte HID report")
         deadline = time.monotonic() + self._timeout_seconds
         while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting to write touchpad report")
             try:
                 written = os.write(fd, report)
             except InterruptedError:

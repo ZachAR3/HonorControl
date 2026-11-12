@@ -3,6 +3,8 @@
 set -euo pipefail
 
 TOUCHPAD_FIRMWARE=false
+# Legacy option and marker names are retained for installer compatibility.
+# They opt into automatic restore; the runtime no longer reads qualification.
 if [[ "${HONOR_TOUCHPAD_FIRMWARE_QUALIFIED:-0}" == "1" ]]; then
     TOUCHPAD_FIRMWARE=true
 fi
@@ -106,6 +108,7 @@ assert_replaceable "$ROOT/packaging/touchpad/honor-touchpadctl" /usr/bin/honor-t
 assert_replaceable "$ROOT/honor_control/__init__.py" "$DEST/__init__.py"
 assert_replaceable "$ROOT/honor_control/core/__init__.py" "$DEST/core/__init__.py"
 assert_replaceable "$ROOT/honor_control/core/touchpad.py" "$DEST/core/touchpad.py"
+assert_replaceable "$ROOT/honor_control/core/touchpad_profile.py" "$DEST/core/touchpad_profile.py"
 assert_replaceable "$ROOT/honor_control/backend/__init__.py" "$DEST/backend/__init__.py"
 assert_replaceable "$ROOT/honor_control/backend/touchpad_firmware.py" "$DEST/backend/touchpad_firmware.py"
 assert_replaceable "$ROOT/honor_control/cli/__init__.py" "$DEST/cli/__init__.py"
@@ -120,6 +123,7 @@ install -d -m 0755 "$DEST/core" "$DEST/backend" "$DEST/cli"
 install_owned "$ROOT/honor_control/__init__.py" "$DEST/__init__.py" 0644
 install_owned "$ROOT/honor_control/core/__init__.py" "$DEST/core/__init__.py" 0644
 install_owned "$ROOT/honor_control/core/touchpad.py" "$DEST/core/touchpad.py" 0644
+install_owned "$ROOT/honor_control/core/touchpad_profile.py" "$DEST/core/touchpad_profile.py" 0644
 install_owned "$ROOT/honor_control/backend/__init__.py" "$DEST/backend/__init__.py" 0644
 install_owned "$ROOT/honor_control/backend/touchpad_firmware.py" "$DEST/backend/touchpad_firmware.py" 0644
 install_owned "$ROOT/honor_control/cli/__init__.py" "$DEST/cli/__init__.py" 0644
@@ -161,5 +165,5 @@ echo "  sudo honor-touchpadctl --json probe"
 if $TOUCHPAD_FIRMWARE; then
     echo "Create /etc/honor-touchpad.toml, then enable the restore service."
 else
-    echo "Firmware writes and automatic restore remain unqualified and disabled."
+    echo "Automatic restore is disabled. Explicit writes require a verified device."
 fi

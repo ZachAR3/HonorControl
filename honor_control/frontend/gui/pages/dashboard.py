@@ -111,7 +111,7 @@ class DashboardPage(PageBase):
                 (self.charge_slider.value(), self.charge_slider.value() - 5),
             )
         )
-        self.register_control(self.charge_slider)
+        self.register_pending_control("set_thresholds", self.charge_slider)
         self.battery_card.layout.addWidget(self.charge_slider)
         self.add_widget(self.battery_card)
 
@@ -148,7 +148,7 @@ class DashboardPage(PageBase):
         self.gesture_toggle.toggled.connect(
             lambda enabled: self.intent.emit("set_daemon_enabled", (enabled,))
         )
-        self.register_control(self.gesture_toggle)
+        self.register_pending_control("set_daemon_enabled", self.gesture_toggle)
         row.addWidget(self.gesture_toggle)
         configure = _quiet_button("Configure")
         configure.clicked.connect(lambda: self.intent.emit("navigate", ("Touchpad",)))

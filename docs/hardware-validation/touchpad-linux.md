@@ -42,11 +42,9 @@ The captured original `edge_brightness` value is on:
 
 ```bash
 sudo systemctl stop honor-control.service 2>/dev/null || true
-sudo python3 -m honor_control.cli.touchpadctl --allow-unqualified \
-  set edge_brightness off
+sudo python3 -m honor_control.cli.touchpadctl set edge_brightness off
 # Physically test the edge gesture.
-sudo python3 -m honor_control.cli.touchpadctl --allow-unqualified \
-  set edge_brightness on
+sudo python3 -m honor_control.cli.touchpadctl set edge_brightness on
 # Restart honor-control.service afterward if it was previously running.
 ```
 
@@ -72,8 +70,8 @@ then query before writing:
 
 ```bash
 sudo python3 -m honor_control.cli.touchpadctl master
-sudo python3 -m honor_control.cli.touchpadctl --allow-unqualified master off
-sudo python3 -m honor_control.cli.touchpadctl --allow-unqualified master on
+sudo python3 -m honor_control.cli.touchpadctl master off
+sudo python3 -m honor_control.cli.touchpadctl master on
 ```
 
 If module load/query returns `EPROTO` or `EMSGSIZE`, unload it and preserve the

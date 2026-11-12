@@ -48,10 +48,18 @@ class PageBase(QWidget):
         self._root.setContentsMargins(32, 24, 32, 24)
         self._root.setSpacing(0)
         self._scroll.setWidget(content)
+        self._content = content
         outer.addWidget(self._scroll)
         self._controls: list[QWidget] = []
         self._pending_controls: dict[str, list[QWidget]] = {}
         self._pending_operations: set[str] = set()
+        # Disable the content container rather than each child independently.
+        # Pages use ``setEnabled`` for semantic states too (for example a
+        # built-in profile name is read-only, and a curve point editor is
+        # disabled until a point is selected).  A container-level gate keeps
+        # those intrinsic child states intact across disconnect/reconnect.
+        self._backend_available = True
+        self._pending_enabled: dict[QWidget, bool] = {}
         if self.show_page_title:
             heading = QLabel(self.title)
             heading.setObjectName("HonorPageTitle")
@@ -84,25 +92,40 @@ class PageBase(QWidget):
 
     def unregister_control(self, widget: QWidget) -> None:
         """Forget a dynamically removed control."""
-        try:
-            self._controls.remove(widget)
-        except ValueError:
-            pass
+        while True:
+            try:
+                self._controls.remove(widget)
+            except ValueError:
+                break
+        for method, widgets in tuple(self._pending_controls.items()):
+            remaining = [item for item in widgets if item is not widget]
+            if remaining:
+                self._pending_controls[method] = remaining
+            else:
+                del self._pending_controls[method]
+        self._pending_enabled.pop(widget, None)
 
     def set_backend_available(self, available: bool) -> None:
-        for w in self._controls:
-            pending = any(
-                operation.split(":", 1)[0] == method
-                and w in self._pending_controls.get(method, ())
-                for operation in self._pending_operations
-                for method in self._pending_controls
-            )
-            w.setEnabled(available and not pending)
+        self._backend_available = available
+        # Pages without service controls (such as local application settings)
+        # remain usable while disconnected.
+        self._content.setEnabled(available or not self._controls)
+        self._reapply_pending_controls()
+
+    def _reapply_pending_controls(self) -> None:
+        """Keep controls disabled for operations that are still in flight."""
+        for operation_id in self._pending_operations:
+            method = operation_id.split(":", 1)[0]
+            for widget in self._pending_controls.get(method, ()):
+                widget.setEnabled(False)
 
     def _update_pending_started(self, operation_id: str) -> None:
         self._pending_operations.add(operation_id)
         method = operation_id.split(":", 1)[0]
         for widget in self._pending_controls.get(method, ()):
+            self._pending_enabled.setdefault(
+                widget, widget.isEnabledTo(self._content)
+            )
             widget.setEnabled(False)
 
     def _update_pending_completed(self, operation_id: str, _result: object) -> None:
@@ -110,10 +133,14 @@ class PageBase(QWidget):
         method = operation_id.split(":", 1)[0]
         for widget in self._pending_controls.get(method, ()):
             still_pending = any(
-                pending.split(":", 1)[0] == method
+                widget in self._pending_controls.get(pending.split(":", 1)[0], ())
                 for pending in self._pending_operations
             )
-            widget.setEnabled(self.state.connected and not still_pending)
+            if still_pending:
+                widget.setEnabled(False)
+                continue
+            enabled = self._pending_enabled.pop(widget, True)
+            widget.setEnabled(enabled)
 
     def add_heading(self, text: str) -> QLabel:
         label = QLabel(text)

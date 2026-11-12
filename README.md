@@ -6,6 +6,11 @@ supported Honor MagicBook laptops.
 The project is currently alpha software. Test hardware changes carefully and
 keep a recovery path available.
 
+Windows support is planning only. A few dependency-light core and protocol
+modules are kept importable on Windows for porting work, but the service, GUI,
+Linux hardware paths, and release installers remain Linux-only. See the
+[Windows support plan](WINDOWS_SUPPORT_PLAN.md) for the gates and prerequisites.
+
 ## Supported hardware
 
 Hardware writes require an exact platform match:
@@ -14,8 +19,8 @@ Hardware writes require an exact platform match:
 - Fan control CPU: Intel Core Ultra 5 125H
 - Kernel modules: `acpi_call` for fan control and `uinput` for gestures
 
-Other models remain read-only. GPU mitigation and unqualified touchpad firmware
-writes are disabled.
+Other models remain read-only. GPU mitigation and automatic touchpad firmware
+restore are disabled by default.
 
 ## Features
 
@@ -39,8 +44,9 @@ sudo bash scripts/install-local.sh
 sudo systemctl enable --now honor-control.service
 ```
 
-Touchpad firmware writes require completed hardware validation and an explicit
-qualified install:
+Run the touchpad hardware validation before any direct root write. Automatic
+profile restore remains disabled unless the validated installation is marked
+explicitly:
 
 ```bash
 sudo bash scripts/install-local.sh --enable-touchpad-firmware
@@ -98,6 +104,7 @@ The development service uses fake hardware on the session bus.
 - [D-Bus API](docs/dbus-api.md)
 - [Development](docs/development.md)
 - [Touchpad validation](docs/hardware-validation/touchpad-linux.md)
+- [Windows support plan](WINDOWS_SUPPORT_PLAN.md)
 
 ## License
 

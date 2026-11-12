@@ -26,7 +26,10 @@ classifiers = [
 # GUI/tray: PySide6 (optional).
 # dbus-python is removed — all clients use sdbus.
 dependencies = [
-    "sdbus==0.14.2",
+    # sdbus is Linux/D-Bus only.  Keeping it behind an environment marker
+    # allows shared/core modules and the optional GUI to be installed on
+    # Windows while the future Windows transport is developed separately.
+    "sdbus==0.14.2; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

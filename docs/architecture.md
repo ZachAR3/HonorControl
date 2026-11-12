@@ -56,6 +56,15 @@ GUI / Tray                    CLI
              sysfs / EC / uinput / PPD
 ```
 
+## Shared-code portability
+
+Protocol encoders and DTOs remain independent of Linux transport imports.
+`core/touchpad_profile.py` deliberately performs narrow caller-selected TOML
+file loading for the two CLIs; `core/touchpad.py` imports POSIX locking only
+when that lock is requested. These helpers do not implement a Windows
+hardware backend. See [Windows support plan](../WINDOWS_SUPPORT_PLAN.md) for
+the remaining transport, service, persistence, and session boundaries.
+
 ## State semantics
 
 - **Desired:** what the user asked for (persisted in

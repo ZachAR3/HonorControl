@@ -1,4 +1,5 @@
 # Published runtime dependencies audited by CI. honor-tools 0.1.0 is supplied
 # as a separately reviewed local wheel and is not available from PyPI.
-sdbus==0.14.2
+# sdbus is a Linux/D-Bus transport and must not be resolved by a Windows audit.
+sdbus==0.14.2 ; sys_platform == "linux"
 PySide6==6.11.1

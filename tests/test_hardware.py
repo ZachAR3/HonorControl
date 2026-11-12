@@ -436,6 +436,41 @@ class TestHonorToolsAdapterFilesystem:
         assert result["write_order"] == ("end", "start")
         assert result["readback_ok"] is True
 
+    def test_narrowing_thresholds_lowers_start_before_end(self, tmp_path) -> None:
+        """The intermediate pair must retain the driver's hysteresis gap."""
+        battery = tmp_path / "sys/class/power_supply/BAT1"
+        battery.mkdir(parents=True)
+        for name, value in {
+            "type": "Battery",
+            "capacity": "61",
+            "status": "Charging",
+            "charge_control_end_threshold": "90",
+            "charge_control_start_threshold": "85",
+        }.items():
+            (battery / name).write_text(value, encoding="utf-8")
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+
+        result = adapter.write_battery_thresholds(88, 80)
+
+        assert result["write_order"] == ("start", "end")
+        assert result["readback_ok"] is True
+
+    def test_unreadable_current_thresholds_fail_closed(self, tmp_path) -> None:
+        battery = tmp_path / "sys/class/power_supply/BAT1"
+        battery.mkdir(parents=True)
+        (battery / "type").write_text("Battery", encoding="utf-8")
+        (battery / "charge_control_end_threshold").write_text(
+            "90", encoding="utf-8"
+        )
+        # The start value cannot be read, so no end/start write is attempted.
+        adapter = HonorToolsAdapter(root_path=tmp_path)
+
+        result = adapter.write_battery_thresholds(80, 75)
+
+        assert result["readback_ok"] is False
+        assert result["write_order"] == ()
+        assert (battery / "charge_control_end_threshold").read_text() == "90"
+
     def test_power_capability_checks_every_required_resource(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -578,6 +613,42 @@ class TestHonorToolsAdapterFilesystem:
         assert (
             tmp_path / "sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"
         ).read_text(encoding="utf-8") == "25000000"
+
+    def test_power_rollback_restores_epp_before_performance_governor(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Intel P-State may reject EPP writes after performance is selected."""
+        adapter, _ppd = _make_power_adapter(tmp_path, monkeypatch)
+        for cpu in adapter._power_cpu_dirs():  # noqa: SLF001
+            (cpu / "cpufreq/scaling_governor").write_text(
+                "performance", encoding="utf-8"
+            )
+            (cpu / "cpufreq/energy_performance_preference").write_text(
+                "default", encoding="utf-8"
+            )
+        previous = adapter._read_power_status()  # noqa: SLF001
+        writes: list[tuple[str, str]] = []
+        original_write = adapter._write_text_verified  # noqa: SLF001
+
+        def emulate_intel_pstate(path, value):
+            if path.name == "energy_performance_preference":
+                writes.append((path.name, str(value)))
+                if path.parent.joinpath("scaling_governor").read_text().strip() == (
+                    "performance"
+                ):
+                    return False
+            return original_write(path, value)
+
+        monkeypatch.setattr(adapter, "_write_text_verified", emulate_intel_pstate)
+
+        result = adapter._restore_power_status(previous)  # noqa: SLF001
+
+        assert result["ok"] is True
+        assert all(
+            (cpu / "cpufreq/scaling_governor").read_text().strip() == "performance"
+            for cpu in adapter._power_cpu_dirs()  # noqa: SLF001
+        )
+        assert writes
 
     @pytest.mark.parametrize(
         ("response", "expected"),

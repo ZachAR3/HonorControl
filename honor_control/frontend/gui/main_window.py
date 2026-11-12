@@ -240,6 +240,10 @@ class MainWindow(QMainWindow):
         self.state.snapshot_changed.connect(self._update_identity)
         self.state.stale_changed.connect(self._on_stale_changed)
         self.state.error_occurred.connect(self._on_ui_error)
+        # The controller starts asynchronously.  Keep mutation controls
+        # disabled until the first successful service connection instead of
+        # leaving a short window where clicks can be queued against no client.
+        self._update_availability(self.controller.connected)
 
     def _on_ui_error(self, error: object) -> None:
         """Render a structured UiError with severity-appropriate persistence.

@@ -29,6 +29,7 @@ from honor_control.core.models import (  # noqa: E402
     ChargeMode,
     FanMode,
     FanSnapshot,
+    GestureEntry,
     GesturesSnapshot,
     OperationResult,
     PlatformInfo,
@@ -451,6 +452,81 @@ class TestGuiPageConstruction:
         )
         assert page.apply_btn.isEnabled()
 
+    def test_local_settings_remain_usable_without_backend(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.settings import SettingsPage
+
+        page = SettingsPage(GuiState())
+        page.set_backend_available(False)
+        assert page.close_to_tray.isEnabled()
+
+    def test_pending_signal_after_disconnect_does_not_disable_control_forever(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.battery import BatteryPage
+
+        state = GuiState()
+        page = BatteryPage(state)
+        page.set_backend_available(False)
+        state.mark_pending("set_thresholds:80:75")
+        state.emit_completed("set_thresholds:80:75", OperationResult.success(applied=True))
+        assert not page.apply_btn.isEnabled()
+        page.set_backend_available(True)
+        assert page.apply_btn.isEnabled()
+
+    def test_pending_control_handles_disconnect_and_repeated_operations(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.battery import BatteryPage
+
+        state = GuiState()
+        state.set_connected(True)
+        page = BatteryPage(state)
+
+        page._update_pending_started("set_thresholds:80:75")  # noqa: SLF001
+        page._update_pending_started("set_thresholds:85:80")  # noqa: SLF001
+        assert page.apply_btn.isEnabled() is False
+
+        page.set_backend_available(False)
+        page._update_pending_completed(  # noqa: SLF001
+            "set_thresholds:80:75", None
+        )
+        page.set_backend_available(True)
+        assert page.apply_btn.isEnabled() is False
+
+        page._update_pending_completed(  # noqa: SLF001
+            "set_thresholds:85:80", None
+        )
+        assert page.apply_btn.isEnabled() is True
+
+        # A later operation must capture the current enabled state rather than
+        # reusing a stale baseline from the earlier pending operation.
+        page._update_pending_started("set_thresholds:90:85")  # noqa: SLF001
+        page._update_pending_completed(  # noqa: SLF001
+            "set_thresholds:90:85", None
+        )
+        assert page.apply_btn.isEnabled() is True
+
+    def test_dynamic_gesture_row_is_removed_from_pending_registry(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.touchpad import TouchpadPage
+
+        state = GuiState()
+        page = TouchpadPage(state)
+        entry = GestureEntry(
+            id="three_finger",
+            label="Three finger",
+            enabled=True,
+            mapping="leftmeta,v",
+            default_mapping="leftmeta,v",
+        )
+        page._on_snapshot(  # noqa: SLF001
+            SystemSnapshot(gestures=GesturesSnapshot(mappings=(entry,)))
+        )
+        row = page._rows[entry.id]  # noqa: SLF001
+        page._update_pending_started("set_mapping:three_finger:x")  # noqa: SLF001
+        assert row.isEnabled() is False
+
+        page._on_snapshot(SystemSnapshot(sequence=1))  # noqa: SLF001
+        assert entry.id not in page._rows  # noqa: SLF001
+        assert all(  # noqa: SLF001
+            row not in widgets for widgets in page._pending_controls.values()
+        )
+
     def test_battery_refresh_does_not_move_slider_during_drag(self, qapp) -> None:
         from honor_control.frontend.gui.pages.battery import BatteryPage
 
@@ -551,7 +627,6 @@ class TestGuiPageConstruction:
         snap = SystemSnapshot(
             gestures=GesturesSnapshot(
                 firmware_settings_supported=True,
-                firmware_writes_qualified=True,
                 firmware_settings={"edge_volume": 1, "sensitivity": 0},
             )
         )
@@ -569,7 +644,6 @@ class TestGuiPageConstruction:
             sequence=1,
             gestures=GesturesSnapshot(
                 firmware_settings_supported=True,
-                firmware_writes_qualified=True,
                 firmware_settings={"edge_volume": 1},
             ),
         )
@@ -590,7 +664,7 @@ class TestGuiPageConstruction:
             )
         ]
 
-    def test_touchpad_editor_is_disabled_until_writes_are_qualified(self, qapp) -> None:
+    def test_touchpad_editor_is_disabled_when_endpoint_is_unsupported(self, qapp) -> None:
         from honor_control.frontend.gui.pages.touchpad import TouchpadPage
 
         state = GuiState()
@@ -599,15 +673,51 @@ class TestGuiPageConstruction:
         state.set_snapshot(
             SystemSnapshot(
                 gestures=GesturesSnapshot(
-                    firmware_settings_supported=True,
-                    firmware_writes_qualified=False,
+                    firmware_settings_supported=False,
                     firmware_settings={"edge_volume": 1},
                 )
             )
         )
 
         assert page.apply_button.isEnabled() is False
-        assert "not qualified" in page.firmware_summary.text().lower()
+        assert "unavailable" in page.firmware_summary.text().lower()
+
+    def test_backend_reconnect_preserves_page_specific_disabled_controls(self, qapp) -> None:
+        from honor_control.frontend.gui.pages.fan import FanPage
+        from honor_control.frontend.gui.pages.power import PowerPage
+
+        state = GuiState()
+        state.set_connected(True)
+        profiles = (
+            PowerProfileEntry(name="balanced", label="Balanced", built_in=True),
+        )
+        power = PowerPage(state)
+        state.set_snapshot(
+            SystemSnapshot(
+                power=PowerSnapshot(
+                    applied_profile="balanced",
+                    desired_profile="balanced",
+                    profiles=profiles,
+                )
+            )
+        )
+        assert power.profile_name.isEnabled() is False
+
+        fan = FanPage(state)
+        state.set_snapshot(
+            SystemSnapshot(
+                sequence=2,
+                fan=FanSnapshot(available=True, mode=FanMode.STOCK),
+            )
+        )
+        assert fan.point_temp.isEnabled() is False
+
+        for page in (power, fan):
+            page.set_backend_available(False)
+            page.set_backend_available(True)
+
+        assert power.profile_name.isEnabled() is False
+        assert fan.point_temp.isEnabled() is False
 
     def test_overview_quick_profile_action_preserves_controller_intent(
         self, qapp

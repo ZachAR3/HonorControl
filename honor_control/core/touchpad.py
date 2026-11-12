@@ -8,15 +8,12 @@ both the drag and light-touch bits in that order.
 
 The master touchpad switch is deliberately absent from this encoder.  Honor
 implements that switch through its OEM ACPI-WMI method, not through HID.
-The output protocol has not yet been wire-captured or replayed on Linux hardware.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
-import pathlib
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -31,43 +28,6 @@ TOUCHPAD_VENDOR_USAGE_PAGE: Final = 0xFF00
 TOUCHPAD_VENDOR_USAGE: Final = 0x0001
 TOUCHPAD_REPORT_ID: Final = 0x0E
 TOUCHPAD_REPORT_BYTES: Final = 9
-
-#: Environment flag that qualifies touchpad firmware setting writes for
-#: production.  Such writes have no readback or rollback and have not passed
-#: the documented physical Linux replay gate, so they stay disabled unless an
-#: explicit, reviewed hardware qualification record exists.  Probe, descriptor
-#: inspection, dry-run encoding, and gesture input are unaffected.
-_FIRMWARE_QUALIFIED_ENV: Final = "HONOR_TOUCHPAD_FIRMWARE_QUALIFIED"
-_FIRMWARE_QUALIFIED_FILE_ENV: Final = (
-    "HONOR_CONTROL_TOUCHPAD_QUALIFICATION_FILE"
-)
-_DEFAULT_FIRMWARE_QUALIFIED_FILE: Final = (
-    "/etc/honor-control/touchpad-firmware-qualified"
-)
-
-
-def touchpad_firmware_writes_qualified() -> bool:
-    """Return True only if firmware writes were explicitly qualified.
-
-    The environment flag is intended for tests and one-shot diagnostics. A
-    production install persists qualification as a root-managed marker file
-    so the backend and boot/resume restore unit make the same decision.
-    """
-    if os.environ.get(_FIRMWARE_QUALIFIED_ENV, "").strip() == "1":
-        return True
-    marker = pathlib.Path(
-        os.environ.get(
-            _FIRMWARE_QUALIFIED_FILE_ENV,
-            _DEFAULT_FIRMWARE_QUALIFIED_FILE,
-        )
-    )
-    try:
-        return marker.is_file() and marker.read_text(encoding="ascii").strip() == (
-            "qualified=1"
-        )
-    except OSError:
-        return False
-
 
 #: Environment override for the inter-process touchpad firmware lock path
 #: (tests point this at a temporary file).
@@ -90,6 +50,13 @@ def touchpad_firmware_lock(
     two writers cannot interleave multi-report operations.  Read-only
     probe/list/encode callers need not take it.
     """
+    # Keep protocol encoders importable on non-POSIX platforms. A Windows
+    # transport must provide its own process-wide locking implementation.
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError("touchpad firmware locking requires POSIX flock") from exc
+
     lock_path = path or os.environ.get(TOUCHPAD_LOCK_ENV) or _DEFAULT_TOUCHPAD_LOCK
     directory = os.path.dirname(lock_path)
     try:
@@ -296,7 +263,7 @@ def parse_touchpad_value(
         parsed = int(value)
     elif isinstance(value, int):
         parsed = value
-    else:
+    elif isinstance(value, str):
         normalized = value.strip().lower()
         named: dict[str, int] = {}
         if spec.maximum == 1:
@@ -321,6 +288,8 @@ def parse_touchpad_value(
                 raise ValueError(
                     f"invalid value {value!r} for {canonical.value}"
                 ) from exc
+    else:
+        raise ValueError(f"invalid value type for {canonical.value}: {type(value).__name__}")
     if not spec.minimum <= parsed <= spec.maximum:
         raise ValueError(
             f"{canonical.value} must be {spec.minimum}..{spec.maximum}, got {parsed}"

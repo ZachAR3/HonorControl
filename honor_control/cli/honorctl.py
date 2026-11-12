@@ -33,6 +33,7 @@ from honor_control.core.touchpad import (
     parse_touchpad_setting,
     parse_touchpad_value,
 )
+from honor_control.core.touchpad_profile import load_touchpad_profile
 
 #: Exit codes (stable, scriptable).
 EXIT_OK = 0
@@ -364,10 +365,8 @@ async def cmd_touchpad_set(args: argparse.Namespace, client) -> int:
 
 
 async def cmd_touchpad_apply(args: argparse.Namespace, client) -> int:
-    from honor_control.cli.touchpadctl import _load_profile
-
     try:
-        settings, master = _load_profile(args.profile)
+        settings, master = load_touchpad_profile(args.profile)
     except DomainException:
         raise
     except (OSError, ValueError) as exc:  # incl. tomllib.TOMLDecodeError (a ValueError)

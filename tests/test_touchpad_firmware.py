@@ -27,12 +27,6 @@ from honor_control.core.touchpad import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _qualify_firmware_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module exercises the (gated) firmware write path directly."""
-    monkeypatch.setenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", "1")
-
-
 VENDOR_DESCRIPTOR = bytes.fromhex(
     # Usage Page (Vendor 0xff00), Usage 1, Application collection
     "06 00 ff 09 01 a1 01 "
@@ -286,7 +280,6 @@ def test_apply_profile_cli_writes_hid_and_verifies_master(
             str(dev),
             "--wmi-root",
             str(wmi_root),
-            "--allow-unqualified",
             "apply",
             str(profile),
         ]
@@ -324,7 +317,6 @@ def test_apply_profile_restores_master_when_hid_write_fails(
             str(dev),
             "--wmi-root",
             str(wmi_root),
-            "--allow-unqualified",
             "apply",
             str(profile),
         ]
@@ -363,8 +355,7 @@ def test_touchpad_cli_uses_shared_exit_code_categories(
                 str(sysfs),
                 "--dev-root",
                 str(dev),
-                "--allow-unqualified",
-                "set",
+                    "set",
                 "edge_volume",
                 "on",
             ]
@@ -373,24 +364,108 @@ def test_touchpad_cli_uses_shared_exit_code_categories(
     )
 
 
-def test_touchpadctl_write_is_gated_when_unqualified(
+def test_touchpadctl_writes_verified_device_without_legacy_qualification(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """HC-001: writes require qualification or a deliberate diagnostic
-    override, while probe/encode remain available."""
     monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
     sysfs, dev = _fake_device(tmp_path)
     base = ["--sysfs-root", str(sysfs), "--dev-root", str(dev)]
+    assert touchpadctl_main([*base, "set", "sensitivity", "high"]) == 0
+    assert (dev / "hidraw7").read_bytes()[9:] == encode_touchpad_setting("sensitivity", 1)[0]
 
-    # Unqualified write is refused (unavailable), hardware untouched.
-    assert touchpadctl_main([*base, "set", "sensitivity", "high"]) == 3
 
-    # Read-only encode still works.
-    assert touchpadctl_main(["encode", "sensitivity", "high"]) == 0
+@pytest.mark.parametrize("value", [None, 1.5, [], {}, b"on"])
+def test_setting_rejects_invalid_types(value) -> None:
+    with pytest.raises(ValueError, match="invalid value type"):
+        parse_touchpad_value("edge_volume", value)
 
-    assert (
-        touchpadctl_main(
-            [*base, "--allow-unqualified", "set", "sensitivity", "high"]
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), 0, -1])
+def test_transport_rejects_unbounded_timeouts(value) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        TouchpadFirmwareTransport(timeout_seconds=value)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), -1])
+def test_device_wait_rejects_unbounded_timeouts(value) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        TouchpadFirmwareTransport().wait_until_available(value)
+
+
+def test_interrupted_writes_respect_deadline(monkeypatch) -> None:
+    from honor_control.backend import touchpad_firmware
+
+    ticks = iter([0.0, 0.1, 0.5, 1.0])
+    monkeypatch.setattr(touchpad_firmware.time, "monotonic", lambda: next(ticks))
+    calls = []
+
+    def interrupted_write(fd, report):
+        calls.append(report)
+        raise InterruptedError
+
+    monkeypatch.setattr(touchpad_firmware.os, "write", interrupted_write)
+    with pytest.raises(TimeoutError):
+        TouchpadFirmwareTransport(timeout_seconds=1)._write_report(
+            -1, encode_touchpad_setting("sensitivity", 1)[0]
         )
-        == 0
+    assert len(calls) == 2
+
+
+def test_protocol_imports_without_posix_fcntl() -> None:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import sys
+sys.modules['fcntl'] = None
+from honor_control.core.touchpad import encode_touchpad_setting, touchpad_firmware_lock
+assert encode_touchpad_setting('sensitivity', 1)[0].hex() == '0e0101000000000000'
+try:
+    with touchpad_firmware_lock():
+        raise AssertionError('must reject unsupported locking')
+except RuntimeError as exc:
+    assert 'POSIX flock' in str(exc)
+"""],
+        capture_output=True, text=True, timeout=10, check=False,
     )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [VENDOR_DESCRIPTOR[:-1], VENDOR_DESCRIPTOR + b"\xc0", b"\xa4" + VENDOR_DESCRIPTOR],
+)
+def test_descriptor_rejects_unbalanced_state(descriptor) -> None:
+    with pytest.raises(ValueError):
+        parse_vendor_collection_descriptor(descriptor)
+
+
+def test_open_rejects_replaced_node_and_closes_handle(tmp_path, monkeypatch) -> None:
+    sysfs, dev = _fake_device(tmp_path)
+    transport = TouchpadFirmwareTransport(sysfs_root=sysfs, dev_root=dev)
+    original_open = os.open
+    opened = []
+
+    def replace_after_open(path, flags):
+        fd = original_open(path, flags)
+        opened.append(fd)
+        replacement = dev / "replacement"
+        replacement.write_bytes(b"")
+        replacement.replace(path)
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+    with pytest.raises(TouchpadFirmwareError, match="identity changed"):
+        transport.apply_setting("sensitivity", 1)
+    assert (dev / "hidraw7").read_bytes() == b""
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_descriptor_counts_shared_report_id_across_collections() -> None:
+    # A second application collection extends the SAME input/output reports.
+    extra_collection = bytes.fromhex("05 01 09 02 a1 01 75 08 95 01 81 02 91 02 c0")
+    caps = parse_vendor_collection_descriptor(VENDOR_DESCRIPTOR + extra_collection)
+    assert caps.input_report_bytes == caps.output_report_bytes == 10
+    assert caps.writable is False

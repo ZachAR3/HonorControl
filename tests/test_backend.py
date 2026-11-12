@@ -63,6 +63,50 @@ class TestSnapshotStore:
         asyncio.run(store.update("battery", value))
         assert "battery" not in store.snapshot.stale_domains
 
+    def test_async_subscriber_can_publish_another_update(self) -> None:
+        """Notifications must not hold the store lock across callbacks."""
+        store = SnapshotStore()
+        received: list[int] = []
+
+        async def on_change(snapshot: SystemSnapshot, _domains: tuple[str, ...]) -> None:
+            received.append(snapshot.sequence)
+            if snapshot.sequence == 1:
+                await store.update(
+                    "battery", BatterySnapshot(available=True, capacity_percent=51)
+                )
+
+        store.subscribe(on_change)
+        async def exercise() -> None:
+            await asyncio.wait_for(
+                store.update(
+                    "battery", BatterySnapshot(available=True, capacity_percent=50)
+                ),
+                timeout=1,
+            )
+
+        asyncio.run(exercise())
+
+        assert received == [1, 2]
+        assert store.snapshot.battery.capacity_percent == 51
+
+    def test_unsubscribing_during_notification_does_not_skip_subscribers(self) -> None:
+        store = SnapshotStore()
+        received: list[str] = []
+        unsubscribe: list[callable] = []
+
+        def first(_snapshot: SystemSnapshot, _domains: tuple[str, ...]) -> None:
+            received.append("first")
+            unsubscribe[0]()
+
+        def second(_snapshot: SystemSnapshot, _domains: tuple[str, ...]) -> None:
+            received.append("second")
+
+        unsubscribe.append(store.subscribe(first))
+        store.subscribe(second)
+        asyncio.run(store.update("battery", BatterySnapshot(available=True)))
+
+        assert received == ["first", "second"]
+
 
 class TestCommandQueue:
     """Verify serialization, timeout, and cancellation."""

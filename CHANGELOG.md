@@ -4,12 +4,17 @@
 
 ### Security / Release hardening
 
-- Touchpad firmware setting writes are now disabled by default behind the
-  `touchpad_firmware_writes_qualified` capability gate (default `false`);
-  probe, encode, and gesture input remain available.
-- The automatic `honor-touchpad-restore.service` unit is no longer installed
-  or enabled unless firmware writes are qualified (installer flag
-  `--enable-touchpad-firmware` / env `HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`).
+- Touchpad firmware setting writes no longer sit behind a separate
+  qualification gate: they are available whenever the validated firmware
+  endpoint is probed, and every write still requires device identity
+  validation and the exclusive inter-process lock. The
+  `firmware_writes_qualified` snapshot field and the `honor-touchpadctl
+  --allow-unqualified` flag are removed, and the snapshot schema version is
+  now 6.
+- The automatic `honor-touchpad-restore.service` unit stays opt-in: it is not
+  installed or enabled unless requested (installer flag
+  `--enable-touchpad-firmware` / env `HONOR_TOUCHPAD_FIRMWARE_QUALIFIED=1`;
+  the legacy names are kept for installer compatibility).
 - The installer now supports a complete offline install. `--wheelhouse DIR`
   verifies the exact checksummed artifact set and installs reviewed wheels
   with `--no-index`.
@@ -31,6 +36,18 @@
 
 ### Fixed
 
+- Battery threshold writes choose an order that keeps the driver's hysteresis
+  invariant at the intermediate step too, re-discover the supply before
+  writing, and fail closed when the current thresholds cannot be read.
+- Power-profile rollback restores EPP before governors, so a return to the
+  performance governor can no longer leave a mixed EPP state.
+- An explicit stock-auto fan request that times out now reserves a bounded
+  recovery request instead of leaving the fan in a user-selected mode.
+- Snapshot subscribers are notified outside the state lock and in order, so a
+  subscriber that publishes another update can no longer deadlock the store.
+- Disconnecting and reconnecting the service no longer re-enables page
+  controls that are disabled for their own reasons or still have an operation
+  in flight.
 - Power-profile application now coordinates with PPD without masking host
   services or using raw MSR access, verifies every sysfs field before reporting
   success, and reconciles complete observed definitions instead of PPD names.

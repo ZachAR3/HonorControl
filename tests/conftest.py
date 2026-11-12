@@ -12,11 +12,7 @@ def isolate_touchpad_safety_files(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("HONOR_TOUCHPAD_FIRMWARE_QUALIFIED", raising=False)
-    monkeypatch.setenv(
-        "HONOR_CONTROL_TOUCHPAD_QUALIFICATION_FILE",
-        str(tmp_path / "touchpad-firmware-qualified"),
-    )
+    """Keep the advisory writer lock isolated for every test."""
     monkeypatch.setenv(
         "HONOR_CONTROL_TOUCHPAD_LOCK",
         str(tmp_path / "touchpad.lock"),

@@ -82,6 +82,7 @@ validate_destination() {
         /usr/lib/honor-touchpad/honor_control/cli/touchpadctl.py|\
         /usr/lib/honor-touchpad/honor_control/core/__init__.py|\
         /usr/lib/honor-touchpad/honor_control/core/touchpad.py|\
+        /usr/lib/honor-touchpad/honor_control/core/touchpad_profile.py|\
         /usr/lib/modules-load.d/honor-control.conf|\
         /usr/lib/systemd/system-sleep/honor-touchpad-restore|\
         /usr/share/applications/org.honorlinux.Control.desktop|\

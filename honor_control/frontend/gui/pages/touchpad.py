@@ -337,7 +337,7 @@ class TouchpadPage(PageBase):
         controls = QHBoxLayout()
         self.daemon_button = QPushButton("Enable gesture dispatch")
         self.daemon_button.clicked.connect(self._toggle_daemon)
-        self.register_control(self.daemon_button)
+        self.register_pending_control("set_daemon_enabled", self.daemon_button)
         controls.addWidget(self.daemon_button)
         controls.addStretch(1)
         card.layout.addLayout(controls)
@@ -359,8 +359,8 @@ class TouchpadPage(PageBase):
         disable_all.clicked.connect(
             lambda: self.intent.emit("set_all_enabled", (False,))
         )
-        self.register_control(enable_all)
-        self.register_control(disable_all)
+        self.register_pending_control("set_all_enabled", enable_all)
+        self.register_pending_control("set_all_enabled", disable_all)
         controls.addWidget(enable_all)
         controls.addWidget(disable_all)
         controls.addStretch(1)
@@ -409,11 +409,9 @@ class TouchpadPage(PageBase):
     def _update_firmware_actions(self) -> None:
         snap = self.state.snapshot
         supported = bool(snap and snap.gestures.firmware_settings_supported)
-        qualified = bool(snap and snap.gestures.firmware_writes_qualified)
         can_edit = (
             self.state.connected
             and supported
-            and qualified
             and not self._firmware_pending
         )
         for row in self._firmware_rows.values():
@@ -457,13 +455,9 @@ class TouchpadPage(PageBase):
     def _on_snapshot(self, snap: SystemSnapshot) -> None:
         ges = snap.gestures
         firmware_ok = ges.firmware_settings_supported
-        qualified = ges.firmware_writes_qualified
-        ready = firmware_ok and qualified
-        self.firmware_dot.set_color(StatusDot.GREEN if ready else StatusDot.RED)
+        self.firmware_dot.set_color(StatusDot.GREEN if firmware_ok else StatusDot.RED)
         if not firmware_ok:
             summary = "Firmware controls unavailable"
-        elif not qualified:
-            summary = "Firmware writes not qualified"
         else:
             summary = "Firmware controls available"
         self.firmware_summary.setText(summary)
@@ -510,7 +504,8 @@ class TouchpadPage(PageBase):
                 row = _GestureRow(entry)
                 row.intent.connect(self.intent.emit)
                 self._rows[entry.id] = row
-                self.register_control(row)
+                self.register_pending_control("set_mapping", row)
+                self.register_pending_control("set_enabled", row)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, row)
             else:
                 row.update_entry(entry)

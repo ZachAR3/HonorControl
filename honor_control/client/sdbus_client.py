@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 from collections.abc import Callable
 from datetime import datetime
@@ -20,7 +21,6 @@ from typing import Any
 
 from honor_control.client.errors import ClientError, classify_dbus_error
 from honor_control.client.protocol import ControlClient
-from honor_control.client.proxy import ControlProxy
 from honor_control.contract import API_VERSION, BUS_NAME, OBJECT_PATH, SCHEMA_VERSION
 from honor_control.core.errors import CapabilityStatus, TransportError
 from honor_control.core.models import (
@@ -108,6 +108,11 @@ class SdbusClient(ControlClient):
         """Open the bus, perform version handshake, subscribe to signals."""
         try:
             import sdbus
+
+            # Keep importing the typed D-Bus proxy lazy.  The protocol DTOs,
+            # FakeClient, and CLI parser remain usable on platforms where
+            # sdbus is unavailable (notably while preparing the Windows port).
+            from honor_control.client.proxy import ControlProxy
 
             if self._bus_kind == "session":
                 self._bus = sdbus.sd_bus_open_user()
@@ -386,7 +391,7 @@ class SdbusClient(ControlClient):
                 for callback in tuple(self._subscribers):
                     try:
                         result = callback(snapshot)
-                        if asyncio.iscoroutine(result):
+                        if inspect.isawaitable(result):
                             await result
                     except Exception:  # noqa: BLE001
                         log.exception("state subscriber failed")
@@ -704,13 +709,7 @@ def _decode_snapshot(data: dict[str, Any]) -> SystemSnapshot:
             firmware_settings_supported=_bool(
                 gestures.get("firmware_settings_supported")
             ),
-            firmware_writes_qualified=_bool(
-                gestures.get("firmware_writes_qualified")
-            ),
-            firmware_settings={
-                str(name): int(value)
-                for name, value in _dict(gestures.get("firmware_settings")).items()
-            },
+            firmware_settings=_int_dict(gestures.get("firmware_settings")),
             last_error=_str(gestures.get("last_error")),
         ),
         gpu=GpuSnapshot(
@@ -750,7 +749,21 @@ def _str(value: Any, default: str = "") -> str:
 
 
 def _str_tuple(value: Any) -> tuple[str, ...]:
-    return tuple(str(x) for x in _list(value))
+    return tuple(_str(item) for item in _list(value))
+
+
+def _int_dict(value: Any) -> dict[str, int]:
+    """Decode a dictionary whose values must be D-Bus integers."""
+    result: dict[str, int] = {}
+    for name, raw in _dict(value).items():
+        parsed = _int(raw)
+        if parsed is None:
+            raise ClientError(
+                TransportError.INTERNAL,
+                "Expected an integer value on D-Bus",
+            )
+        result[str(name)] = parsed
+    return result
 
 
 def _int(value: Any, default: int | None = None) -> int | None:
@@ -817,7 +830,7 @@ def _decode_result(data: dict[str, Any]) -> OperationResult:
         raise ClientError(TransportError.INTERNAL, "Invalid operation status") from exc
     details = decoded.get("details", {})
     if not isinstance(details, dict):
-        details = {}
+        raise ClientError(TransportError.INTERNAL, "Expected result details on D-Bus")
     return OperationResult(
         status=status,
         code=_str(decoded.get("code")),

@@ -79,7 +79,6 @@ from honor_control.core.touchpad import (
     parse_touchpad_setting,
     parse_touchpad_value,
     touchpad_firmware_lock,
-    touchpad_firmware_writes_qualified,
 )
 from honor_control.core.validation import (
     thresholds_for_mode,
@@ -310,9 +309,10 @@ class ApplicationService:
         Contract: fan mode, gesture runtime, and power profile changes are
         reconciled to hardware.  Battery thresholds and touchpad firmware
         settings are loaded into desired state but NOT re-applied on reload
-        (touchpad writes stay gated behind HC-001 qualification); the result
-        ``details`` reports those domains as ``loaded_not_applied`` so callers
-        never assume hardware convergence for them.
+        (touchpad writes are not idempotent across reboots and stay deferred
+        to explicit user action); the result ``details`` reports those domains
+        as ``loaded_not_applied`` so callers never assume hardware convergence
+        for them.
         """
         config_loaded = False
         try:
@@ -949,7 +949,27 @@ class ApplicationService:
                 message=cap.message or "Fan control unavailable",
                 sequence=self._snapshots.sequence,
             )
-        ok = await self._queue.run("fan_auto", self._hw.set_fan_auto)
+        try:
+            # Even an explicit stock-auto request is safety-critical.  Reserve
+            # a second auto request when the underlying non-cancellable EC
+            # call times out, so a transient wedge cannot leave the fan in a
+            # user-selected mode with no recovery attempt.
+            ok = await self._run_fan_command(
+                "fan_auto",
+                self._hw.set_fan_auto,
+                recovery_context="explicit stock-auto request",
+            )
+        except CommandTimeoutError as exc:
+            return OperationResult.partial(
+                code="fan_auto_restore_pending",
+                message=(
+                    "Stock-auto request timed out; a bounded recovery request "
+                    "is queued"
+                ),
+                applied=False,
+                sequence=self._snapshots.sequence,
+                details={"error": str(exc)},
+            )
         if ok:
             self._fan_fail_safe_error = ""
             await self._supervisor.stop("manual_fan_ttl")
@@ -1365,7 +1385,6 @@ class ApplicationService:
             "report_id": probe.report_id if probe.report_id is not None else -1,
             "input_report_bytes": probe.input_report_bytes,
             "output_report_bytes": probe.output_report_bytes,
-            "firmware_writes_qualified": touchpad_firmware_writes_qualified(),
             "error": probe.error,
         }
 
@@ -1374,15 +1393,6 @@ class ApplicationService:
         self, settings: dict[str, int]
     ) -> OperationResult:
         """Validate and apply a profile, persisting only accepted writes."""
-        if not touchpad_firmware_writes_qualified():
-            return OperationResult.unavailable(
-                code="touchpad_firmware_unqualified",
-                message=(
-                    "Touchpad firmware writes are not qualified on this build; "
-                    "probe/encode remain available"
-                ),
-                sequence=self._snapshots.sequence,
-            )
         restart_runtime = bool(
             self._gesture_runtime is not None
             and self._config.state.gestures.daemon_enabled
@@ -1726,7 +1736,6 @@ class ApplicationService:
                 "last_error": self._config.last_error,
                 "unknown_keys": list(self._config.unknown_keys),
             },
-            "touchpad_firmware_writes_qualified": touchpad_firmware_writes_qualified(),
             "ac_online": snap.power.ac_online,
         }
 
@@ -1746,16 +1755,49 @@ class ApplicationService:
                 "short-iso",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                cwd="/",
+                env={
+                    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LANG": "C.UTF-8",
+                },
+                start_new_session=True,
             )
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=3)
+            try:
+                stdout, _stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=3
+                )
+            except asyncio.CancelledError:
+                await asyncio.shield(self._terminate_process(process))
+                raise
+            except TimeoutError:
+                await self._terminate_process(process)
+                return []
             return stdout.decode("utf-8", errors="replace").splitlines()[-count:]
         except FileNotFoundError:
             return []
-        except TimeoutError:
-            if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
+        except OSError:
             return []
+
+    @staticmethod
+    async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+        """Kill a helper and its descendants, then reap it."""
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                # The process may have exited between the return-code check
+                # and killpg; fall back to the direct child handle when the
+                # process group cannot be addressed.
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+        try:
+            await process.wait()
+        except ProcessLookupError:
+            pass
 
     # -- Refresh helpers --
 
@@ -1983,7 +2025,6 @@ class ApplicationService:
                     mappings=self._gesture_entries(),
                     wmi_transport_present=wmi_transport_present(),
                     firmware_settings_supported=firmware_probe.available,
-                    firmware_writes_qualified=touchpad_firmware_writes_qualified(),
                     firmware_settings=dict(self._config.state.touchpad.settings),
                     last_error=status.last_error or probe.error,
                 )
@@ -1996,7 +2037,6 @@ class ApplicationService:
                     ges,
                     daemon_enabled=self._config.state.gestures.daemon_enabled,
                     mappings=self._gesture_entries(entries),
-                    firmware_writes_qualified=touchpad_firmware_writes_qualified(),
                     firmware_settings=dict(self._config.state.touchpad.settings),
                 )
             await self._snapshots.update("gestures", ges)
@@ -2357,19 +2397,10 @@ class ApplicationService:
                 # The auto-switch controller is cancelled during service
                 # shutdown.  Do not leave its root-owned hook running after
                 # the service has exited.
-                if process.returncode is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    await asyncio.shield(process.wait())
+                await asyncio.shield(self._terminate_process(process))
                 raise
             except TimeoutError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
+                await self._terminate_process(process)
                 return f"{transition} script timed out"
             if process.returncode == 0:
                 return f"{transition} script completed"

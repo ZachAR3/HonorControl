@@ -208,6 +208,11 @@ class TestDecodeResult:
         with pytest.raises(ClientError):
             _decode_result(data)
 
+    def test_decode_invalid_details_is_protocol_error(self) -> None:
+        data = {"status": ("s", "success"), "details": ("s", "not-a-dict")}
+        with pytest.raises(ClientError):
+            _decode_result(data)
+
 
 class TestDecodeSnapshot:
     """Verify SystemSnapshot wire decoding."""
@@ -243,7 +248,7 @@ class TestDecodeSnapshot:
                     status=BatteryStatusKind.DISCHARGING,
                 ),
                 power=PowerSnapshot(available=True, applied_profile="balanced"),
-                gestures=GesturesSnapshot(firmware_writes_qualified=True),
+                gestures=GesturesSnapshot(firmware_settings_supported=True),
             )
         )
         snap = _decode_snapshot(data)
@@ -256,7 +261,16 @@ class TestDecodeSnapshot:
         assert snap.service.fan_recovery_required is True
         assert snap.service.power_recovery_required is True
         assert snap.service.controller_restart_counts == {"refresh": 2}
-        assert snap.gestures.firmware_writes_qualified is True
+        assert snap.gestures.firmware_settings_supported is True
+
+    def test_decode_invalid_firmware_setting_is_protocol_error(self) -> None:
+        data = {
+            "gestures": {
+                "firmware_settings": {"edge_volume": "1"},
+            }
+        }
+        with pytest.raises(ClientError):
+            _decode_snapshot(data)
 
     def test_decode_editable_power_profile(self) -> None:
         profile = PowerProfileEntry(
