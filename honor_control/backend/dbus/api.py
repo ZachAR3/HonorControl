@@ -212,6 +212,13 @@ class ControlInterface(DbusInterfaceCommonAsync, interface_name=IFACE_ROOT):
         snap = await self._app.get_snapshot()
         return snapshot_to_vardict(snap)
 
+    @dbus_method_async(
+        flags=DbusUnprivilegedFlag, input_signature="u", result_signature="u"
+    )
+    async def RequestFastRefresh(self, seconds: int) -> int:
+        """Hold a short fast-polling lease while a frontend is in the foreground."""
+        return await self._app.request_fast_refresh(seconds)
+
     @dbus_method_async(flags=DbusUnprivilegedFlag, result_signature="a{sv}")
     async def RunChecks(self) -> dict:
         """Run diagnostic checks and return results."""

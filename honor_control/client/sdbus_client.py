@@ -214,6 +214,10 @@ class SdbusClient(ControlClient):
         result = await self._call_method("GetSnapshot")
         return _decode_snapshot(result)
 
+    async def request_fast_refresh(self, seconds: int) -> int:
+        """Hold (or renew) the service's fast-polling lease for ``seconds``."""
+        return int(await self._call_method("RequestFastRefresh", int(seconds)))
+
     async def run_checks(self) -> dict[str, Any]:
         return await self._call_method("RunChecks")
 
@@ -446,6 +450,9 @@ class FakeClient:
 
     async def get_snapshot(self) -> SystemSnapshot:
         return await self._app.get_snapshot()
+
+    async def request_fast_refresh(self, seconds: int) -> int:
+        return await self._app.request_fast_refresh(seconds)
 
     async def run_checks(self) -> dict[str, Any]:
         return await self._app.run_checks()

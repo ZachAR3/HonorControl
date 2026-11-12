@@ -488,6 +488,9 @@ class TestPowerMutation:
         monkeypatch.setattr(
             "honor_control.backend.application.AUTO_SWITCH_POLL_SECONDS", 0.05
         )
+        monkeypatch.setattr(
+            "honor_control.backend.application.AUTO_SWITCH_IDLE_POLL_SECONDS", 0.05
+        )
         svc = _make_service(tmp_path)
 
         async def scenario() -> None:
@@ -532,6 +535,11 @@ class TestPowerMutation:
         slow hook is still pending.
         """
         _allow_test_hook(monkeypatch)
+        # No foreground lease is held here, so pin the idle cadence to the
+        # fast one this test's timeout was written for.
+        monkeypatch.setattr(
+            "honor_control.backend.application.AUTO_SWITCH_IDLE_POLL_SECONDS", 2.0
+        )
         svc = _make_service(tmp_path)
 
         lock_held_during_hook: list[bool] = []
@@ -780,6 +788,10 @@ class TestPowerMutation:
             monkeypatch.setattr(svc._hw, "apply_power_profile", fail_apply)  # noqa: SLF001
             monkeypatch.setattr(
                 "honor_control.backend.application.AUTO_SWITCH_POLL_SECONDS",
+                0.01,
+            )
+            monkeypatch.setattr(
+                "honor_control.backend.application.AUTO_SWITCH_IDLE_POLL_SECONDS",
                 0.01,
             )
             monkeypatch.setattr(
@@ -1573,3 +1585,46 @@ class TestSafetyRecoveryHealth:
             assert svc.config_store.state.power.recovery_required is False
 
         asyncio.run(scenario())
+
+
+class TestForegroundAwarePolling:
+    """The service polls fast only while a foreground client holds a lease."""
+
+    @pytest.mark.asyncio
+    async def test_lease_is_clamped_and_releasable(self) -> None:
+        from honor_control.backend import application as app_module
+
+        svc = _make_service()
+        assert svc.fast_refresh_active is False
+        granted = await svc.request_fast_refresh(10_000)
+        assert granted == app_module.FAST_REFRESH_LEASE_MAX_SECONDS
+        assert svc.fast_refresh_active is True
+        assert await svc.request_fast_refresh(0) == 0
+        assert svc.fast_refresh_active is False
+
+    @pytest.mark.asyncio
+    async def test_lease_expires_without_renewal(self, monkeypatch) -> None:
+        from honor_control.backend import application as app_module
+
+        svc = _make_service()
+        now = [1000.0]
+        monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
+        await svc.request_fast_refresh(15)
+        assert svc.fast_refresh_active is True
+        now[0] += 15.1
+        assert svc.fast_refresh_active is False
+
+    @pytest.mark.asyncio
+    async def test_idle_sleep_uses_slow_cadence_and_wakes_on_lease(self) -> None:
+        svc = _make_service()
+        sleeper = asyncio.create_task(svc._sleep_for_cadence(0.01, 30.0))  # noqa: SLF001
+        await asyncio.sleep(0.05)
+        assert not sleeper.done()  # idle: not woken at the fast cadence
+        await svc.request_fast_refresh(15)
+        await asyncio.wait_for(sleeper, timeout=1.0)  # foreground wakes it at once
+
+    @pytest.mark.asyncio
+    async def test_leased_sleep_uses_fast_cadence(self) -> None:
+        svc = _make_service()
+        await svc.request_fast_refresh(15)
+        await asyncio.wait_for(svc._sleep_for_cadence(0.01, 30.0), timeout=1.0)  # noqa: SLF001

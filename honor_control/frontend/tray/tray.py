@@ -28,8 +28,10 @@ from honor_control.frontend.single_instance import (
     frontend_handoff_requested,
 )
 
-#: Refresh interval (ms) for the tooltip + menu state.
-TRAY_REFRESH_MS = 5000
+#: Safety-net refresh interval (ms) for the tooltip + menu state.  The tray is
+#: a background surface: the service's StateChanged signal drives its updates,
+#: so this timer only has to recover from a missed signal.
+TRAY_REFRESH_MS = 60000
 
 
 def _load_icon() -> QIcon:

@@ -17,6 +17,9 @@ class ControlProxy(DbusInterfaceCommonAsync, interface_name=IFACE_ROOT):
     @dbus_method_async(result_signature="a{sv}")
     async def GetSnapshot(self) -> dict: ...
 
+    @dbus_method_async(input_signature="u", result_signature="u")
+    async def RequestFastRefresh(self, seconds: int) -> int: ...
+
     @dbus_method_async(result_signature="a{sv}")
     async def RunChecks(self) -> dict: ...
 

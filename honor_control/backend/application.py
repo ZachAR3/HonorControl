@@ -98,6 +98,16 @@ FAN_SPEED_WRITE_HYSTERESIS = 3
 FAN_RECOVERY_WAIT_SECONDS = 10.0
 FAN_CURVE_POLL_SECONDS = 2.0
 AUTO_SWITCH_POLL_SECONDS = 2.0
+# Polling cadence is foreground-aware.  A frontend that is visible and focused
+# holds a short "fast refresh" lease (renewed while it stays in the foreground);
+# without one the service drops to the slow cadence so an idle laptop is not
+# woken every couple of seconds just to keep an unseen snapshot fresh.  The fan
+# curve loop is deliberately NOT lease-driven: thermal control must not depend
+# on whether a window happens to be open.
+REFRESH_FAST_SECONDS = 5.0
+REFRESH_IDLE_SECONDS = 60.0
+AUTO_SWITCH_IDLE_POLL_SECONDS = 5.0
+FAST_REFRESH_LEASE_MAX_SECONDS = 30
 AUTO_SWITCH_MAX_RETRY_SECONDS = 60.0
 # AC/battery transitions (which apply a power profile and may run a root hook)
 # require this many consecutive consistent AC observations, so one glitchy
@@ -173,6 +183,9 @@ class ApplicationService:
         self._start_time = time.time()
         self._mutation_lock = asyncio.Lock()
         self._closing = False
+        # time.monotonic() deadline of the current fast-refresh lease (0 = none).
+        self._fast_refresh_until = 0.0
+        self._fast_refresh_wakeup = asyncio.Event()
         self._shutdown_complete = False
         self._manual_ttl_seconds = 0
         self._fan_fail_safe_error = ""
@@ -289,6 +302,38 @@ class ApplicationService:
     async def get_snapshot(self) -> SystemSnapshot:
         """Return the current system snapshot (cached, no hardware I/O)."""
         return self._snapshots.snapshot
+
+    @property
+    def fast_refresh_active(self) -> bool:
+        """Return whether a foreground client currently holds a fast lease."""
+        return time.monotonic() < self._fast_refresh_until
+
+    async def request_fast_refresh(self, seconds: int) -> int:
+        """Grant (or renew) a fast-refresh lease; return the granted seconds.
+
+        Called by a frontend while it is visible and focused.  The lease is
+        clamped and simply expires if the client stops renewing it (hidden,
+        unfocused, crashed), so nothing can pin the service at the fast
+        cadence.  ``0`` releases the lease immediately.
+        """
+        granted = max(0, min(int(seconds), FAST_REFRESH_LEASE_MAX_SECONDS))
+        was_active = self.fast_refresh_active
+        self._fast_refresh_until = time.monotonic() + granted if granted else 0.0
+        if granted and not was_active:
+            # Coming to the foreground: refresh now instead of after the
+            # remainder of a long idle sleep.
+            self._fast_refresh_wakeup.set()
+        return granted
+
+    async def _sleep_for_cadence(self, fast: float, idle: float) -> None:
+        """Sleep one polling period, waking early when a lease is granted."""
+        if self.fast_refresh_active:
+            await asyncio.sleep(fast)
+            return
+        try:
+            await asyncio.wait_for(self._fast_refresh_wakeup.wait(), timeout=idle)
+        except TimeoutError:
+            pass
 
     async def get_api_version(self) -> int:
         """Return the D-Bus API version."""
@@ -2210,7 +2255,8 @@ class ApplicationService:
 
     async def _refresh_loop(self) -> None:
         while True:
-            await asyncio.sleep(5)
+            await self._sleep_for_cadence(REFRESH_FAST_SECONDS, REFRESH_IDLE_SECONDS)
+            self._fast_refresh_wakeup.clear()
             await self._refresh_all()
 
     async def _auto_switch_loop(self) -> None:
@@ -2223,7 +2269,11 @@ class ApplicationService:
         pending_count = 0
         unknown_ac_logged_at = 0.0
         while True:
-            await asyncio.sleep(AUTO_SWITCH_POLL_SECONDS)
+            await asyncio.sleep(
+                AUTO_SWITCH_POLL_SECONDS
+                if self.fast_refresh_active
+                else AUTO_SWITCH_IDLE_POLL_SECONDS
+            )
             state = self._config.state.power.auto_switch
             if not state.enabled:
                 last_ac = None

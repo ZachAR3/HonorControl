@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QSettings, QSize, QTimer
+from PySide6.QtCore import QEvent, QSettings, QSize, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,6 +58,11 @@ PAGES: list[tuple[type[PageBase], str, str]] = [
 
 #: Refresh interval (ms) for the periodic snapshot poll.
 REFRESH_INTERVAL_MS = 5000
+#: Fast-polling lease requested from the service on every foreground tick.  It
+#: is longer than the tick so one late timer never drops the lease, and short
+#: enough that the service slows down promptly once the window is hidden,
+#: unfocused or gone.
+FOREGROUND_LEASE_SECONDS = 15
 OFFLINE_MESSAGE = (
     "Honor Control service is not running. "
     "Start it with: sudo systemctl start honor-control.service"
@@ -112,8 +117,11 @@ class MainWindow(QMainWindow):
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
-        self._timer.timeout.connect(self.controller.refresh)
-        self._timer.start()
+        self._timer.timeout.connect(self._foreground_tick)
+        # Polling runs only while the window is visible and focused; in the
+        # background the service's StateChanged signal keeps the pages current.
+        self._foreground = False
+        self.controller.connection_changed.connect(self._on_connection_for_polling)
 
         self.statusBar().setSizeGripEnabled(False)
         self.footer_identity = QLabel(f"Honor Control {__version__}")
@@ -388,8 +396,61 @@ class MainWindow(QMainWindow):
         self._shutdown = True
         self._settings.setValue("window/geometry", self.saveGeometry())
         self._timer.stop()
+        if self._foreground:
+            self._foreground = False
+            self.controller.request_fast_refresh(0)
         self.tray.shutdown()
         self.controller.stop()
+
+    # Foreground-aware polling
+
+    def _is_foreground(self) -> bool:
+        return (
+            not self._shutdown
+            and self.isVisible()
+            and not self.isMinimized()
+            and self.isActiveWindow()
+        )
+
+    def _foreground_tick(self) -> None:
+        self.controller.request_fast_refresh(FOREGROUND_LEASE_SECONDS)
+        self.controller.refresh()
+
+    def _update_polling(self) -> None:
+        """Start fast polling when focused; stop it and release the lease otherwise."""
+        if not hasattr(self, "_foreground"):
+            return  # event delivered while the window is still being built
+        foreground = self._is_foreground()
+        if foreground == self._foreground:
+            return
+        self._foreground = foreground
+        if foreground:
+            self._foreground_tick()
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self.controller.request_fast_refresh(0)
+
+    def _on_connection_for_polling(self, connected: bool) -> None:
+        # A lease requested before the worker connected was dropped; renew it.
+        if connected and self._foreground:
+            self._foreground_tick()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.ActivationChange,
+            QEvent.Type.WindowStateChange,
+        ):
+            self._update_polling()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._update_polling()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._update_polling()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._settings.setValue("window/geometry", self.saveGeometry())

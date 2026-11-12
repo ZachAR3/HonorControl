@@ -950,6 +950,44 @@ class TestIntegratedTray:
         assert window._shutdown is False  # noqa: SLF001
         window._shutdown_application()  # noqa: SLF001
 
+    def test_window_polls_only_while_foreground(self, qapp, monkeypatch) -> None:
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.gui.main_window import (
+            FOREGROUND_LEASE_SECONDS,
+            MainWindow,
+        )
+
+        leases: list[int] = []
+        refreshes: list[int] = []
+        monkeypatch.setattr(GuiController, "start", lambda _self: None)
+        monkeypatch.setattr(GuiController, "stop", lambda _self: None)
+        monkeypatch.setattr(
+            GuiController,
+            "request_fast_refresh",
+            lambda _self, seconds: leases.append(seconds),
+        )
+        monkeypatch.setattr(GuiController, "refresh", lambda _self: refreshes.append(1))
+        foreground = {"value": False}
+        monkeypatch.setattr(
+            MainWindow, "_is_foreground", lambda _self: foreground["value"]
+        )
+        window = MainWindow(bus_kind="session")
+        window._update_polling()  # noqa: SLF001
+        assert window._timer.isActive() is False  # noqa: SLF001
+        assert leases == []
+
+        foreground["value"] = True
+        window._update_polling()  # noqa: SLF001
+        assert window._timer.isActive() is True  # noqa: SLF001
+        assert leases == [FOREGROUND_LEASE_SECONDS]
+        assert refreshes == [1]
+
+        foreground["value"] = False
+        window._update_polling()  # noqa: SLF001
+        assert window._timer.isActive() is False  # noqa: SLF001
+        assert leases == [FOREGROUND_LEASE_SECONDS, 0]
+        window._shutdown_application()  # noqa: SLF001
+
     def test_window_shell_compacts_at_supported_narrow_width(
         self, qapp, monkeypatch
     ) -> None:

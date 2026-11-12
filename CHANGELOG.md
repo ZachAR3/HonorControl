@@ -34,6 +34,14 @@
   `ZachAR3/HonorControl`) in the systemd unit and polkit policy, and simplified
   the README to the supported platform, install, usage, and development basics.
 
+### Performance
+
+- Polling is foreground-aware. A visible, focused window holds a short
+  fast-refresh lease (new unprivileged `RequestFastRefresh` D-Bus method);
+  without one the service refreshes every 60 s instead of 5 s and checks AC
+  state every 5 s instead of 2 s, the window stops polling, and the tray
+  falls back to a 60 s safety-net refresh. The fan curve loop is unaffected.
+
 ### Fixed
 
 - Battery threshold writes choose an order that keeps the driver's hysteresis

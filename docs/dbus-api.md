@@ -13,6 +13,7 @@ Object path: `/org/honorlinux/Control1`
 | `GetApiVersion` | `() -> u` | D-Bus API version (currently 1) |
 | `GetSchemaVersion` | `() -> u` | Snapshot schema version (currently 6) |
 | `GetSnapshot` | `() -> a{sv}` | Current system snapshot |
+| `RequestFastRefresh` | `(u) -> u` | Hold a fast-polling lease (max 30 s) while a frontend is in the foreground; returns the granted seconds, `0` releases it |
 | `RunChecks` | `() -> a{sv}` | Run diagnostic checks |
 
 #### Battery (active local user)

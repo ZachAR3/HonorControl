@@ -265,6 +265,31 @@ class GuiWorker(QThread):
         self._spawn(_do())
         return None
 
+    def request_fast_refresh(self, seconds: int) -> None:
+        """Renew (or with ``0`` release) the service's fast-polling lease.
+
+        Best effort and silent: an older service without the method, or an
+        offline one, must never surface an error just because the window
+        gained focus.
+        """
+        if self._loop is None or self._loop.is_closed() or not self._loop.is_running():
+            return
+
+        def _schedule() -> None:
+            client = self._client
+            if client is None or not client.connected:
+                return
+
+            async def _do() -> None:
+                try:
+                    await client.request_fast_refresh(seconds)
+                except ClientError as exc:
+                    log.debug("fast-refresh lease not granted: %s", exc.message)
+
+            self._spawn(_do())
+
+        self._loop.call_soon_threadsafe(_schedule)
+
 
 class GuiController(QObject):
     """Qt-facing controller that owns the worker thread.
@@ -317,6 +342,10 @@ class GuiController(QObject):
     def refresh(self) -> None:
         """Request a fresh snapshot from the service."""
         self._worker.request_snapshot()
+
+    def request_fast_refresh(self, seconds: int) -> None:
+        """Tell the service whether this frontend is in the foreground."""
+        self._worker.request_fast_refresh(seconds)
 
     def call(self, operation_id: str, method: str, *args) -> bool:
         """Submit an operation.  Returns False if a duplicate is pending."""

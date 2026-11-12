@@ -72,6 +72,7 @@ UNPRIVILEGED_METHODS = frozenset(
         "GetApiVersion",
         "GetSchemaVersion",
         "GetSnapshot",
+        "RequestFastRefresh",
         "RunChecks",
     }
 )
