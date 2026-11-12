@@ -84,7 +84,10 @@ class MainWindow(QMainWindow):
         )
         self._quitting = False
         self._shutdown = False
-        self._tray_notice_shown = False
+        # Shown once per installed version (first close after install/update).
+        self._tray_notice_shown = (
+            str(self._settings.value("tray/notice_version", "") or "") == __version__
+        )
 
         self.setWindowTitle("Honor Control")
         self.setObjectName("HonorWindow")
@@ -551,6 +554,8 @@ class MainWindow(QMainWindow):
                     3000,
                 )
                 self._tray_notice_shown = True
+                self._settings.setValue("tray/notice_version", __version__)
+                self._settings.sync()
             return
         self._shutdown_application()
         event.accept()

@@ -958,6 +958,47 @@ class TestIntegratedTray:
         assert window._shutdown is False  # noqa: SLF001
         window._shutdown_application()  # noqa: SLF001
 
+    def test_tray_notice_shown_once_per_version(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        from PySide6.QtCore import QSettings
+
+        from honor_control import __version__
+        from honor_control.frontend.gui.controller import GuiController
+        from honor_control.frontend.gui.main_window import MainWindow
+        from honor_control.frontend.tray.tray import HonorTray
+
+        monkeypatch.setattr(GuiController, "start", lambda _self: None)
+        monkeypatch.setattr(GuiController, "stop", lambda _self: None)
+        monkeypatch.setattr(HonorTray, "available", property(lambda _self: True))
+        shown: list[str] = []
+        monkeypatch.setattr(
+            "PySide6.QtWidgets.QSystemTrayIcon.showMessage",
+            lambda _self, title, *_a: shown.append(title),
+        )
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(
+            QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path)
+        )
+        QSettings().remove("tray/notice_version")
+
+        def close_once() -> None:
+            window = MainWindow(bus_kind="session")
+            window._close_to_tray = True  # noqa: SLF001
+            window.show()
+            window.close()
+            qapp.processEvents()
+            window._shutdown_application()  # noqa: SLF001
+
+        close_once()
+        close_once()
+        assert len(shown) == 1
+        assert QSettings().value("tray/notice_version") == __version__
+        QSettings().setValue("tray/notice_version", "older")
+        close_once()
+        assert len(shown) == 2
+        QSettings().remove("tray/notice_version")
+
     def test_window_polls_only_while_foreground(self, qapp, monkeypatch) -> None:
         from honor_control.frontend.gui.controller import GuiController
         from honor_control.frontend.gui.main_window import (
